@@ -81,3 +81,23 @@ existent toujours. Les tests des sources à clé sont ignorés tant que la clé 
 |---|---|---|
 | `TWELVEDATA_API_KEY` | cours des actions (principale) | https://twelvedata.com/register |
 | `FINNHUB_API_KEY` | cours en secours, actus générales et par action | https://finnhub.io/register |
+| `DISCORD_WEBHOOK_URL` | notifications sur ton salon Discord | Paramètres du salon > Intégrations > Webhooks |
+
+## Notifications Discord
+
+Dès que `DISCORD_WEBHOOK_URL` est définie, le serveur envoie sur le salon :
+
+| Notification | Quand | Réglage |
+|---|---|---|
+| Point du matin (Bourse de NY, agenda économique du jour, crypto, actions suivies, change, météo et air) | chaque jour à 9 h heure de New York, 30 min avant l'ouverture | `JARVIS_WATCHLIST_*`, `JARVIS_CITY` |
+| Variation forte d'une valeur suivie | vérifié toutes les 5 min, une alerte par palier et par jour (actions : pendant la séance) | `JARVIS_MOVE_ALERT_PCT` |
+| Séisme fort dans le monde | vérifié toutes les 5 min | `JARVIS_QUAKE_MIN_MAGNITUDE` |
+| Nouvelles actus de marché et des actions suivies | vérifié toutes les 15 min, 10 au plus par envoi | `JARVIS_WATCHLIST_STOCKS` (actus par action : clé Finnhub) |
+
+Chaque message porte la mention des sources et signale une valeur qui n'est plus à jour.
+Au premier lancement, les séismes et actus déjà publiés sont mémorisés sans être envoyés.
+
+- `POST /api/notify/test` envoie un message de test.
+- `POST /api/notify/brief` envoie le point du matin tout de suite.
+- `GET /api/notify/brief/preview` montre le point du matin sans l'envoyer.
+- `JARVIS_NOTIFICATIONS=off` coupe tous les envois.

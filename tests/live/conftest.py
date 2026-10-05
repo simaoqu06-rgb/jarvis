@@ -36,4 +36,5 @@ def needs_key(name):
 
 def pytest_collection_modifyitems(items):
     for item in items:
-        item.add_marker(pytest.mark.live)
+        if "live" in item.path.parts:  # ce hook voit tous les tests, pas seulement ceux de ce dossier
+            item.add_marker(pytest.mark.live)

@@ -2,11 +2,24 @@
 
 Lancer : uvicorn app.main:app --reload
 """
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+
 from fastapi import FastAPI, HTTPException, Query
 
-from app import needs
+from app import alerts, needs, scheduler
+from app.notify import discord
 
-app = FastAPI(title="JARVIS", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    tasks = scheduler.start()
+    yield
+    for task in tasks:
+        task.cancel()
+
+
+app = FastAPI(title="JARVIS", version="0.2.0", lifespan=lifespan)
 
 
 def _list(value: str) -> list[str]:
@@ -134,3 +147,28 @@ async def wikipedia(topic: str):
 @app.get("/api/books")
 async def books(q: str):
     return (await needs.books(q)).to_dict()
+
+
+async def _send(text: str) -> dict:
+    try:
+        return {"sent": await discord.send(text)}
+    except discord.DiscordError as exc:
+        raise HTTPException(503, f"Envoi Discord impossible : {exc}")
+
+
+@app.post("/api/notify/test")
+async def notify_test():
+    """Envoie un message de test sur le salon Discord."""
+    return await _send("✅ JARVIS est bien connecté à ce salon. Les alertes arriveront ici.")
+
+
+@app.post("/api/notify/brief")
+async def notify_brief():
+    """Envoie tout de suite le point du matin sur Discord."""
+    return await _send(await alerts.morning_brief(datetime.now(timezone.utc)))
+
+
+@app.get("/api/notify/brief/preview")
+async def brief_preview():
+    """Montre le point du matin sans l'envoyer."""
+    return {"text": await alerts.morning_brief(datetime.now(timezone.utc))}
