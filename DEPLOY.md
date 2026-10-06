@@ -10,18 +10,37 @@ L'installation passe par Docker et marche pareil sur n'importe quel serveur Linu
 
 ## 1. Créer le serveur (exemple : Hetzner)
 
-1. Crée un compte sur https://www.hetzner.com/cloud.
-2. « Add Server » : image **Ubuntu 24.04**, le type **CX23** (2 vCPU, 4 Go, environ 7 € TTC par mois avec l'IPv4) en gardant l'IPv4 publique cochée, une région
-   en Europe (Falkenstein, Nuremberg ou Helsinki).
-3. Ajoute ta clé SSH si tu en as une, sinon Hetzner t'envoie un mot de passe root par mail.
-4. Note l'adresse IP du serveur.
+Crée un compte sur https://www.hetzner.com/cloud, puis « Add Server » avec :
+
+| Option | Choix | Pourquoi |
+|---|---|---|
+| Type | Cost-Optimized, x86, **CX23** (2 vCPU, 4 Go, 40 Go) | JARVIS utilise ~45 Mo de mémoire. Si CX23 est indisponible : CAX11 (Arm, même image Docker) |
+| Location | Nuremberg ou Falkenstein | les plus proches de Lyon, même prix |
+| Image | **Ubuntu 26.04** | LTS supportée jusqu'en 2031, Docker la supporte |
+| Networking | IPv4 **et** IPv6 cochées | GitHub et plusieurs API n'ont pas d'IPv6 |
+| SSH key | ta clé publique | ne peut plus être ajoutée depuis la console après coup |
+| Volumes, réseau privé, placement, labels | rien | inutile |
+| Firewall | créer « jarvis » : entrant TCP 22 + ICMP seulement | aucun port de JARVIS n'est exposé |
+| Backups | non (activables plus tard) | code sur GitHub, état reconstruit tout seul |
+| Cloud config | le bloc ci-dessous | installe Docker au premier démarrage |
+| Name | jarvis | |
+
+```yaml
+#cloud-config
+package_update: true
+package_upgrade: true
+runcmd:
+  - curl -fsSL https://get.docker.com | sh
+```
+
+Note l'adresse IPv4 du serveur une fois créé.
 
 ## 2. Installer Docker et JARVIS
 
 Connecte-toi (`ssh root@IP_DU_SERVEUR`) puis :
 
 ```bash
-curl -fsSL https://get.docker.com | sh
+docker --version   # sinon : curl -fsSL https://get.docker.com | sh
 git clone https://github.com/simaoqu06-rgb/jarvis.git
 cd jarvis
 cp .env.example .env
