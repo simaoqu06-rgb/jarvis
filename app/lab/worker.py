@@ -5,6 +5,11 @@ Toutes les ~10 min :
    créneaux crypto dont l'horizon de 24 h est passé ;
 2. rejeu historique, par morceaux : gros morceaux la nuit (22 h - 8 h à Paris) et le week-end,
    un seul jour à la fois pendant la séance US pour que le serveur reste réactif.
+3. Labo 2, chaque étape isolée (une erreur n'arrête pas les suivantes), battement entre deux :
+   régimes de marché, mouvements du jour et fiches catalyseurs (base seule), actus Finnhub des fiches
+   (jamais pendant la séance US), file des règles soumises puis validation, statistiques en cache,
+   résumé du soir (après 22 h 30 à Paris). Budgets par période dans LAB2_BUDGET : gros la nuit et
+   le week-end, minimes pendant la séance.
 Le rejeu couvre JARVIS_LAB_REPLAY_DAYS séances (504 ≈ 2 ans) avant le premier lancement du worker ;
 le direct prend le relais à partir de ce jour-là. JARVIS_LAB_ENABLED=off met le worker en veille.
 """
@@ -15,11 +20,16 @@ import time as clock
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from app.lab import catalysts as CAT
 from app.lab import collector as CO
 from app.lab import generator as G
 from app.lab import heartbeat
+from app.lab import regime as REG
 from app.lab import runner as R
-from app.lab.db import LabDB
+from app.lab import stats as STATS
+from app.lab import summary as SUM
+from app.lab import validator as V
+from app.lab.db import LabDB, now_iso
 from app.sources import alpaca
 
 log = logging.getLogger("app.lab.worker")
@@ -28,6 +38,13 @@ TICK_SECONDS = 600
 CHUNK_DAYS = {"nuit": 20, "jour": 4, "seance": 1}
 MAX_LIVE_DAYS_PER_TICK = 5
 KEY_WARNING_SECONDS = 3600
+# Labo 2 : jours de mouvements calculés, appels Finnhub, règles validées et âge maximal des
+# statistiques en cache (secondes), par période.
+LAB2_BUDGET = {
+    "nuit": {"moves_days": 30, "news_calls": 40, "rules": 3, "stats_age": 3600},
+    "jour": {"moves_days": 5, "news_calls": 10, "rules": 1, "stats_age": 3 * 3600},
+    "seance": {"moves_days": 2, "news_calls": 0, "rules": 0, "stats_age": 6 * 3600},
+}
 _key_warned_at: float | None = None
 
 
@@ -162,6 +179,70 @@ async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, tra
         except Exception as exc:
             log.warning("Labo : rejeu %s en échec : %s: %s", market, type(exc).__name__, exc)
         heartbeat.beat()
+    report["labo2"] = await lab2(db, now, collect)
+    return report
+
+
+def trades_signature(db: LabDB) -> list:
+    row = db.conn.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM trades").fetchone()
+    return [row[0], row[1]]
+
+
+def refresh_stats(db: LabDB, now: datetime, max_age: float, force: bool = False) -> dict | None:
+    """Recalcule les statistiques de la version en cours si les trades ont changé et que le cache a
+    plus de `max_age` secondes (ou `force`). Renvoie les statistiques à jour, ou None si inchangées."""
+    sig = trades_signature(db)
+    last = db.get("stats", "signature")
+    at = db.get("stats", "at", 0) or 0
+    if not force and (sig == last or now.timestamp() - at < max_age):
+        return None
+    version = V.current_version(db.conn)
+    data = STATS.compute(db.conn, version=version) if version else STATS.compute(db.conn)
+    with db.transaction():
+        STATS.store(db.conn, "courant", data, sig[0], now_iso())
+        db.set("stats", "signature", sig)
+        db.set("stats", "at", now.timestamp())
+    return data
+
+
+async def lab2(db: LabDB, now: datetime, collect: bool = True) -> dict:
+    """Étapes du Labo 2, chacune isolée, dans le budget de la période."""
+    budget = LAB2_BUDGET[period(now)]
+    report: dict = {}
+    fresh: dict = {}
+
+    async def step(name: str, fn):
+        try:
+            result = fn()
+            if asyncio.iscoroutine(result):
+                result = await result
+            report[name] = result if not isinstance(result, (list, dict)) or name != "stats" else "à jour"
+            return result
+        except Exception as exc:
+            log.warning("Labo : étape %s en échec : %s: %s", name, type(exc).__name__, exc)
+            report[name] = f"échec : {type(exc).__name__}"
+            return None
+        finally:
+            heartbeat.beat()
+
+    await step("regimes", lambda: sum(REG.refresh(db, m) for m in R.MARKETS))
+    await step("mouvements", lambda: CAT.backfill_moves(db, now, budget["moves_days"]))
+    if collect and not CO.CAL.session_open(now):
+        await step("actus", lambda: CAT.fetch_news(db, now, budget["news_calls"]))
+    await step("file_regles", lambda: V.ingest_queue(db))
+    await step("regles", lambda: len(V.process_pending(db, budget["rules"])))
+    summary_day = SUM.due(now, db.get("summary", "last_day"))
+    stats = await step("stats", lambda: refresh_stats(db, now, budget["stats_age"], force=bool(summary_day)))
+    if stats:
+        fresh["stats"] = stats
+    if summary_day:
+        def build_summary():
+            data = SUM.build(db.conn, summary_day, fresh.get("stats") or STATS.cached(db.conn))
+            with db.transaction():
+                SUM.store(db, data, SUM.text(data))
+                db.set("summary", "last_day", summary_day)
+            return SUM.size(data)
+        await step("resume", build_summary)
     return report
 
 

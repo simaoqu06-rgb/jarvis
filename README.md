@@ -163,8 +163,8 @@ de `settings.py`, via `service.plan_from_bars`) et les journalise dans SQLite (`
 - **Plans** : actions à 9 h 10 (New York) sur des bougies de 15 min, crypto toutes les 4 h (0 h, 4 h…
   20 h UTC) sur des bougies d'1 h ; longs seulement pour l'instant (colonne `side` prête pour les
   shorts). Le plan ne voit que les bougies closes à l'heure de décision. Catalyseur non rejoué
-  (`context.catalyst_replayed = false`) : l'historique des actus arrivera avec le Labo 2. Délais
-  rejoués sur les 1 500 derniers départs.
+  (`context.catalyst_replayed = false`) : les actus sont collectées par les fiches catalyseurs du
+  Labo 2 mais n'entrent pas encore dans la note. Délais rejoués sur les 1 500 derniers départs.
 - **Exécution simulée** sur les bougies de 5 min qui suivent : ordre limité à l'entrée (exécuté s'il
   est traversé d'un pas de cotation, ou à l'ouverture s'il est déjà au marché), sorties 1/3 au TP1,
   1/3 au TP2, 1/3 au TP3, stop remonté à l'entrée après le TP1 ; stop prioritaire sur une bougie
@@ -184,8 +184,54 @@ de `settings.py`, via `service.plan_from_bars`) et les journalise dans SQLite (`
   pour l'entrée au marché, le stop et la sortie à l'horizon.
 
 `GET /api/lab/status` ou `!labo` : avancement du rejeu, nombre de trades par marché et origine,
-dernier jour en direct, taille de la base. Les statistiques arrivent avec le Labo 2.
+dernier jour en direct, taille de la base, et les chiffres clés du Labo 2 (espérance en R avec son
+intervalle de confiance, fiches catalyseurs, règles en attente et testées).
 Mise en route et vérification des sources : [DEPLOY.md](DEPLOY.md#labo-de-performance).
+
+### Labo 2 : mesures et validation
+
+Tout tourne dans le worker, sans jeton d'IA ; rien ici ne change la méthode en direct.
+
+- **Statisticien** (`app/lab/stats.py`) : sur les trades déclenchés, en R nets de coûts : espérance
+  avec intervalle de confiance à 95 % (erreur type « en grappes par jour » : les trades d'un même jour
+  se ressemblent), taux de déclenchement, réussite, TP1 avant le stop, TP2, TP3, délais tenus (part
+  des TP touchés au plus tard au délai médian prévu par le plan, ~50 % si le plan est bien calibré),
+  calibration de la note (une note de 8 bat-elle une note de 7 ?), pire série de pertes, plus forte
+  baisse cumulée. Découpages par marché, setup, tranche de note, heure du plan, jour de la semaine,
+  version de méthode, origine (rejeu / direct), **régime de marché** (SPY ou BTC au-dessus ou sous sa
+  MM 50 jours, volatilité 20 jours en tiers, calculé avec la seule clôture de la veille) et période
+  (20 derniers jours contre le reste). Une tranche de moins de 30 trades est marquée
+  « échantillon faible » ; une tranche n'est dite « dégradée » qu'à z ≤ -3,2 contre le reste de son
+  marché. **Capture du potentiel +10** : parmi les valeurs de l'univers du jour dont le plus haut a
+  dépassé l'ouverture d'au moins 8 % (l'ouverture et non la clôture de la veille : un ordre limité posé
+  avant l'ouverture ne capture jamais le gap), combien avaient un plan, un plan déclenché, un TP1.
+  Une passe en flux sur la table (≈ 2,6 s pour 200 000 trades), résultat gardé en cache par le worker.
+- **Résumé du soir** (`app/lab/summary.py`) : chaque jour après 22 h 30 à Paris (et 30 min après la
+  clôture NYSE), un JSON de moins de 8 Ko et quelques lignes : chiffres du jour et cumulés, tranches
+  qui se dégradent, mouvements +10 du jour avec leurs fiches catalyseurs, idées déjà rejetées.
+- **Validateur** (`app/lab/validator.py`) : une règle de filtre en JSON, par exemple
+  `{"nom": "…", "exclude": {"field": "context.rvol", "op": ">", "value": 5}, "markets": ["stock"]}`
+  (`keep` au lieu d'`exclude`, conditions `and` / `or` / `not`, opérateurs `> >= < <= == != in not_in
+  between is_null not_null`, `"value": "auto"` pour un seuil choisi sur la période d'ajustement). Les
+  champs sont ceux connus à l'heure du plan (`plan.…`, `context.…`, `composite`, `regime`…) ; les
+  résultats du trade sont refusés. Validation « walk-forward » sur 3 fenêtres chronologiques
+  (ajustement sur le passé, test sur les mois qui suivent, 1 jour d'embargo). Critères, tous
+  obligatoires : au moins 100 trades touchés en test, +0,05 R par trade en moyenne, meilleure dans 2
+  fenêtres sur 3, capture du potentiel +10 préservée, et p < 0,05 / n où n est le numéro de l'essai
+  (le seuil monte avec le nombre d'idées testées). Une règle déjà testée renvoie son verdict gardé.
+  v1 : filtres seulement ; les règles qui demanderaient de régénérer les plans viendront plus tard.
+  Les seuils sont dans la table `lab_config` (défauts dans le code) et ne changent que sur ton accord.
+- **Fiches catalyseurs** (`app/lab/catalysts.py`) : chaque mouvement d'environ ±8 % de l'univers du
+  jour (depuis l'ouverture ou la veille), avec l'amplitude réelle, le gap, l'heure de l'extrême, le
+  « départ » (première bougie de 5 min qui franchit le tiers de l'amplitude), le volume relatif des 30
+  premières minutes, le secteur, le mouvement du BTC pour la crypto ; et les actus Finnhub (~12 mois
+  de profondeur) avec leur heure exacte et leur position : avant l'ouverture, avant le départ,
+  pendant, après. Quelques contre-exemples (valeurs qui n'ont pas bougé) pour ne pas biaiser les
+  statistiques. Le type de catalyseur reste « à classer » (Labo 3). Crypto : pas encore de source
+  d'actus.
+- **Accès pour la routine du soir** : `GET /api/lab/summary`, `/api/lab/stats`, `/api/lab/catalysts`,
+  `/api/lab/rules` et `POST /api/lab/rules` (soumission seulement, le worker valide), protégés par
+  `JARVIS_LAB_API_KEY` (en-tête `X-Lab-Key`). Lecture seule sur la base.
 
 ## Commandes Discord
 
@@ -198,7 +244,7 @@ Mise en route et vérification des sources : [DEPLOY.md](DEPLOY.md#labo-de-perfo
 | `!propositions` | réglages proposés qui attendent ta réponse |
 | `!oui 3` / `!non 3` | approuver ou refuser la proposition 3 (ou les boutons) |
 | `!regle` | réglages actuels |
-| `!labo` | état du labo de performance (rejeu, trades simulés) |
+| `!labo` | état du labo de performance (rejeu, trades simulés, espérance, fiches, règles) |
 | `!aide` | liste des commandes |
 
 Le bot ne répond qu'aux comptes de `JARVIS_DISCORD_OWNER_ID`. Mise en place : [DEPLOY.md](DEPLOY.md).

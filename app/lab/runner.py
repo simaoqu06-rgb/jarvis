@@ -59,6 +59,12 @@ async def ensure_daily_range(db: LabDB, market: str, first_day: date, last_day: 
         symbols = await CO.stock_universe_symbols(db, now.date(), transport)
     else:
         symbols = await CO.crypto_universe_symbols(db, now.date(), transport)
+    # Indice de référence (SPY, BTC-USDT) toujours collecté pour le régime de marché (Labo 2) ; s'il
+    # n'est pas dans la liste des actifs (ETF signalé par Alpaca), il reste hors de l'univers du jour.
+    index = G.INDEX[market]
+    db.set("lab", f"index_only:{market}", None if index in symbols else index)
+    if index not in symbols:
+        symbols = [*symbols, index]
     await CO.ensure_daily(db, market, symbols, first_day - timedelta(days=CO.DAILY_HISTORY_DAYS),
                           last_day - timedelta(days=1), now, transport)
 

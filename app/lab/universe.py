@@ -98,14 +98,12 @@ def crypto_universe(daily: dict[str, list[dict]], day: date, top: int = CRYPTO_T
 
 def build(db: LabDB, market: str, day: date, save: bool = True) -> list[dict]:
     """Calcule l'univers du jour depuis la base (bougies journalières antérieures au jour) et l'enregistre."""
-    if market == "stock":
-        cutoff = CO.ny_midnight(day)
-        daily = db.daily_cross_section("stock", cutoff - 40 * 86400, cutoff)
-        rows = stock_universe(daily, day)
-    else:
-        cutoff = CO.utc_midnight(day)
-        daily = db.daily_cross_section("crypto", cutoff - 40 * 86400, cutoff)
-        rows = crypto_universe(daily, day)
+    cutoff = CO.ny_midnight(day) if market == "stock" else CO.utc_midnight(day)
+    daily = db.daily_cross_section(market, cutoff - 40 * 86400, cutoff)
+    index_only = db.get("lab", f"index_only:{market}")
+    if index_only:
+        daily.pop(index_only, None)  # collecté pour le régime seulement (pas dans la liste des actifs)
+    rows = stock_universe(daily, day) if market == "stock" else crypto_universe(daily, day)
     if save:
         db.replace_universe(market, day.isoformat(), rows)
     return rows
