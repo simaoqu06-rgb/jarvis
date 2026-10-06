@@ -144,3 +144,16 @@ def test_connexion_du_serveur_en_lecture_seule(env):
     db.conn.execute("INSERT INTO summaries VALUES ('2030-01-01', 'x', ?, 't')", (json.dumps({"version": None}),))
     assert SUM.latest(conn)["jour"] == "2030-01-01"
     conn.close()
+
+
+def test_corps_de_regle_lu_apres_la_cle_et_borne(env):
+    """Sans clé, le corps n'est jamais lu (401) ; avec la clé, au plus 16 Ko."""
+    _, client = env
+    big = {"nom": "x", "description": "a" * 50_000, "exclude": {"field": "composite", "op": "<", "value": 3}}
+    assert client.post("/api/lab/rules", json=big).status_code == 401
+    assert client.post("/api/lab/rules", headers=H, json=big).status_code == 413
+    assert client.post("/api/lab/rules", headers=H | {"Content-Type": "application/json"},
+                       content=b"[1, 2]").status_code == 422
+    assert client.post("/api/lab/rules", headers=H, content=b"{pas du json").status_code == 422
+    deep = b"[" * 10_000 + b"]" * 10_000
+    assert client.post("/api/lab/rules", headers=H, content=deep).status_code in (413, 422)

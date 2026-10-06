@@ -256,6 +256,9 @@ def _record(market: str, day: str, symbol: str, kind: str, st: dict, mv: dict | 
                "ouverture_ts": st["bounds"][0], "cloture_ts": st["bounds"][1]}
     if mv:
         signals["amplitude_veille_pct"] = mv["amplitude_veille_pct"]
+    # Le volume des 30 premières minutes n'est un signal « d'avant le mouvement » que si le départ
+    # vient après ces 30 minutes ; sinon il contient le mouvement lui-même.
+    signals["rvol30_avant_depart"] = start is None or start >= st["bounds"][0] + FIRST_MINUTES * 60
     return (market, day, symbol, kind, mv["direction"] if mv else None, mv["amplitude_pct"] if mv else None,
             st["gap_pct"], start, mv["extreme_ts"] if mv else None, signals, status, note)
 
@@ -368,7 +371,10 @@ async def fetch_news(db: LabDB, now: datetime, budget: int) -> dict:
             d = date.fromisoformat(day)
             report["appels"] += 1
             items = await _call(finnhub.company_news_between, symbol, d - timedelta(days=2), d + timedelta(days=1))
-        except SourceError as exc:
+            news = select_news(items, sig.get("ouverture_ts") or 0, start_ts, extreme_ts, sig.get("cloture_ts") or 0)
+        except (SourceError, ValueError, TypeError, AttributeError, KeyError) as exc:
+            # Réponse inattendue comprise (objet d'erreur au lieu d'une liste) : la fiche compte ses
+            # essais et finit en « erreur » au lieu de bloquer la file à chaque passage.
             report["erreurs"] += 1
             attempts = (db.get("news_attempts", str(cid), 0) or 0) + 1
             db.set("news_attempts", str(cid), attempts)
@@ -377,7 +383,6 @@ async def fetch_news(db: LabDB, now: datetime, budget: int) -> dict:
                                 (f"Finnhub : {exc}"[:200], cid))
             log.info("Labo : actus %s %s indisponibles (%s)", symbol, day, exc)
             continue
-        news = select_news(items, sig.get("ouverture_ts") or 0, start_ts, extreme_ts, sig.get("cloture_ts") or 0)
         sig["secteur"] = db.get("sector", symbol) or sig.get("secteur")
         db.conn.execute("UPDATE catalysts SET news = ?, news_status = ?, signals = ? WHERE id = ?",
                         (json.dumps(news, ensure_ascii=False), "ok" if news else "aucune",

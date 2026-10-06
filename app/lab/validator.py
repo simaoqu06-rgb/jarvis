@@ -35,7 +35,8 @@ Critères, tous obligatoires (seuils dans la table lab_config, défauts DEFAULTS
 4. pas de baisse sensible de la capture du potentiel +10 (au plus 10 % des mouvements capturés, ou un
    seul quand il y en a moins de 10) ;
 5. significativité corrigée du nombre d'idées testées : p unilatéral (z en grappes par jour sur toutes
-   les périodes de test) < alpha / n, n = numéro de l'essai (compteur gardé en base, Bonferroni).
+   les périodes de test) < 6·alpha / (π²·n²), n = numéro de l'essai (compteur gardé en base) :
+   la somme sur tous les essais reste ≤ alpha, le risque global de faux positif est tenu.
 Mémoire : chaque règle a une empreinte canonique (ordre des clés et des conditions sans effet, nom et
 description ignorés) ; une règle déjà testée renvoie son verdict gardé, sans nouvel essai.
 Un verdict « validée » ne change rien au direct : c'est une candidate pour une proposition (Labo 3).
@@ -67,6 +68,10 @@ OUTCOMES = {"triggered", "filled_at", "exit_reason", "r_net", "r_gross", "tp1_hi
             "minutes_to_tp1", "minutes_to_tp2", "minutes_to_tp3", "mfe_r", "mae_r", "day_range_pct", "result"}
 # Champs du contexte connus seulement après la décision (au moment de l'exécution ou plus tard).
 LATE_CONTEXT = {"context.gap_open_pct"}
+# Règle du propriétaire : jamais de filtre de liquidité ni de capitalisation. Le volume en dollars,
+# le rang et le motif d'entrée dans l'univers (classés au volume en dollars) en sont.
+SIZE_FIELDS = {"context.dollar_volume", "context.universe_rank", "context.universe_reason"}
+SIZE_WORDS = ("dollar_volume", "market_cap", "marketcap", "capitalis", "capitaliz", "liquid")
 PATH = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\[\d{1,2}\])?(\.[A-Za-z_][A-Za-z0-9_]*(\[\d{1,2}\])?)*$")
 MAX_LEAVES, MAX_DEPTH = 12, 6
 RULE_KEYS = {"nom", "name", "description", "exclude", "keep", "markets"}
@@ -88,6 +93,8 @@ def _field_sql(field: str) -> tuple[str, tuple]:
         raise RuleError(f"champ « {field} » interdit : c'est un résultat du trade (regard vers l'avenir)")
     if field in LATE_CONTEXT:
         raise RuleError(f"champ « {field} » interdit : connu seulement à l'exécution (regard vers l'avenir)")
+    if field in SIZE_FIELDS or any(w in field.lower() for w in SIZE_WORDS):
+        raise RuleError(f"champ « {field} » interdit : jamais de filtre de liquidité ni de capitalisation")
     if field in FLAT:
         return FLAT[field], ()
     for prefix, col in (("plan.", "t.plan"), ("context.", "t.context")):
@@ -103,6 +110,16 @@ def _scalar(v) -> bool:
     return v is None or isinstance(v, (bool, int, float, str))
 
 
+def _num(v):
+    """5.0 et 5 sont la même règle (même empreinte) ; NaN et infinis refusés."""
+    if isinstance(v, float):
+        if not math.isfinite(v):
+            raise RuleError("valeur numérique finie attendue")
+        if v.is_integer() and abs(v) < 2 ** 53:
+            return int(v)
+    return v
+
+
 def canonical_cond(cond, depth: int = 0, leaves: list | None = None) -> dict:
     leaves = [] if leaves is None else leaves
     if depth > MAX_DEPTH:
@@ -115,7 +132,12 @@ def canonical_cond(cond, depth: int = 0, leaves: list | None = None) -> dict:
         items = cond[k]
         if not isinstance(items, list) or not items:
             raise RuleError(f"« {k} » attend une liste non vide")
-        children = [canonical_cond(c, depth + 1, leaves) for c in items]
+        children = []
+        for c in (canonical_cond(c, depth + 1, leaves) for c in items):
+            # (a ET (b ET c)) = (a ET b ET c), doublons sans effet : même empreinte.
+            for child in (c[k] if set(c) == {k} else [c]):
+                if child not in children:
+                    children.append(child)
         if len(children) == 1:
             return children[0]
         return {k: sorted(children, key=lambda c: json.dumps(c, sort_keys=True))}
@@ -137,18 +159,20 @@ def canonical_cond(cond, depth: int = 0, leaves: list | None = None) -> dict:
     if op in SET_OPS:
         if not isinstance(value, list) or not value or not all(_scalar(v) for v in value) or len(value) > 50:
             raise RuleError(f"« {op} » attend une liste de 1 à 50 valeurs simples")
-        return out | {"value": sorted(set(value), key=lambda v: json.dumps(v))}
+        value = [_num(v) for v in value]
+        uniq = {json.dumps(v): v for v in value}
+        return out | {"value": [uniq[k] for k in sorted(uniq)]}
     if op == "between":
         if not (isinstance(value, list) and len(value) == 2 and all(isinstance(v, (int, float)) for v in value)):
             raise RuleError("« between » attend [minimum, maximum]")
-        return out | {"value": sorted(value)}
+        return out | {"value": sorted(_num(v) for v in value)}
     if value == "auto":
         if op not in AUTO_OPS:
             raise RuleError("« auto » seulement avec > >= < <=")
         return out | {"value": "auto"}
     if not _scalar(value) or value is None:
         raise RuleError(f"valeur simple attendue pour « {op} »")
-    return out | {"value": value}
+    return out | {"value": _num(value)}
 
 
 def parse(raw) -> dict:
@@ -178,6 +202,8 @@ def parse(raw) -> dict:
         if not isinstance(markets, list) or not markets or not set(markets) <= {"stock", "crypto"}:
             raise RuleError("« markets » : liste parmi stock, crypto")
         markets = sorted(set(markets))
+        if markets == ["crypto", "stock"]:
+            markets = None  # tous les marchés : même règle que sans « markets »
     return {"kind": kinds[0], "cond": cond, "markets": markets}
 
 
@@ -239,11 +265,18 @@ def set_config(db: LabDB, key: str, value) -> None:
     db.conn.execute("INSERT OR REPLACE INTO lab_config VALUES (?, ?, ?)", (key, json.dumps(value), now_iso()))
 
 
+def trial_level(trial: int, alpha: float = DEFAULTS["alpha"]) -> float:
+    """Seuil de p à l'essai n° `trial` : 6·alpha / (π²·n²). Σ 1/n² = π²/6, donc la somme des seuils
+    sur tous les essais ne dépasse jamais alpha (alpha / n, lui, cumule ≈ alpha·ln N)."""
+    n = max(1, trial)
+    return 6 * alpha / (math.pi ** 2 * n * n)
+
+
 def z_threshold(trial: int, alpha: float = DEFAULTS["alpha"]) -> float:
-    """z minimum à l'essai n° `trial` (Bonferroni : alpha / n, unilatéral) ; croît avec n."""
+    """z minimum à l'essai n° `trial` (unilatéral, seuil `trial_level`) ; croît avec n."""
     from statistics import NormalDist
 
-    return -NormalDist().inv_cdf(alpha / max(1, trial))  # queue basse : pas d'arrondi à 1 en flottant
+    return -NormalDist().inv_cdf(trial_level(trial, alpha))  # queue basse : pas d'arrondi à 1 en flottant
 
 
 # --- Walk-forward (fonctions pures) ---------------------------------------------------------
@@ -303,7 +336,9 @@ def walk_forward(rows: list[tuple], movers: set, cfg: dict, kind: str, auto_op: 
 
         def affected(r) -> bool:
             if auto_op:
-                hit = thr is not None and _cmp(auto_op, r[6], thr)
+                if thr is None:
+                    return False  # aucun seuil sur l'ajustement : la règle ne change rien dans cette fenêtre
+                hit = _cmp(auto_op, r[6], thr)
             else:
                 hit = bool(r[6])
             return hit if kind == "exclude" else not hit
@@ -399,10 +434,10 @@ def judge(m: dict, cfg: dict, trial: int) -> tuple[str, list[str], list[str]]:
     allowed = before * cfg["max_capture_drop"] if before >= 10 else 1
     check(before - after <= allowed + 1e-9,
           f"capture du potentiel +10 : {before} → {after} mouvements capturés (baisse permise {allowed:g})")
-    level = cfg["alpha"] / max(1, trial)
+    level = trial_level(trial, cfg["alpha"])
     p = m["p"]
     check(p is not None and p < level,
-          f"significativité : p = {p:.2g} pour un seuil de {level:.2g} (alpha {cfg['alpha']:g} / essai n° {trial})"
+          f"significativité : p = {p:.2g} pour un seuil de {level:.2g} (alpha {cfg['alpha']:g}, essai n° {trial})"
           if p is not None else "significativité : non mesurable")
     return ("validee" if not fails else "rejetee"), fails, ok
 
@@ -441,15 +476,19 @@ def load_movers(conn, markets: list | None, threshold: float = STATS.MOVE_PCT) -
 
 
 def missing_share(conn, canon: dict, version: str) -> dict[str, float]:
-    """Part des trades sans valeur pour chaque champ JSON de la règle."""
+    """Part des trades sans valeur pour chaque champ JSON de la règle (marchés de la règle seulement)."""
     out = {}
+    msql, mparams = "", []
+    if canon.get("markets"):
+        msql = f" AND t.market IN ({', '.join('?' * len(canon['markets']))})"
+        mparams = list(canon["markets"])
     for leaf in leaves_of(canon["cond"]):
         field = leaf["field"]
         if field in out or field in FLAT:
             continue
         expr, params = _field_sql(field)
-        row = conn.execute(f"SELECT AVG({expr} IS NULL) FROM trades t WHERE t.method_version = ?",
-                           (*params, version)).fetchone()
+        row = conn.execute(f"SELECT AVG({expr} IS NULL) FROM trades t WHERE t.method_version = ?{msql}",
+                           (*params, version, *mparams)).fetchone()
         out[field] = row[0] if row[0] is not None else 1.0
     return out
 
@@ -476,7 +515,7 @@ def evaluate(conn, canon: dict, trial: int, cfg: dict | None = None) -> dict:
     m = walk_forward(rows, movers, cfg, canon["kind"], auto_op)
     verdict, fails, ok = judge(m, cfg, trial)
     m.update(version=version, jours=len(days), trades=len(rows), essai=trial,
-             seuil_p=cfg["alpha"] / max(1, trial), criteres_tenus=ok)
+             seuil_p=trial_level(trial, cfg["alpha"]), criteres_tenus=ok)
     return {"verdict": verdict, "raisons": fails, "mesures": m}
 
 

@@ -108,7 +108,10 @@ async def company_news_between(symbol: str, start: date, end: date) -> list[dict
         f"{BASE}/company-news",
         params={"symbol": symbol, "from": start.isoformat(), "to": end.isoformat(), "token": _key()},
     )
-    return [_news_item(n) | {"published_ts": n.get("datetime")} for n in items or [] if n.get("datetime")]
+    if not isinstance(items, list):  # objet d'erreur ({"error": …}) au lieu de la liste
+        raise SourceError(f"{symbol} : réponse inattendue de company-news")
+    return [_news_item(n) | {"published_ts": n.get("datetime")} for n in items
+            if isinstance(n, dict) and isinstance(n.get("datetime"), int) and n.get("datetime") > 0]
 
 
 async def earnings(symbol: str, start: date, end: date) -> list[dict]:

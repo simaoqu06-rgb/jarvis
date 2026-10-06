@@ -2,7 +2,9 @@
 
 Lancer : uvicorn app.main:app --reload
 """
+import asyncio
 import hmac
+import json
 import logging
 import os
 import sqlite3
@@ -11,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -425,7 +427,8 @@ def lab_key(request: Request) -> None:
 @app.exception_handler(sqlite3.Error)
 async def lab_db_error(_request: Request, exc: sqlite3.Error):
     """Base du labo illisible ou d'un ancien schéma (worker pas encore redémarré) : 503, pas 500."""
-    return JSONResponse({"detail": f"Base du labo illisible : {exc}"}, status_code=503)
+    logging.getLogger("app.main").warning("Base du labo illisible : %s", exc)
+    return JSONResponse({"detail": "Base du labo illisible (worker pas encore redémarré ?)"}, status_code=503)
 
 
 def _lab_conn():
@@ -505,10 +508,39 @@ def lab_rules_get(status: str | None = Query(None, pattern="^(en_attente|validee
         conn.close()
 
 
+LAB_RULE_MAX_BYTES = 16_384
+
+
+async def _lab_rule_body(request: Request) -> dict:
+    """Corps JSON d'une règle, lu APRÈS la vérification de la clé (un paramètre Body serait lu par
+    FastAPI avant les dépendances, donc sans clé) et plafonné à LAB_RULE_MAX_BYTES."""
+    declared = request.headers.get("content-length")
+    if declared and (not declared.isdigit() or int(declared) > LAB_RULE_MAX_BYTES):
+        raise HTTPException(413, f"Règle trop longue (au plus {LAB_RULE_MAX_BYTES} octets)")
+    chunks, size = [], 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > LAB_RULE_MAX_BYTES:
+            raise HTTPException(413, f"Règle trop longue (au plus {LAB_RULE_MAX_BYTES} octets)")
+        chunks.append(chunk)
+    try:
+        rule = json.loads(b"".join(chunks) or b"null")
+    except (ValueError, RecursionError):
+        raise HTTPException(422, "JSON illisible")
+    if not isinstance(rule, dict):
+        raise HTTPException(422, "Objet JSON attendu")
+    return rule
+
+
 @app.post("/api/lab/rules", dependencies=[Depends(lab_key)])
-def lab_rules_submit(rule: dict = Body(...)):
+async def lab_rules_submit(request: Request):
     """Soumet une règle de filtre à tester : elle est seulement mise en file, le worker la valide.
     Une règle déjà testée renvoie son verdict gardé. Ne change jamais la méthode en direct."""
+    rule = await _lab_rule_body(request)
+    return await asyncio.to_thread(_lab_rule_enqueue, rule)
+
+
+def _lab_rule_enqueue(rule: dict):
     try:
         canon = lab_validator.parse(rule)
     except lab_validator.RuleError as exc:

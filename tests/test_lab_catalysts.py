@@ -282,3 +282,38 @@ def test_signaux_json(db, monkeypatch):
     CAT.compute_day(db, "stock", DAY)
     sig = json.loads(db.conn.execute("SELECT signals FROM catalysts").fetchone()[0])
     assert {"gap_pct", "rvol30", "secteur", "heure_haut", "ouverture_ts", "cloture_ts"} <= set(sig)
+
+
+async def test_reponse_finnhub_inattendue_ne_bloque_pas_la_file(db, news_env, monkeypatch):
+    """Objet d'erreur au lieu d'une liste : la fiche compte ses essais puis passe en erreur."""
+    async def weird(symbol, start, end):
+        return [{"title": "x", "published_ts": "pas un nombre"}]
+
+    monkeypatch.setattr(finnhub, "company_news_between", weird)
+    for _ in range(3):
+        assert (await CAT.fetch_news(db, NOW, 10))["erreurs"] == 1
+    assert CAT.query(db.conn)[0]["actus_etat"] == "erreur"
+
+
+def test_finnhub_objet_d_erreur(monkeypatch):
+    async def fake_get(url, params=None, headers=None):
+        return {"error": "You don't have access to this resource."}
+
+    monkeypatch.setenv("FINNHUB_API_KEY", "k")
+    monkeypatch.setattr(finnhub, "get_json", fake_get)
+    import asyncio
+
+    with pytest.raises(SourceError):
+        asyncio.run(finnhub.company_news_between("AAA", date(2025, 1, 1), date(2025, 1, 3)))
+
+
+def test_volume_30_min_signale_s_il_contient_le_depart():
+    o = 1_700_000_000
+    bars = [{"t": o + 300 * i, "o": 10, "h": 10 + (3 if i == 2 else 0), "l": 10, "c": 10, "v": 1} for i in range(20)]
+    st = {"open": 10, "high": 13, "low": 10, "close": 10, "prev_close": 10, "up_pct": 30.0, "down_pct": 0.0,
+          "gap_pct": 0.0, "t_high": o + 600, "t_low": o, "bars": bars, "bounds": (o, o + 6000), "rvol30": 2.0}
+    rec = CAT._record("stock", "2024-01-02", "AAA", "mouvement", st, CAT.classify(st), {})
+    assert rec[7] == o + 600 and rec[9]["rvol30_avant_depart"] is False
+    late = dict(st, bars=[dict(b, h=10 + (3 if i == 10 else 0)) for i, b in enumerate(bars)], t_high=o + 3000)
+    rec = CAT._record("stock", "2024-01-02", "AAA", "mouvement", late, CAT.classify(late), {})
+    assert rec[9]["rvol30_avant_depart"] is True

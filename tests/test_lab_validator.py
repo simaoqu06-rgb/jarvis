@@ -102,7 +102,7 @@ def test_fenetres_chronologiques_sans_recouvrement_avec_embargo():
 
 def test_seuil_monte_avec_le_nombre_d_essais():
     zs = [V.z_threshold(n) for n in (1, 2, 10, 100, 1000, 10 ** 6, 10 ** 18)]
-    assert zs == sorted(zs) and zs[0] == pytest.approx(1.645, abs=1e-3) and zs[-2] > 5.0 and zs[-1] > 9.0
+    assert zs == sorted(zs) and zs[0] == pytest.approx(1.875, abs=1e-3) and zs[-2] > 5.0 and zs[-1] > 9.0
 
 
 def test_jugement_pur():
@@ -289,3 +289,57 @@ def test_regle_en_attente_de_donnees_ne_bloque_pas_la_file(db):
     second = V.process_pending(db, 1)
     assert second[0]["regle"]["markets"] == ["crypto"] and second[0]["etat"] in ("validee", "rejetee")
     assert "gain_total_r" in second[0]["mesures"]
+
+
+# --- Relecture : régressions ----------------------------------------------------------------
+
+def test_seuil_auto_introuvable_ne_touche_aucun_trade():
+    """« keep » + auto sans seuil sur l'ajustement : la fenêtre reste telle quelle (avant : tous les
+    trades étaient comptés comme touchés, ce qui gonflait le critère des 100 trades)."""
+    rows = [(f"2024-01-{d:02d}", "stock", f"S{k}", 1, 0.1, 0, None) for d in range(1, 29) for k in range(5)]
+    cfg = dict(V.DEFAULTS, auto_min_affected=10_000)
+    m = V.walk_forward(rows, set(), cfg, "keep", ">")
+    assert m["touches_test"] == 0
+    assert all(w["seuil"] is None and w["touches"] == 0 for w in m["fenetres"])
+    assert all(w["amelioration_r"] == 0 for w in m["fenetres"])
+
+
+@pytest.mark.parametrize("field", ["context.dollar_volume", "context.universe_rank", "context.universe_reason",
+                                   "plan.market_cap", "context.liquidity_score", "context.capitalisation"])
+def test_filtres_de_liquidite_et_de_capitalisation_refuses(field):
+    with pytest.raises(V.RuleError, match="liquidité"):
+        V.parse({"exclude": {"field": field, "op": "<", "value": 1_000_000}})
+
+
+def test_empreinte_insensible_aux_formes_equivalentes():
+    """La mémoire des échecs ne se contourne pas en réécrivant la même règle."""
+    a = V.parse({"exclude": {"field": "context.rvol", "op": ">", "value": 5}})
+    assert V.rule_hash(V.parse({"exclude": {"field": "context.rvol", "op": ">", "value": 5.0}})) == V.rule_hash(a)
+    assert V.rule_hash(V.parse({"exclude": {"field": "context.rvol", "op": ">", "value": 5},
+                                "markets": ["stock", "crypto"]})) == V.rule_hash(a)
+    b = V.parse({"exclude": {"and": [{"field": "composite", "op": "<", "value": 7},
+                                     {"and": [{"field": "context.rvol", "op": ">", "value": 3}]}]}})
+    c = V.parse({"exclude": {"and": [{"field": "context.rvol", "op": ">", "value": 3},
+                                     {"field": "composite", "op": "<", "value": 7},
+                                     {"field": "composite", "op": "<", "value": 7.0}]}})
+    assert V.rule_hash(b) == V.rule_hash(c)
+    d = V.parse({"exclude": {"field": "context.setup", "op": "in", "value": [2.0, 1, 2]}})
+    assert d["cond"]["value"] == [1, 2]
+    with pytest.raises(V.RuleError):
+        V.parse({"exclude": {"field": "context.rvol", "op": ">", "value": float("nan")}})
+
+
+def test_champ_absent_mesure_sur_les_marches_de_la_regle(db):
+    """Un champ propre aux actions n'est pas « absent » parce que la crypto ne l'a pas."""
+    synthetic_trades(db, n_days=10, per_day=5, seed=3, market="stock")
+    synthetic_trades(db, n_days=40, per_day=20, seed=4, market="crypto")
+    db.conn.execute("UPDATE trades SET context = json_remove(context, '$.signal') WHERE market = 'crypto'")
+    canon = V.parse({"exclude": {"field": "context.signal", "op": ">", "value": 0.5}, "markets": ["stock"]})
+    assert V.missing_share(db.conn, canon, "v1") == {"context.signal": 0.0}
+
+
+def test_seuils_cumules_ne_depassent_jamais_alpha():
+    """Le risque global de faux positif reste tenu, quel que soit le nombre d'idées testées."""
+    from app.lab.validator import trial_level
+    assert sum(trial_level(n, 0.05) for n in range(1, 100_001)) <= 0.05
+    assert trial_level(2, 0.05) < trial_level(1, 0.05)
