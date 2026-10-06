@@ -15,9 +15,12 @@ from zoneinfo import ZoneInfo
 from app import needs
 from app.config import env_float
 from app.core.http import SourceError
-from app.sources import kraken, twelvedata
+from app.sources import alpaca, kraken, twelvedata
+from app.trading import catalyst as C
 from app.trading import plan as P
+from app.trading import score as SC
 from app.trading import signals as S
+from app.trading.settings import settings
 
 log = logging.getLogger(__name__)
 NEW_YORK = ZoneInfo("America/New_York")
@@ -63,8 +66,12 @@ def _market(market: str) -> str:
     return market
 
 
-async def candles(symbol: str, market: str, interval: int) -> list[dict]:
-    """Bougies de la plus ancienne à la plus récente ; la dernière peut être en cours."""
+async def candles(symbol: str, market: str, interval: int, source: str | None = None) -> list[dict]:
+    """Bougies de la plus ancienne à la plus récente ; la dernière peut être en cours.
+
+    Actions : Twelve Data (temps réel, crédits comptés), Alpaca en secours ou sur demande
+    (`source="alpaca"`, utilisé par le scanner : gratuit mais avec 16 min de retard).
+    """
     key = (symbol, market, interval)
     cached = _candle_cache.get(key)
     if cached and clock.monotonic() - cached[0] < TTL.get(interval, 120):
@@ -72,17 +79,24 @@ async def candles(symbol: str, market: str, interval: int) -> list[dict]:
     try:
         if market == "crypto":
             rows = await kraken.candles(symbol, interval)
+        elif source == "alpaca":
+            rows = await alpaca.candles(symbol, interval)
         else:
-            rows = await twelvedata.candles(symbol, interval, outputsize=STOCK_OUTPUTSIZE.get(interval, 500))
+            try:
+                rows = await twelvedata.candles(symbol, interval, outputsize=STOCK_OUTPUTSIZE.get(interval, 500))
+            except SourceError:
+                if not alpaca.configured():
+                    raise
+                rows = await alpaca.candles(symbol, interval)
     except SourceError as exc:
         raise PlanError(f"bougies {symbol} indisponibles : {exc}") from exc
     _candle_cache[key] = (clock.monotonic(), rows)
     return rows
 
 
-async def _optional_candles(symbol: str, market: str, interval: int) -> list[dict] | None:
+async def _optional_candles(symbol: str, market: str, interval: int, source: str | None = None) -> list[dict] | None:
     try:
-        return await candles(symbol, market, interval)
+        return await candles(symbol, market, interval, source)
     except PlanError as exc:
         log.warning("%s", exc)
         return None
@@ -167,20 +181,25 @@ def sizing(entry: float, stop: float, capital: float | None, risk_pct: float) ->
 async def build_plan(
     symbol: str, market: str, side: str = "long", entry: float | None = None,
     stop: float | None = None, targets: list[float] | None = None, now: datetime | None = None,
-    capital: float | None = None, risk_pct: float | None = None,
+    capital: float | None = None, risk_pct: float | None = None, source: str | None = None,
+    cat: dict | None = None,
 ) -> dict:
+    """Plan complet : niveaux, délais rejoués, checklist, catalyseur et note composite.
+
+    `cat` : catalyseur déjà lu (le scanner l'a en main) pour ne pas rappeler Finnhub.
+    """
     symbol, market, side = symbol.strip().upper(), _market(market), side.lower()
     now = now or datetime.now(timezone.utc)
     cfg = SETTINGS[market]
-    bars = await candles(symbol, market, cfg["interval"])
+    bars = await candles(symbol, market, cfg["interval"], source)
     try:
         levels = P.default_levels(bars, side, entry, stop, targets, market=market)
         timing = P.historical_timing(bars, levels, cfg["horizon_bars"])
         atr_value = P.atr(bars)
     except ValueError as exc:
         raise PlanError(str(exc)) from exc
-    daily = await _optional_candles(symbol, market, 1440)
-    h4 = await _optional_candles(symbol, market, 240)
+    daily = await _optional_candles(symbol, market, 1440, source)
+    h4 = await _optional_candles(symbol, market, 240, source)
     # Signaux sur les bougies closes : la dernière, en cours, fausserait le volume et les figures.
     check = S.checklist(bars[:-1], daily, h4, market, side, atr_value)
     step = cfg["interval"]
@@ -212,7 +231,9 @@ async def build_plan(
         estimates.append(item)
     if capital is None:
         capital = env_float("JARVIS_CAPITAL", 0.0) or None
-    return {
+    if market == "stock" and cat is None:
+        cat = await C.safe_check(symbol, now)
+    plan = {
         "symbol": symbol, "market": market, "side": side,
         "entry": levels.entry, "stop": levels.stop, "stop_source": levels.stop_source,
         "stop_pct": round(-abs(levels.pct(levels.stop)), 2), "atr": round(atr_value, 6),
@@ -226,11 +247,33 @@ async def build_plan(
             f"Heures de Paris."
         ),
         "created_at": now.isoformat(timespec="seconds"),
+        "catalyst": cat,
     }
+    plan["score"] = SC.evaluate(plan, daily, cat, settings)
+    return plan
 
 
 def _num(x: float) -> str:
     return f"{x:,.6g}".replace(",", " ")
+
+
+def score_lines(p: dict) -> list[str]:
+    """Verdict, note composite et catalyseur, en quelques lignes."""
+    sc = p["score"]
+    parts = sc["parts"]
+    icon = "✅" if sc["go"] else "⛔"
+    sub = " · ".join(f"{label} {parts[k]['score']:g}" for k, label in
+                     (("technique", "technique"), ("catalyst", "catalyseur"), ("risk", "risque"))
+                     if parts[k]["score"] is not None)
+    lines = [f"{icon} **{sc['decision']} · note {sc['composite']:g}/10** ({sub})"
+             + (f" · {' ; '.join(sc['reasons'])}" if sc["reasons"] else "")]
+    for k, label in (("technique", "Technique"), ("catalyst", "Catalyseur"), ("risk", "Risque")):
+        lines.append(f"-# {label} : {' ; '.join(parts[k]['reasons'])}")
+    cat = p.get("catalyst") or {}
+    marks = {"positive": "🟢", "negative": "🔴", "dilution": "🟠", "neutre": "⚪"}
+    for n in cat.get("news", [])[:3]:
+        lines.append(f"{marks[n['tone']]} [{n['title'][:110]}](<{n['url']}>)")
+    return lines
 
 
 def plan_text(p: dict) -> str:
@@ -242,6 +285,8 @@ def plan_text(p: dict) -> str:
         f"({p['stop_pct']:+.2f} %, {p['stop_source']})",
         f"**{check['verdict']}** · checklist EmperorBTC {check['score']}/{check['max_score']}",
     ]
+    if p.get("score"):
+        lines += score_lines(p)
     for t in p["targets"]:
         lines.append(
             f"🎯 {t['name']} {_num(t['price'])} ({t['pct']:+.2f} %, {t['r_multiple']:g} R, {t['source']}) · "

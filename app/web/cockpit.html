@@ -619,6 +619,18 @@ async function loadMarket() {
 /* --- Plan ------------------------------------------------------------------------------ */
 function verdictClass(v) { return v.startsWith("Feu vert") ? "go" : v.startsWith("Contre") ? "no" : "wait"; }
 
+function scoreHtml(p) {
+  const sc = p.score;
+  if (!sc) return "";
+  const labels = { technique: "Technique", catalyst: "Catalyseur", risk: "Risque" };
+  const tone = { positive: "🟢", negative: "🔴", dilution: "🟠", neutre: "⚪" };
+  const news = ((p.catalyst || {}).news || []).slice(0, 3);
+  return `<div class="row" style="margin-top:10px"><span class="pill ${sc.go ? "go" : "no"}">${sc.decision} · ${sc.composite}/10</span>
+      <span class="small muted">${esc(sc.reasons.join(" ; "))}</span></div>
+    <div class="checks">${Object.entries(sc.parts).map(([k, v]) => `<div class="check"><b>${labels[k]} ${v.score == null ? "–" : v.score + "/10"}</b>${v.weight ? ` <span class="muted">(${Math.round(v.weight * 100)} %)</span>` : ""}<br><span class="muted">${esc(v.reasons.join(" ; "))}</span></div>`).join("")}</div>
+    ${news.length ? `<div class="small" style="margin-top:8px">${news.map((n) => `<div>${tone[n.tone] || ""} <a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(n.title)}</a></div>`).join("")}</div>` : ""}`;
+}
+
 function planHtml(p) {
   const mark = { true: "✅", false: "❌", null: "➖" }, c = p.checklist;
   const s = p.sizing;
@@ -627,6 +639,7 @@ function planHtml(p) {
       <div class="row"><span class="pill ${p.side}">${p.side}</span><span class="sym">${esc(p.symbol)}</span><span class="pill ${verdictClass(c.verdict)}">${esc(c.verdict)}</span></div>
       <div class="num">Entrée <b>${fmt(p.entry)}</b> · SL <b class="down">${fmt(p.stop)}</b> <span class="muted">(${pct(p.stop_pct)})</span></div>
     </div>
+    ${scoreHtml(p)}
     <div class="small muted" style="margin-top:4px">Stop ${esc(p.stop_source)}${s ? ` · 💰 risque ${s.risk_pct} % = ${fmt(s.risk_amount)} · taille ${fmt(s.quantity)} (${fmt(s.notional)}) · levier ${s.leverage}×` : ""}</div>
     <div class="tps">${p.targets.map((x) => `<div class="tp">
       <div class="name">${x.name}</div>

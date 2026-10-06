@@ -13,7 +13,9 @@ from pydantic import BaseModel
 
 from app import alerts, needs, scheduler
 from app.notify import discord
+from app.trading import paper, scanner
 from app.trading import service as trading
+from app.trading.settings import settings
 
 
 @asynccontextmanager
@@ -244,6 +246,59 @@ async def trading_delete(trade_id: str):
     if not scheduler.book.remove(trade_id):
         raise HTTPException(404, "Trade introuvable")
     return {"deleted": trade_id}
+
+
+@app.get("/api/trading/scan")
+async def trading_scan(discord_post: bool = False):
+    """Lance le scanner pré-ouverture maintenant (sans l'enregistrer ni passer d'ordre fictif)."""
+    try:
+        result = await scanner.scan(save=False)
+    except scanner.ScanError as exc:
+        raise HTTPException(503, str(exc))
+    text = scanner.text(result)
+    if discord_post:
+        await _send(text)
+    return result | {"text": text}
+
+
+@app.get("/api/trading/settings")
+async def trading_settings():
+    """Seuils de la note composite, du veto, du scanner et du forward-test (✏️ = changé)."""
+    return {"settings": settings.all(), "changed": sorted(settings.overrides)}
+
+
+@app.put("/api/trading/settings")
+async def trading_settings_update(changes: dict):
+    """Change des réglages : {"rsi_max": 70} ; une valeur null remet le défaut."""
+    try:
+        settings.update(changes)
+    except KeyError as exc:
+        raise HTTPException(422, f"Réglage inconnu : {exc}")
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    return await trading_settings()
+
+
+@app.get("/api/trading/paper")
+async def trading_paper():
+    """Plans passés sur le compte fictif Alpaca et leur issue."""
+    return list(reversed(scheduler.paper_book.entries))
+
+
+@app.get("/api/trading/paper/stats")
+async def trading_paper_stats():
+    """Bilan agrégé par critère et réglages à envisager."""
+    st = paper.stats(scheduler.paper_book)
+    return st | {"text": paper.report_text(st)}
+
+
+@app.post("/api/trading/paper")
+async def trading_paper_submit(req: TradeRequest):
+    """Passe un plan sur le compte fictif (en plus de ceux du scanner)."""
+    entry = await paper.submit(scheduler.paper_book, await _plan(req), origin="manuel")
+    if not entry:
+        raise HTTPException(422, "Rien passé : action seulement, clés Alpaca, taille suffisante, pas déjà en cours")
+    return entry
 
 
 COCKPIT_HTML = Path(__file__).parent / "web" / "cockpit.html"

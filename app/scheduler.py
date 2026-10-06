@@ -5,12 +5,15 @@ Démarrées seulement si DISCORD_WEBHOOK_URL est définie (et JARVIS_NOTIFICATIO
 import asyncio
 import logging
 import os
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from app import alerts, config
-from app.notify import discord
+from app.notify import bot, discord
+from app.sources import alpaca
+from app.trading import paper, scanner
 from app.trading import service as trading
+from app.trading.settings import settings
 
 log = logging.getLogger(__name__)
 NEW_YORK = ZoneInfo("America/New_York")
@@ -19,6 +22,7 @@ MINUTE = 60
 
 state = alerts.State(config.ALERTS_STATE_PATH)
 book = trading.Book()
+paper_book = paper.PaperBook()
 _lock = asyncio.Lock()  # un seul job modifie l'état à la fois
 
 
@@ -68,9 +72,66 @@ async def tick_trades() -> None:
         )
 
 
+async def nyse_trading_day(now: datetime) -> bool:
+    local = now.astimezone(NEW_YORK)
+    closed, _ = await trading._nyse_calendar(local.year)
+    return local.weekday() < 5 and local.date().isoformat() not in closed
+
+
+def scan_due(now: datetime) -> bool:
+    """À l'heure prévue, une fois par jour ; pas de rattrapage plus de 30 min après (serveur redémarré
+    en pleine séance : les entrées de pré-ouverture n'auraient plus de sens)."""
+    now_ny = now.astimezone(NEW_YORK)
+    hour, minute = (int(x) for x in str(settings["scan_time_ny"]).split(":"))
+    planned = datetime.combine(now_ny.date(), time(hour, minute), NEW_YORK)
+    return (settings["scan_enabled"] and alpaca.configured() and timedelta(0) <= now_ny - planned < timedelta(minutes=30)
+            and state.data.get("scan_date") != now_ny.date().isoformat())
+
+
+async def tick_scan() -> None:
+    """Scanner avant l'ouverture : message Discord, puis chaque valeur retenue part sur le compte fictif."""
+    now = datetime.now(timezone.utc)
+    if not scan_due(now):
+        return
+    state.data["scan_date"] = now.astimezone(NEW_YORK).date().isoformat()
+    if not await nyse_trading_day(now):
+        return
+    try:
+        result = await scanner.scan(now)
+    except scanner.ScanError as exc:
+        await discord.send(f"🔭 Scanner pré-ouverture impossible : {exc}")
+        return
+    await discord.send(scanner.text(result))
+    for pick in result["picks"]:
+        try:
+            await paper.submit(paper_book, pick["plan"], pick["features"])
+        except Exception:
+            log.exception("Forward-test : envoi de %s en échec", pick["symbol"])
+
+
+def report_due(now: datetime) -> bool:
+    now_ny = now.astimezone(NEW_YORK)
+    week = now_ny.strftime("%G-W%V")
+    return now_ny.weekday() == 4 and now_ny.time() >= time(16, 30) and state.data.get("paper_report_week") != week
+
+
+async def tick_paper() -> None:
+    """Relit les ordres fictifs ; le vendredi soir, envoie le bilan agrégé (jamais trade par trade)."""
+    if not alpaca.configured():
+        return
+    now = datetime.now(timezone.utc)
+    if paper_book.active():
+        await paper.check(paper_book, now)
+    if report_due(now) and paper_book.entries:
+        state.data["paper_report_week"] = now.astimezone(NEW_YORK).strftime("%G-W%V")
+        await discord.send(paper.report_text(paper.stats(paper_book)))
+
+
 JOBS = [
     ("suivi des trades et cockpit Discord", tick_trades, MINUTE),
     ("point du matin", tick_brief, MINUTE),
+    ("scanner pré-ouverture", tick_scan, MINUTE),
+    ("forward-test sur le compte fictif", tick_paper, 2 * MINUTE),
     ("mouvements de cours", tick_moves, 5 * MINUTE),
     ("séismes", tick_quakes, 5 * MINUTE),
     ("actus", tick_news, 15 * MINUTE),
@@ -88,8 +149,25 @@ async def _loop(name: str, job, every: int) -> None:
         await asyncio.sleep(every)
 
 
+async def _bot() -> None:
+    """Bot des commandes Discord ; se reconnecte après une coupure."""
+    while True:
+        try:
+            await bot.run(_lock)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Bot Discord déconnecté, nouvelle tentative dans 1 min")
+        await asyncio.sleep(MINUTE)
+
+
 def start() -> list[asyncio.Task]:
+    tasks = []
+    if bot.enabled():
+        tasks.append(asyncio.create_task(_bot()))
+    else:
+        log.info("Commandes Discord désactivées (DISCORD_BOT_TOKEN ou JARVIS_DISCORD_OWNER_ID absent)")
     if not enabled():
         log.info("Notifications Discord désactivées (DISCORD_WEBHOOK_URL absente ou JARVIS_NOTIFICATIONS=off)")
-        return []
-    return [asyncio.create_task(_loop(name, job, every)) for name, job, every in JOBS]
+        return tasks
+    return tasks + [asyncio.create_task(_loop(name, job, every)) for name, job, every in JOBS]

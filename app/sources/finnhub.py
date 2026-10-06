@@ -76,3 +76,28 @@ async def company_news(symbol: str, limit: int, days: int = 7) -> list[dict]:
         },
     )
     return [_news_item(n) for n in items[:limit]]
+
+
+async def earnings(symbol: str, start: date, end: date) -> list[dict]:
+    """Publications de résultats entre deux dates : date, moment (bmo avant l'ouverture, amc après
+    la clôture), BPA estimé et publié."""
+    payload = await get_json(
+        f"{BASE}/calendar/earnings",
+        params={"symbol": symbol, "from": start.isoformat(), "to": end.isoformat(), "token": _key()},
+    )
+    return [
+        {"date": e.get("date"), "hour": e.get("hour") or None,
+         "eps_estimate": to_float(e.get("epsEstimate")), "eps_actual": to_float(e.get("epsActual")),
+         "revenue_estimate": to_float(e.get("revenueEstimate")), "revenue_actual": to_float(e.get("revenueActual"))}
+        for e in payload.get("earningsCalendar") or [] if e.get("date")
+    ]
+
+
+async def profile(symbol: str) -> dict:
+    """Nom, secteur et capitalisation (en dollars) d'une société."""
+    p = await get_json(f"{BASE}/stock/profile2", params={"symbol": symbol, "token": _key()})
+    if not p or not p.get("name"):
+        raise SourceError(f"{symbol} : profil inconnu")
+    cap = to_float(p.get("marketCapitalization"))
+    return {"symbol": symbol, "name": p.get("name"), "industry": p.get("finnhubIndustry"),
+            "market_cap": cap * 1e6 if cap is not None else None}
