@@ -14,3 +14,14 @@ async def test_finnhub_actus_generales():
 
 async def test_finnhub_actus_societe():
     check(await finnhub.company_news("AAPL", 5), NEWS, required=("title", "url", "published_at"))
+
+
+async def test_finnhub_resultats_trimestriels():
+    from datetime import date, timedelta
+    rows = await finnhub.earnings("AAPL", date.today() - timedelta(days=120), date.today() + timedelta(days=120))
+    assert rows and {"date", "hour", "eps_estimate", "eps_actual"} <= set(rows[0])
+
+
+async def test_finnhub_profil():
+    p = await finnhub.profile("AAPL")
+    assert p["name"] and p["market_cap"] > 1e11

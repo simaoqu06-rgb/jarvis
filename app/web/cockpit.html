@@ -221,6 +221,8 @@ dialog .actions { display: flex; gap: 8px; justify-content: flex-end; }
     <div class="card kpi"><div class="label">Journal</div><div class="value" id="k-journal">–</div><div class="hint" id="k-journal-hint">&nbsp;</div></div>
   </section>
 
+  <div class="card" id="proposals" hidden style="margin-bottom:16px"></div>
+
   <details class="card planner" id="planner">
     <summary><span>Nouveau plan de trade</span><span class="plus">+</span></summary>
     <form id="plan-form" autocomplete="off">
@@ -592,6 +594,17 @@ function setLive(ok, text) {
   $("#live-text").textContent = text;
 }
 
+async function loadProposals() {
+  const box = $("#proposals");
+  const items = await api("/api/trading/proposals?status=pending").catch(() => []);
+  box.hidden = !items.length;
+  box.innerHTML = items.length ? `<div class="small muted" style="margin-bottom:8px">🧪 JARVIS propose (rien ne change sans ton accord)</div>` +
+    items.map((p) => `<div class="row between" style="gap:10px;margin-top:8px;flex-wrap:wrap">
+      <div><b>${esc(p.key)}</b> ${esc(p.current)} → <b>${esc(p.value)}</b><br><span class="small muted">${esc(p.why)}</span></div>
+      <div class="row"><button data-approve="${p.id}">Approuver</button><button class="ghost danger" data-refuse="${p.id}">Refuser</button></div>
+    </div>`).join("") : "";
+}
+
 async function loadTrades() {
   try {
     trades = await api("/api/trading/trades");
@@ -619,6 +632,18 @@ async function loadMarket() {
 /* --- Plan ------------------------------------------------------------------------------ */
 function verdictClass(v) { return v.startsWith("Feu vert") ? "go" : v.startsWith("Contre") ? "no" : "wait"; }
 
+function scoreHtml(p) {
+  const sc = p.score;
+  if (!sc) return "";
+  const labels = { technique: "Technique", catalyst: "Catalyseur", risk: "Risque" };
+  const tone = { positive: "🟢", negative: "🔴", dilution: "🟠", neutre: "⚪" };
+  const news = ((p.catalyst || {}).news || []).slice(0, 3);
+  return `<div class="row" style="margin-top:10px"><span class="pill ${sc.go ? "go" : "no"}">${sc.decision} · ${sc.composite}/10</span>
+      <span class="small muted">${esc(sc.reasons.join(" ; "))}</span></div>
+    <div class="checks">${Object.entries(sc.parts).map(([k, v]) => `<div class="check"><b>${labels[k]} ${v.score == null ? "–" : v.score + "/10"}</b>${v.weight ? ` <span class="muted">(${Math.round(v.weight * 100)} %)</span>` : ""}<br><span class="muted">${esc(v.reasons.join(" ; "))}</span></div>`).join("")}</div>
+    ${news.length ? `<div class="small" style="margin-top:8px">${news.map((n) => `<div>${tone[n.tone] || ""} <a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(n.title)}</a></div>`).join("")}</div>` : ""}`;
+}
+
 function planHtml(p) {
   const mark = { true: "✅", false: "❌", null: "➖" }, c = p.checklist;
   const s = p.sizing;
@@ -627,6 +652,7 @@ function planHtml(p) {
       <div class="row"><span class="pill ${p.side}">${p.side}</span><span class="sym">${esc(p.symbol)}</span><span class="pill ${verdictClass(c.verdict)}">${esc(c.verdict)}</span></div>
       <div class="num">Entrée <b>${fmt(p.entry)}</b> · SL <b class="down">${fmt(p.stop)}</b> <span class="muted">(${pct(p.stop_pct)})</span></div>
     </div>
+    ${scoreHtml(p)}
     <div class="small muted" style="margin-top:4px">Stop ${esc(p.stop_source)}${s ? ` · 💰 risque ${s.risk_pct} % = ${fmt(s.risk_amount)} · taille ${fmt(s.quantity)} (${fmt(s.notional)}) · levier ${s.leverage}×` : ""}</div>
     <div class="tps">${p.targets.map((x) => `<div class="tp">
       <div class="name">${x.name}</div>
@@ -676,6 +702,13 @@ document.addEventListener("click", async (ev) => {
       await loadTrades(); await loadLive();
       window.scrollTo({ top: $("#open").offsetTop - 20, behavior: "smooth" });
     }
+    if (el.dataset.approve || el.dataset.refuse) {
+      el.disabled = true;
+      const id = el.dataset.approve || el.dataset.refuse;
+      await api(`/api/trading/proposals/${id}/${el.dataset.approve ? "approve" : "refuse"}`, { method: "POST" });
+      toast(el.dataset.approve ? "✅ Réglage appliqué" : "❌ Proposition refusée");
+      await loadProposals();
+    }
     if (el.dataset.close) {
       const t = trades.find((x) => x.id === el.dataset.close);
       const price = await ask(`Clôturer ${t.symbol}`, "Le résultat en R ira dans le journal.", "Prix de sortie (vide = dernier cours)", "", "number");
@@ -696,7 +729,7 @@ document.addEventListener("click", async (ev) => {
 let timers = [];
 function start() {
   stop();
-  loadTrades().then(loadLive); loadMarket();
+  loadTrades().then(loadLive); loadMarket(); loadProposals();
   timers = [setInterval(loadLive, 10000), setInterval(loadTrades, 20000), setInterval(loadMarket, 300000), setInterval(tick, 1000)];
 }
 function stop() { timers.forEach(clearInterval); timers = []; }

@@ -85,6 +85,35 @@ visible que par toi, sans ouvrir de port dans le firewall.
 Le message « Trading Cockpit » apparaît aussi sur Discord dès le premier trade suivi : épingle-le
 une fois (clic droit > Épingler), JARVIS le réécrit chaque minute.
 
+## Scanner, forward-test et commandes Discord
+
+Trois ajouts dans `.env`, puis `docker compose up -d` :
+
+1. **Alpaca** (scanner et compte fictif) : sur https://app.alpaca.markets, passe sur le compte
+   *Paper*, section *API Keys*, génère une paire de clés et colle-les :
+
+   ```
+   ALPACA_API_KEY=...
+   ALPACA_SECRET_KEY=...
+   ALPACA_PAPER=true
+   ```
+
+   Génère une nouvelle paire plutôt que de reprendre celle d'OpenClaw, puis révoque l'ancienne.
+2. **Bot Discord** (commandes `!plan`, `!prends`, `!scan`, `!bilan`, `!oui`, `!non`, et propositions de réglages en privé) :
+   - https://discord.com/developers/applications > *New Application* > onglet *Bot* :
+     *Reset Token* et copie-le, puis active *Message Content Intent*.
+   - Onglet *OAuth2* > *URL Generator* : coche `bot`, puis les permissions *View Channels*,
+     *Send Messages*, *Read Message History* ; ouvre le lien et ajoute le bot à ton serveur.
+   - Ton identifiant Discord : *Paramètres > Avancés > Mode développeur*, puis clic droit sur
+     ton nom > *Copier l'identifiant*.
+
+   ```
+   DISCORD_BOT_TOKEN=...
+   JARVIS_DISCORD_OWNER_ID=...
+   ```
+
+   Le bot ne répond qu'à ce compte (plusieurs identifiants possibles, séparés par des virgules).
+
 ## Mettre à jour
 
 ```bash
