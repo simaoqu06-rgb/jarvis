@@ -180,7 +180,8 @@ def time_fr(moment: datetime, now: datetime) -> str:
     return f"{prefix} {local.strftime('%H:%M')}"
 
 
-async def _eta(market: str, start: datetime, minutes: float) -> datetime:
+def eta_at(market: str, start: datetime, minutes: float) -> datetime:
+    """Heure estimée : minutes d'horloge pour la crypto, minutes de cotation pour les actions."""
     if market == "crypto":
         return start + timedelta(minutes=minutes)
     return add_market_minutes(start, minutes)
@@ -201,28 +202,36 @@ def sizing(entry: float, stop: float, capital: float | None, risk_pct: float) ->
             "leverage": round(max(notional / capital, 1.0), 2)}
 
 
-async def build_plan(
-    symbol: str, market: str, side: str = "long", entry: float | None = None,
-    stop: float | None = None, targets: list[float] | None = None, now: datetime | None = None,
-    capital: float | None = None, risk_pct: float | None = None, source: str | None = None,
-    cat: dict | None = None,
-) -> dict:
-    """Plan complet : niveaux, délais rejoués, checklist, catalyseur et note composite.
-
-    `cat` : catalyseur déjà lu (le scanner l'a en main) pour ne pas rappeler Finnhub.
-    """
-    symbol, market, side = symbol.strip().upper(), _market(market), side.lower()
-    now = now or datetime.now(timezone.utc)
+def plan_levels(bars: list[dict], market: str, side: str, entry: float | None = None,
+                stop: float | None = None, targets: list[float] | None = None, now: datetime | None = None,
+                timing_lookback: int | None = None) -> tuple[P.Levels, dict, float]:
+    """Niveaux, délais rejoués et ATR du plan ; PlanError si les bougies ne permettent pas de plan."""
     cfg = SETTINGS[market]
-    bars = await candles(symbol, market, cfg["interval"], source)
     try:
         levels = P.default_levels(bars, side, entry, stop, targets, market=market, now=now)
-        timing = P.historical_timing(bars, levels, cfg["horizon_bars"])
+        timing = P.historical_timing(bars, levels, cfg["horizon_bars"], lookback=timing_lookback)
         atr_value = levels.atr if levels.atr is not None else P.atr(bars)
     except ValueError as exc:
         raise PlanError(str(exc)) from exc
-    daily = await _optional_candles(symbol, market, 1440, source)
-    h4 = await _optional_candles(symbol, market, 240, source)
+    return levels, timing, atr_value
+
+
+def plan_from_bars(
+    symbol: str, market: str, side: str, bars: list[dict], daily: list[dict] | None, h4: list[dict] | None,
+    now: datetime, cat: dict | None = None, entry: float | None = None, stop: float | None = None,
+    targets: list[float] | None = None, capital: float | None = None, risk_pct: float | None = None,
+    s=None, timing_lookback: int | None = None, levels: tuple | None = None,
+) -> dict:
+    """Cœur du plan, sans réseau : niveaux, délais rejoués, checklist, catalyseur et note composite.
+
+    Utilisé tel quel par build_plan (en direct) et par le labo (app/lab) : les bougies sont celles
+    connues à `now`, la dernière étant tenue pour en cours. `s` : réglages de la note (ceux du
+    moment par défaut) ; `levels` : résultat de plan_levels déjà calculé.
+    """
+    symbol, market, side = symbol.strip().upper(), _market(market), side.lower()
+    s = settings if s is None else s
+    cfg = SETTINGS[market]
+    levels, timing, atr_value = levels or plan_levels(bars, market, side, entry, stop, targets, now, timing_lookback)
     # Signaux sur les bougies closes : la dernière, en cours, fausserait le volume et les figures.
     check = S.checklist(bars[:-1], daily, h4, market, side, atr_value, now=now)
     step = cfg["interval"]
@@ -242,8 +251,8 @@ async def build_plan(
             item["minutes_median"] = t["bars_median"] * step
             item["minutes_p25"] = t["bars_p25"] * step
             item["minutes_p75"] = t["bars_p75"] * step
-            eta_med = await _eta(market, now, item["minutes_median"])
-            eta_late = await _eta(market, now, item["minutes_p75"])
+            eta_med = eta_at(market, now, item["minutes_median"])
+            eta_late = eta_at(market, now, item["minutes_p75"])
             item["eta_median"] = eta_med.isoformat(timespec="minutes")
             item["eta_latest"] = eta_late.isoformat(timespec="minutes")
             item["eta_text"] = (
@@ -254,8 +263,6 @@ async def build_plan(
         estimates.append(item)
     if capital is None:
         capital = env_float("JARVIS_CAPITAL", 0.0) or None
-    if market == "stock" and cat is None:
-        cat = await C.safe_check(symbol, now)
     plan = {
         "symbol": symbol, "market": market, "side": side,
         "entry": levels.entry, "stop": levels.stop, "stop_source": levels.stop_source,
@@ -272,9 +279,33 @@ async def build_plan(
         "created_at": now.isoformat(timespec="seconds"),
         "catalyst": cat,
     }
-    plan["score"] = SC.evaluate(plan, daily, cat, settings)
+    plan["score"] = SC.evaluate(plan, daily, cat, s)
     return plan
 
+
+async def build_plan(
+    symbol: str, market: str, side: str = "long", entry: float | None = None,
+    stop: float | None = None, targets: list[float] | None = None, now: datetime | None = None,
+    capital: float | None = None, risk_pct: float | None = None, source: str | None = None,
+    cat: dict | None = None,
+) -> dict:
+    """Plan complet : niveaux, délais rejoués, checklist, catalyseur et note composite.
+
+    Lit les bougies (et le catalyseur pour une action) puis confie le calcul à plan_from_bars.
+    `cat` : catalyseur déjà lu (le scanner l'a en main) pour ne pas rappeler Finnhub.
+    """
+    symbol, market, side = symbol.strip().upper(), _market(market), side.lower()
+    now = now or datetime.now(timezone.utc)
+    cfg = SETTINGS[market]
+    bars = await candles(symbol, market, cfg["interval"], source)
+    # Niveaux d'abord : un plan impossible ne coûte ni bougies journalières ni appels Finnhub.
+    levels = plan_levels(bars, market, side, entry, stop, targets, now)
+    daily = await _optional_candles(symbol, market, 1440, source)
+    h4 = await _optional_candles(symbol, market, 240, source)
+    if market == "stock" and cat is None:
+        cat = await C.safe_check(symbol, now)
+    return plan_from_bars(symbol, market, side, bars, daily, h4, now, cat, entry, stop, targets,
+                          capital, risk_pct, levels=levels)
 
 def _num(x: float) -> str:
     return f"{x:,.6g}".replace(",", " ")

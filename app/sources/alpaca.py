@@ -86,6 +86,43 @@ async def bars(symbols: list[str], interval_min: int, days: int, now: datetime |
     return {s: sorted(rows, key=lambda r: r["t"]) for s, rows in out.items()}
 
 
+async def bars_range(symbols: list[str], interval_min: int, start: datetime, end: datetime, feed: str = "sip",
+                     adjustment: str = "split", transport: httpx.AsyncBaseTransport | None = None,
+                     max_pages: int = 500, call=None) -> dict[str, list[dict]]:
+    """Bougies de plusieurs actions entre deux instants (pagination page_token / next_page_token).
+
+    Pour l'historique (labo) : `end` doit être antérieur à maintenant - 16 min avec le flux SIP gratuit.
+    `call(fn, *args, **kwargs)` enveloppe chaque requête (limite de débit, nouvelles tentatives).
+    """
+    async def direct(fn, *args, **kwargs):
+        return await fn(*args, **kwargs)
+
+    call = call or direct
+    params = {"symbols": ",".join(symbols), "timeframe": TIMEFRAMES[interval_min], "limit": 10000,
+              "start": start.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+              "end": end.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+              "adjustment": adjustment, "feed": feed, "sort": "asc"}
+    out: dict[str, list[dict]] = {s: [] for s in symbols}
+    for _ in range(max_pages):
+        payload = await call(_request, "GET", f"{DATA}/v2/stocks/bars", dict(params), transport=transport) or {}
+        for symbol, rows in (payload.get("bars") or {}).items():
+            out.setdefault(symbol, []).extend(_bar(b) for b in rows)
+        token = payload.get("next_page_token")
+        if not token:
+            break
+        params["page_token"] = token
+    else:
+        raise SourceError(f"pagination Alpaca interrompue après {max_pages} pages")
+    return {s: sorted(rows, key=lambda r: r["t"]) for s, rows in out.items()}
+
+
+async def assets(status: str = "active", transport: httpx.AsyncBaseTransport | None = None) -> list[dict]:
+    """Liste des actions US (lecture seule, compte fictif) : symbole, place, négociable, attributs."""
+    payload = await _request("GET", f"{_trading_base()}/v2/assets",
+                             {"status": status, "asset_class": "us_equity"}, transport=transport)
+    return payload or []
+
+
 def regular_hours(rows: list[dict]) -> list[dict]:
     """Garde les bougies de la séance régulière (9 h 30 - 16 h à New York), comme Twelve Data :
     VWAP et points pivots se calculent sur la séance, pas sur la pré-ouverture."""

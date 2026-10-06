@@ -11,6 +11,7 @@ qu'aux comptes listés dans JARVIS_DISCORD_OWNER_ID et ignore tout le reste sans
   !propositions         réglages que JARVIS propose et qui attendent ta réponse
   !oui 3 / !non 3       approuver ou refuser la proposition 3 (ou les boutons sous le message)
   !regle                réglages actuels
+  !labo                 état du labo de performance (rejeu, trades simulés)
   !aide                 cette liste
 
 Les propositions de réglages arrivent en message privé, avec des boutons Approuver / Refuser.
@@ -20,6 +21,7 @@ import logging
 import os
 
 from app import config
+from app.lab import status as lab_status
 from app.notify.discord import split_message
 from app.trading import paper, scanner
 from app.trading import proposals as PR
@@ -144,6 +146,8 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
             return paper.report_text(paper.stats(scheduler.paper_book))
         if cmd == "regle":
             return settings_text()
+        if cmd == "labo":
+            return lab_status.text(await asyncio.to_thread(lab_status.status))
         if cmd == "propositions":
             pending = PR.proposals.pending()
             if not pending:

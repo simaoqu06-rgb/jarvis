@@ -185,8 +185,12 @@ def _quantile(sorted_values: list[float], q: float) -> float:
     return sorted_values[index]
 
 
-def historical_timing(candles: list[dict], levels: Levels, horizon_bars: int) -> dict:
+def historical_timing(candles: list[dict], levels: Levels, horizon_bars: int,
+                      lookback: int | None = None) -> dict:
     """Rejoue le plan (mêmes écarts en %) depuis chaque bougie passée.
+
+    `lookback` : nombre maximal de départs rejoués (les plus récents) ; None = tout l'historique,
+    comme en direct. Le labo le borne pour tenir des centaines de plans par jour.
 
     Pour chaque TP : part des départs où il a été touché avant le stop et dans l'horizon,
     part des départs où le stop est venu avant lui, et nombre de bougies qu'il a fallu
@@ -199,6 +203,8 @@ def historical_timing(candles: list[dict], levels: Levels, horizon_bars: int) ->
         raise ValueError("risque nul : le stop est confondu avec l'entrée")
     stop_pct = abs(levels.stop - levels.entry) / levels.entry
     target_pcts = [abs(t.price - levels.entry) / levels.entry for t in levels.targets]
+    if lookback is not None and len(candles) - 1 - horizon_bars > lookback:
+        candles = candles[-(lookback + horizon_bars + 1):]
     starts = len(candles) - 1 - horizon_bars
     if starts < 30:
         raise ValueError("historique trop court pour estimer les délais")
