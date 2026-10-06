@@ -145,6 +145,48 @@ numérotée (ex. « `rsi_max` 75 → 65 : RSI ≥ 65 à -0,40 R sur 18 plans »)
 privé Discord avec des boutons Approuver / Refuser, et dans le cockpit. Rien ne change sans ton
 accord ; une proposition refusée n'est pas reproposée avec la même valeur.
 
+## Labo de performance
+
+Un second service, `jarvis-lab` (`python -m app.lab.worker`), simule des centaines de trades par
+jour avec **le même code que le direct** (`app/trading/plan.py`, `signals.py`, `score.py`, réglages
+de `settings.py`, via `service.plan_from_bars`) et les journalise dans SQLite (`data/lab.db`,
+`JARVIS_LAB_DB`). Il ne passe aucun ordre, ni réel ni fictif.
+
+- **Univers du jour**, calculé avec les seules données de la veille : ~300 actions US (les 200 plus
+  gros volumes en dollars, puis les plus fortes variations et les plus forts volumes relatifs) et les
+  50 paires USDT d'OKX au plus gros volume. Aucun filtre de liquidité ni de capitalisation. Le scanner
+  en direct part du screener Alpaca (pré-ouverture comprise), qui ne se rejoue pas : c'est l'approximation
+  la plus proche sans biais. La liste des actions inclut les valeurs retirées de la cote qu'Alpaca connaît
+  encore. **Limite connue (crypto)** : OKX ne liste que les paires cotées aujourd'hui, donc l'univers
+  crypto rejoué exclut les paires retirées pendant la période (biais du survivant : les résultats crypto
+  du rejeu sont probablement flattés). Ces limites figurent aussi dans `limitations` de `/api/lab/status`.
+- **Plans** : actions à 9 h 10 (New York) sur des bougies de 15 min, crypto toutes les 4 h (0 h, 4 h…
+  20 h UTC) sur des bougies d'1 h ; longs seulement pour l'instant (colonne `side` prête pour les
+  shorts). Le plan ne voit que les bougies closes à l'heure de décision. Catalyseur non rejoué
+  (`context.catalyst_replayed = false`) : l'historique des actus arrivera avec le Labo 2. Délais
+  rejoués sur les 1 500 derniers départs.
+- **Exécution simulée** sur les bougies de 5 min qui suivent : ordre limité à l'entrée (exécuté s'il
+  est traversé d'un pas de cotation, ou à l'ouverture s'il est déjà au marché), sorties 1/3 au TP1,
+  1/3 au TP2, 1/3 au TP3, stop remonté à l'entrée après le TP1 ; stop prioritaire sur une bougie
+  ambiguë, gap au-delà du stop exécuté à l'ouverture. Actions soldées à la clôture de la séance, crypto
+  à 24 h. Coûts estimés (demi-écart + glissement selon le prix ou le rang de volume, frais OKX),
+  regroupés dans `app/lab/simulator.py`. Résultats en R bruts et nets, délais de chaque TP, MFE/MAE.
+- **Rejeu** de `JARVIS_LAB_REPLAY_DAYS` séances (504 ≈ 2 ans) avant le premier lancement, par
+  morceaux (surtout la nuit et le week-end), reprenable après une coupure ; puis chaque séance et
+  chaque créneau crypto en direct (`origin = live`). Les réglages sont figés dans une version de
+  méthode (`v1` au premier lancement), gardée sur chaque trade.
+- **Données** : Alpaca (bougies SIP, clés existantes) pour les actions, API publique d'OKX (sans clé)
+  pour la crypto. Le labo prend au plus 100 requêtes Alpaca par minute (`JARVIS_LAB_ALPACA_PER_MINUTE`)
+  et ne touche pas aux actions pendant la séance US (le direct garde la limite) ; il ne demande que
+  les heures de séance. Une division d'actions détectée (bougie déjà stockée qui change de plus de 1 %)
+  recharge tout l'historique du symbole. Sans clés Alpaca, la crypto tourne seule.
+- **Frais crypto** : OKX « maker » 0,08 % pour les ordres posés (entrée limitée, TP), « taker » 0,10 %
+  pour l'entrée au marché, le stop et la sortie à l'horizon.
+
+`GET /api/lab/status` ou `!labo` : avancement du rejeu, nombre de trades par marché et origine,
+dernier jour en direct, taille de la base. Les statistiques arrivent avec le Labo 2.
+Mise en route et vérification des sources : [DEPLOY.md](DEPLOY.md#labo-de-performance).
+
 ## Commandes Discord
 
 | Commande | Effet |
@@ -156,6 +198,7 @@ accord ; une proposition refusée n'est pas reproposée avec la même valeur.
 | `!propositions` | réglages proposés qui attendent ta réponse |
 | `!oui 3` / `!non 3` | approuver ou refuser la proposition 3 (ou les boutons) |
 | `!regle` | réglages actuels |
+| `!labo` | état du labo de performance (rejeu, trades simulés) |
 | `!aide` | liste des commandes |
 
 Le bot ne répond qu'aux comptes de `JARVIS_DISCORD_OWNER_ID`. Mise en place : [DEPLOY.md](DEPLOY.md).

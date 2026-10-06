@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app import alerts, needs, scheduler
+from app.lab import status as lab_status
 from app.notify import discord
 from app.trading import paper, scanner
 from app.trading import proposals as PR
@@ -384,6 +385,14 @@ async def trading_proposal_decide(pid: int, choice: str):
         raise HTTPException(404, str(exc))
     except ValueError as exc:
         raise HTTPException(409, str(exc))
+
+
+@app.get("/api/lab/status")
+def lab_state():
+    """Labo de performance : avancement du rejeu, trades simulés par marché et origine, taille de la base.
+    Lecture seule (la base est écrite par le service jarvis-lab)."""
+    st = lab_status.status()
+    return st | {"text": lab_status.text(st)}
 
 
 COCKPIT_HTML = Path(__file__).parent / "web" / "cockpit.html"

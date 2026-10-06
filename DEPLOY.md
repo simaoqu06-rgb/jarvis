@@ -101,7 +101,7 @@ Deux ajouts dans `.env`, puis `docker compose up -d` :
 
    Génère une nouvelle paire plutôt que de reprendre celle d'OpenClaw, puis révoque l'ancienne.
 2. **Bot Discord** (commandes `!plan`, `!prends`, `!scan`, `!bilan`, `!propositions`, `!oui`, `!non`,
-   `!regle`, `!aide`, et propositions de réglages en privé ; détail dans le [README](README.md#commandes-discord)) :
+   `!regle`, `!labo`, `!aide`, et propositions de réglages en privé ; détail dans le [README](README.md#commandes-discord)) :
    - https://discord.com/developers/applications > *New Application* > onglet *Bot* :
      *Reset Token* et copie-le, puis active *Message Content Intent*.
    - Onglet *OAuth2* > *URL Generator* : coche `bot`, puis les permissions *View Channels*,
@@ -115,6 +115,34 @@ Deux ajouts dans `.env`, puis `docker compose up -d` :
    ```
 
    Le bot ne répond qu'à ce compte (plusieurs identifiants possibles, séparés par des virgules).
+
+## Labo de performance
+
+`docker compose up -d --build` démarre les deux services : `jarvis` (le serveur) et `jarvis-lab`
+(le labo, un seul cœur, sans port). Le labo utilise les clés Alpaca déjà dans `.env` ; la crypto vient
+de l'API publique d'OKX, sans clé. Réglages dans `.env` :
+
+```
+JARVIS_LAB_ENABLED=on        # off : le service reste en veille
+JARVIS_LAB_DB=data/lab.db
+JARVIS_LAB_REPLAY_DAYS=504   # séances rejouées (≈ 2 ans)
+JARVIS_LAB_ALPACA_PER_MINUTE=100  # part de la limite Alpaca (200/min) laissée au labo
+```
+
+Le labo ne touche pas aux actions pendant la séance US (la crypto continue) et tourne surtout la
+nuit et le week-end. Il est limité à 1 cœur et 1,5 Go de mémoire.
+
+Avant le premier lancement, vérifie la profondeur des sources, la place libre et la taille estimée
+de la base :
+
+```bash
+docker compose run --rm jarvis-lab python -m app.lab.check_sources
+```
+
+Ensuite : `docker compose logs -f jarvis-lab` pour suivre le rejeu, `!labo` sur Discord ou
+`curl http://127.0.0.1:8000/api/lab/status` pour l'avancement. Le premier passage télécharge
+l'historique (bougies journalières de toutes les actions, puis 5 min des valeurs de chaque jour) :
+compter quelques heures avant la fin du rejeu, surtout la nuit et le week-end.
 
 ## Mettre à jour
 

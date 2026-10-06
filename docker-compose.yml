@@ -9,3 +9,23 @@ services:
     # Accessible seulement depuis le serveur lui-même (pas d'accès public aux routes)
     ports:
       - "127.0.0.1:8000:8000"
+
+  # Labo de performance : rejeu historique et trades simulés (python -m app.lab.worker).
+  # Même image, même .env et même dossier data/ ; aucun port, un seul cœur pour laisser JARVIS réactif.
+  jarvis-lab:
+    build: .
+    command: python -m app.lab.worker
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    cpus: "1.0"
+    mem_limit: 1500m
+    # Le worker n'a pas de serveur web : santé = battement (lab.heartbeat, à côté de JARVIS_LAB_DB) rafraîchi
+    # après chaque étape (lot de bougies, jour rejoué, passage) ; 30 min sans battement = boucle bloquée
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,sys,time; p=os.path.join(os.path.dirname(os.getenv('JARVIS_LAB_DB','data/lab.db')) or '.','lab.heartbeat'); sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p) < 1800 else 1)"]
+      interval: 5m
+      timeout: 10s
+      start_period: 2m
+      retries: 3
