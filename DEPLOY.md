@@ -11,7 +11,7 @@ L'installation passe par Docker et marche pareil sur n'importe quel serveur Linu
 ## 1. Créer le serveur (exemple : Hetzner)
 
 1. Crée un compte sur https://www.hetzner.com/cloud.
-2. « Add Server » : image **Ubuntu 24.04**, le plus petit type (CX22 ou équivalent), une région
+2. « Add Server » : image **Ubuntu 24.04**, le type **CX23** (2 vCPU, 4 Go, environ 7 € TTC par mois avec l'IPv4) en gardant l'IPv4 publique cochée, une région
    en Europe (Falkenstein, Nuremberg ou Helsinki).
 3. Ajoute ta clé SSH si tu en as une, sinon Hetzner t'envoie un mot de passe root par mail.
 4. Note l'adresse IP du serveur.
