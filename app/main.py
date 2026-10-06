@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from app import alerts, needs, scheduler
 from app.notify import discord
 from app.trading import paper, scanner
+from app.trading import proposals as PR
 from app.trading import service as trading
 from app.trading.settings import settings
 
@@ -299,6 +300,25 @@ async def trading_paper_submit(req: TradeRequest):
     if not entry:
         raise HTTPException(422, "Rien passé : action seulement, clés Alpaca, taille suffisante, pas déjà en cours")
     return entry
+
+
+@app.get("/api/trading/proposals")
+async def trading_proposals(status: str | None = Query(None, description="pending, approved, refused")):
+    """Réglages proposés par JARVIS d'après le forward-test."""
+    return [p for p in reversed(PR.proposals.items) if status is None or p["status"] == status]
+
+
+@app.post("/api/trading/proposals/{pid}/{choice}")
+async def trading_proposal_decide(pid: int, choice: str):
+    """Approuver (approve) ou refuser (refuse) une proposition ; seule l'approbation change le réglage."""
+    if choice not in ("approve", "refuse"):
+        raise HTTPException(422, "choice doit valoir approve ou refuse")
+    try:
+        return PR.proposals.decide(pid, choice == "approve")
+    except KeyError as exc:
+        raise HTTPException(404, str(exc))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
 
 
 COCKPIT_HTML = Path(__file__).parent / "web" / "cockpit.html"

@@ -8,8 +8,12 @@ qu'aux comptes listés dans JARVIS_DISCORD_OWNER_ID et ignore tout le reste sans
   !prends NVDA          calcule le plan et suit le trade (TP/SL annoncés, cockpit)
   !scan                 scanner pré-ouverture tout de suite
   !bilan                bilan du forward-test sur le compte fictif
-  !regle                réglages actuels ; « !regle rsi_max 70 » pour en changer un (« defaut » pour revenir)
+  !propositions         réglages que JARVIS propose et qui attendent ta réponse
+  !oui 3 / !non 3       approuver ou refuser la proposition 3 (ou les boutons sous le message)
+  !regle                réglages actuels
   !aide                 cette liste
+
+Les propositions de réglages arrivent en message privé, avec des boutons Approuver / Refuser.
 """
 import asyncio
 import logging
@@ -18,14 +22,22 @@ import os
 from app import config
 from app.notify.discord import split_message
 from app.trading import paper, scanner
+from app.trading import proposals as PR
 from app.trading import service as trading
-from app.trading.settings import DEFAULTS, settings
+from app.trading.settings import settings
 
 log = logging.getLogger(__name__)
 TOKEN_NAME = "DISCORD_BOT_TOKEN"
 CRYPTO = {"BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "AVAX", "LINK", "DOT", "LTC", "BNB", "TRX", "SUI", "PEPE",
           "SHIB", "XLM", "ATOM", "NEAR", "APT", "ARB", "OP", "INJ", "TIA", "SEI", "HBAR", "UNI", "AAVE", "XMR"}
-HELP = __doc__.split("\n\n", 2)[2].strip()
+HELP = __doc__.split("\n\n")[2].strip()
+PROPOSAL_PREFIX = "jarvis:prop:"
+outbox: asyncio.Queue = asyncio.Queue()  # propositions à envoyer en privé avec leurs boutons
+
+
+def offer(proposal: dict) -> None:
+    """Envoie une proposition au propriétaire dès que le bot est connecté."""
+    outbox.put_nowait(proposal)
 
 
 def owners() -> set[int]:
@@ -56,7 +68,7 @@ def parse_trade(args: list[str]) -> dict:
 
 def settings_text() -> str:
     current = settings.all()
-    lines = ["**Réglages du trading** (`!regle cle valeur`, `!regle cle defaut`)"]
+    lines = ["**Réglages du trading** (✏️ = changé après une proposition approuvée)"]
     for key, value in current.items():
         mark = " ✏️" if key in settings.overrides else ""
         lines.append(f"`{key}` = {value}{mark}")
@@ -90,23 +102,16 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
             from app import scheduler
             return paper.report_text(paper.stats(scheduler.paper_book))
         if cmd == "regle":
-            if not args:
-                return settings_text()
-            if len(args) < 2:
-                return f"`{args[0]}` = {settings.get(args[0])}" if args[0] in DEFAULTS else f"Réglage inconnu : `{args[0]}`"
-            key, raw = args[0], " ".join(args[1:])
-            if key not in DEFAULTS:
-                return f"Réglage inconnu : `{key}`"
-            if isinstance(DEFAULTS[key], dict):
-                return f"`{key}` se change par la route PUT /api/trading/settings"
-            if raw.lower() in ("defaut", "défaut", "default"):
-                value = None
-            elif isinstance(DEFAULTS[key], list):
-                value = [x.strip().upper() for x in raw.split(",") if x.strip()]
-            else:
-                value = raw
-            settings.update({key: value})
-            return f"✏️ `{key}` = {settings.get(key)}"
+            return settings_text()
+        if cmd == "propositions":
+            pending = PR.proposals.pending()
+            if not pending:
+                return "Aucune proposition en attente."
+            return "\n".join(PR.text(p) for p in pending) + "\n-# `!oui N` ou `!non N`"
+        if cmd in ("oui", "non"):
+            if not args or not args[0].isdigit():
+                return f"Donne le numéro, ex. `!{cmd} 3`"
+            return PR.decision_text(PR.proposals.decide(int(args[0]), cmd == "oui"))
     except (ValueError, KeyError) as exc:
         return f"⚠️ {exc}"
     except (trading.PlanError, scanner.ScanError) as exc:
@@ -122,6 +127,39 @@ async def run(lock: asyncio.Lock | None = None) -> None:
     intents.message_content = True
     client = discord.Client(intents=intents, allowed_mentions=discord.AllowedMentions.none())
     allowed = owners()
+
+    def buttons(pid: int):
+        view = discord.ui.View(timeout=None)
+        view.add_item(discord.ui.Button(label="Approuver", style=discord.ButtonStyle.success,
+                                        custom_id=f"{PROPOSAL_PREFIX}{pid}:oui"))
+        view.add_item(discord.ui.Button(label="Refuser", style=discord.ButtonStyle.danger,
+                                        custom_id=f"{PROPOSAL_PREFIX}{pid}:non"))
+        return view
+
+    async def deliver():
+        await client.wait_until_ready()
+        owner = await client.fetch_user(next(iter(allowed)))
+        while True:
+            p = await outbox.get()
+            try:
+                await owner.send(f"🧪 {PR.text(p)}", view=buttons(p["id"]))
+            except discord.HTTPException:
+                log.exception("Proposition %s non envoyée en privé", p["id"])
+
+    @client.event
+    async def on_interaction(interaction):
+        custom_id = (interaction.data or {}).get("custom_id", "")
+        if not custom_id.startswith(PROPOSAL_PREFIX):
+            return
+        if interaction.user.id not in allowed:
+            await interaction.response.send_message("Réservé au propriétaire.", ephemeral=True)
+            return
+        pid, choice = custom_id.removeprefix(PROPOSAL_PREFIX).split(":")
+        try:
+            p = PR.proposals.decide(int(pid), choice == "oui")
+            await interaction.response.edit_message(content=f"{PR.text(p)}\n{PR.decision_text(p)}", view=None)
+        except (KeyError, ValueError) as exc:
+            await interaction.response.edit_message(content=f"⚠️ {exc}", view=None)
 
     @client.event
     async def on_message(message):
@@ -139,8 +177,10 @@ async def run(lock: asyncio.Lock | None = None) -> None:
             for chunk in split_message(answer):
                 await message.channel.send(chunk)
 
+    sender = asyncio.create_task(deliver())
     try:
         await client.start(config.secret(TOKEN_NAME))
     finally:
+        sender.cancel()
         if not client.is_closed():
             await client.close()

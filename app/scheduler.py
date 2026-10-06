@@ -12,6 +12,8 @@ from app import alerts, config
 from app.notify import bot, discord
 from app.sources import alpaca
 from app.trading import paper, scanner
+from app.trading import proposals as PR
+from app.trading.proposals import proposals
 from app.trading import service as trading
 from app.trading.settings import settings
 
@@ -124,7 +126,16 @@ async def tick_paper() -> None:
         await paper.check(paper_book, now)
     if report_due(now) and paper_book.entries:
         state.data["paper_report_week"] = now.astimezone(NEW_YORK).strftime("%G-W%V")
-        await discord.send(paper.report_text(paper.stats(paper_book)))
+        st = paper.stats(paper_book)
+        await discord.send(paper.report_text(st))
+        for sg in st["suggestions"]:
+            p = sg["key"] and proposals.propose(sg["key"], sg["value"], sg["why"])
+            if not p:
+                continue
+            if bot.enabled():
+                bot.offer(p)  # en privé, avec les boutons Approuver / Refuser
+            else:
+                await discord.send(f"🧪 {PR.text(p)}\n-# À approuver ou refuser dans le cockpit.")
 
 
 JOBS = [

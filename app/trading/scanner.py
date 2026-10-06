@@ -4,8 +4,8 @@ Repris de l'agent scanner d'OpenClaw, mais calculé au lieu d'être deviné, et 
 - univers : les 100 plus actives et les 50 plus fortes hausses (screener Alpaca), plus la liste
   suivie et `scan_universe` ; les ETF tombent d'eux-mêmes (pas de profil de société chez Finnhub) ;
 - en jeu : volume de la veille ≥ 1,5× la moyenne 20 jours OU gap de pré-ouverture ≥ 2 % ;
-- tradable : prix ≥ 5 $ (pas de plafond), liquidité ≥ 20 M$ par jour, capitalisation ≥ 500 M$,
-  amplitude journalière (ATR) ≥ 2,5 % pour que des TP à +5-10 % soient réalistes ;
+- tradable : prix ≥ 5 $ (pas de plafond), amplitude journalière (ATR) ≥ 2,5 % pour que des TP
+  à +5-10 % soient réalistes ; ni liquidité ni capitalisation minimales (choix de Simão) ;
 - dans la tendance : au-dessus des MM 20 et 50 jours, RSI 14 jours entre 45 et 75 ;
 - catalyseur réel (Finnhub) : pas d'augmentation de capital, pas de résultats dans les 48 h.
 Tous ces seuils sont dans app/trading/settings.py et se changent sans toucher au code.
@@ -67,8 +67,6 @@ def filter_reasons(f: dict, s) -> list[str]:
     out = []
     if f["price"] < s["scan_price_min"] or (s["scan_price_max"] and f["price"] > s["scan_price_max"]):
         out.append("prix")
-    if f["dollar_volume"] < s["min_dollar_volume"]:
-        out.append("liquidité")
     if not ((f["rvol"] or 0) >= s["scan_rvol_min"] or f["gap_pct"] >= s["scan_gap_min_pct"]):
         out.append("pas en jeu")
     if f["atr_pct"] < s["scan_atr_pct_min"]:
@@ -131,11 +129,7 @@ async def scan(now: datetime | None = None, s=settings, save: bool = True) -> di
     cats = await asyncio.gather(*(C.safe_check(sym, now) for sym, _ in shortlist))
     picks, skipped = [], []
     for (symbol, f), cat in zip(shortlist, cats):
-        cap = (cat or {}).get("market_cap")
-        if cap is not None and cap < s["scan_market_cap_min"]:
-            skipped.append(f"{symbol} (capitalisation {cap / 1e6:.0f} M$)")
-            continue
-        if cat and cat.get("available") and cap is None:
+        if cat and cat.get("available") and cat.get("market_cap") is None:
             skipped.append(f"{symbol} (pas une société : ETF ?)")
             continue
         if s["scan_exclude_dilution"] and cat and cat.get("dilution"):

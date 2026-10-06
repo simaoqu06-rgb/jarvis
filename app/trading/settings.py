@@ -1,9 +1,9 @@
 """Réglages du trading modifiables sans toucher au code : seuils de la note, du veto et du scanner.
 
 Rien n'est gravé dans le marbre : les valeurs par défaut ci-dessous sont un point de départ,
-le fichier data/trading_settings.json (JARVIS_SETTINGS_PATH) garde ce que Simão a changé
-(route PUT /api/trading/settings ou commande Discord !regle). Le bilan du forward-test
-(app/trading/paper.py) propose des ajustements chiffrés ; ils ne s'appliquent qu'une fois validés.
+le fichier data/trading_settings.json (JARVIS_SETTINGS_PATH) garde ce qui a changé. Les
+changements viennent des propositions de JARVIS (app/trading/proposals.py), tirées du bilan
+du forward-test, et ne s'appliquent qu'une fois approuvées par Simão.
 """
 import json
 import logging
@@ -24,13 +24,11 @@ DEFAULTS: dict = {
     "rsi_max": 75.0,
     "max_stop_atr": 2.5,        # stop plus loin que ça (en ATR de la bougie du plan) : note de risque en baisse
     "min_tp1_r": 0.8,           # TP1 plus près que ça (en R) : un mur juste devant l'entrée
-    "min_dollar_volume": 20e6,  # liquidité minimale (volume moyen 20 jours × prix) pour une action
     # --- Scanner avant l'ouverture US (longs) ---
     "scan_enabled": True,
     "scan_time_ny": "09:10",    # 15 h 10 à Paris la plupart de l'année, 20 min avant l'ouverture
     "scan_price_min": 5.0,
     "scan_price_max": None,     # pas de plafond : les fractions d'action rendent le prix indifférent
-    "scan_market_cap_min": 500e6,
     "scan_rvol_min": 1.5,       # volume de la veille / moyenne 20 jours
     "scan_gap_min_pct": 2.0,    # ou un gap d'au moins 2 % en pré-ouverture : la valeur est « en jeu »
     "scan_atr_pct_min": 2.5,    # amplitude journalière moyenne : assez de mouvement pour des TP à +5-10 %

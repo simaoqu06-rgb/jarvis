@@ -6,6 +6,7 @@ import pytest
 from app.notify import bot
 from app.sources import alpaca
 from app.trading import paper, scanner
+from app.trading import proposals as PR
 from app.trading.settings import Settings
 from tests.test_score import daily
 
@@ -73,7 +74,7 @@ def test_bilan_et_proposition_de_reglage(s):
     assert st["by"]["rsi"]["groups"]["≥ 65"]["avg_r"] == -1.0
     assert any(sg["key"] == "rsi_max" for sg in st["suggestions"])
     assert st["timing"]["median_ratio"] == 1.0
-    assert "!regle rsi_max 65" in paper.report_text(st)
+    assert "propositions de réglages suivent" in paper.report_text(st)
 
 
 def test_seance_reguliere_seulement():
@@ -90,14 +91,38 @@ def test_commande_discord_lit_le_ticker():
         bot.parse_trade([])
 
 
-async def test_commande_regle(monkeypatch, tmp_path):
+def test_propositions_approuvees_ou_refusees(tmp_path):
     st = Settings(str(tmp_path / "s.json"))
+    pr = PR.Proposals(str(tmp_path / "p.json"), st)
+    assert pr.propose("rsi_max", 75.0, "rien ne change") is None
+    p = pr.propose("rsi_max", 65, "RSI ≥ 65 : -0.40 R")
+    assert p["current"] == 75.0 and st["rsi_max"] == 75.0  # rien n'est appliqué avant l'accord
+    assert pr.propose("rsi_max", 65, "doublon") is None
+    pr.decide(p["id"], approve=True)
+    assert st["rsi_max"] == 65
+    with pytest.raises(ValueError):
+        pr.decide(p["id"], approve=False)
+    q = pr.propose("go_min", 6.5, "notes 6-7 positives")
+    pr.decide(q["id"], approve=False)
+    assert st["go_min"] == 7.0
+    assert pr.propose("go_min", 6.5, "encore") is None  # refusée : pas reproposée
+
+
+async def test_commandes_de_proposition(monkeypatch, tmp_path):
+    st = Settings(str(tmp_path / "s.json"))
+    pr = PR.Proposals(str(tmp_path / "p.json"), st)
+    monkeypatch.setattr(PR, "proposals", pr)
     monkeypatch.setattr(bot, "settings", st)
-    assert "inconnu" in await bot.handle("!regle nimporte 3")
-    assert await bot.handle("!regle rsi_max 70") == "✏️ `rsi_max` = 70.0"
-    assert await bot.handle("!regle rsi_max defaut") == "✏️ `rsi_max` = 75.0"
+    assert await bot.handle("!propositions") == "Aucune proposition en attente."
+    p = pr.propose("rsi_max", 65, "test")
+    assert "Proposition 1" in await bot.handle("!propositions")
+    assert "approuvée" in await bot.handle(f"!oui {p['id']}")
+    assert st["rsi_max"] == 65
+    assert "déjà" in await bot.handle(f"!non {p['id']}")
+    assert "numéro" in await bot.handle("!oui")
+    assert "rsi_max" in await bot.handle("!regle")
     assert await bot.handle("bonjour") is None
-    assert "!plan" in await bot.handle("!aide")
+    assert "!oui" in await bot.handle("!aide")
 
 
 def test_bot_reserve_au_proprietaire(monkeypatch):

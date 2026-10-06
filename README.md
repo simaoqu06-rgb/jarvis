@@ -113,22 +113,22 @@ Chaque plan reçoit une note sur 10, avec ses raisons ligne par ligne (`app/trad
 |---|---|---|
 | Technique | 40 % | checklist EmperorBTC, RSI 14 jours dans la zone 45-75, R/R du plan (mesuré sur le TP2), bonus divergence et bougie |
 | Catalyseur | 30 % | actus réelles des 7 derniers jours et leur tonalité, résultats trimestriels récents ou imminents, augmentation de capital (actions seulement, Finnhub) |
-| Risque | 30 % | stop en ATR, mur proche (TP1 trop près), espérance rejouée sur l'historique, liquidité |
+| Risque | 30 % | stop en ATR, mur proche (TP1 trop près), espérance rejouée sur l'historique |
 
 Sans catalyseur évaluable (crypto), la note se calcule sur les deux autres. **GO** si la note
 atteint 7 et qu'aucun veto ne tombe : résultats dans les 48 h, ou R/R sous 2. Le R/R n'est pas
 suivi à la lettre : jusqu'à 0,2 en dessous, il passe si la note dépasse 7,5.
 
-Tous les seuils sont réglables sans toucher au code (`app/trading/settings.py`) :
-`GET`/`PUT /api/trading/settings` ou `!regle cle valeur` sur Discord.
+Tous les seuils vivent dans `app/trading/settings.py` (`GET /api/trading/settings`, `!regle`).
+Ils évoluent par propositions : JARVIS propose, tu approuves ou refuses (voir plus bas).
 
 ## Scanner avant l'ouverture US
 
 Chaque jour de Bourse à 9 h 10 heure de New York (15 h 10 à Paris), JARVIS examine les 100
 actions les plus actives et les 50 plus fortes hausses (Alpaca), plus la liste suivie, et garde
 celles qui sont en jeu et tradables : volume de la veille ≥ 1,5× la moyenne ou gap ≥ 2 %, prix ≥ 5 $,
-liquidité ≥ 20 M$ par jour, capitalisation ≥ 500 M$, ATR ≥ 2,5 %, au-dessus des MM 20 et 50 jours,
-RSI entre 45 et 75, pas d'augmentation de capital ni de résultats dans les 48 h. Les 5 meilleures
+ATR ≥ 2,5 %, au-dessus des MM 20 et 50 jours, RSI entre 45 et 75, pas d'augmentation de capital
+ni de résultats dans les 48 h. Pas de minimum de liquidité ni de capitalisation. Les 5 meilleures
 reçoivent un plan complet et leur note, envoyés sur Discord. `GET /api/trading/scan` le lance à la demande.
 
 ## Forward-test sur le compte fictif
@@ -138,8 +138,12 @@ trois ordres « bracket » (un tiers de la taille vers chaque TP, même stop), a
 n'est pas touchée dans la séance, soldés après 2 séances. Aucun message trade par trade : seul un
 bilan agrégé part le vendredi à 16 h 30 (New York), avec le résultat moyen en R par verdict,
 par note, par RSI, par volume, par gap et par catalyseur, l'écart entre délais prévus et réels,
-et des réglages à envisager une fois qu'un groupe a 15 exemples. Rien ne change sans ta validation.
 `GET /api/trading/paper/stats` ou `!bilan` à tout moment.
+
+Quand un groupe a 15 exemples et un écart net, JARVIS en tire une **proposition de réglage**
+numérotée (ex. « `rsi_max` 75 → 65 : RSI ≥ 65 à -0,40 R sur 18 plans »). Elle arrive en message
+privé Discord avec des boutons Approuver / Refuser, et dans le cockpit. Rien ne change sans ton
+accord ; une proposition refusée n'est pas reproposée avec la même valeur.
 
 ## Commandes Discord
 
@@ -149,7 +153,9 @@ et des réglages à envisager une fois qu'un groupe a 15 exemples. Rien ne chang
 | `!prends NVDA` | calcule le plan et suit le trade (TP/SL annoncés, cockpit) |
 | `!scan` | scanner tout de suite |
 | `!bilan` | bilan du forward-test |
-| `!regle` | réglages actuels ; `!regle rsi_max 70` pour en changer un, `!regle rsi_max defaut` pour revenir |
+| `!propositions` | réglages proposés qui attendent ta réponse |
+| `!oui 3` / `!non 3` | approuver ou refuser la proposition 3 (ou les boutons) |
+| `!regle` | réglages actuels |
 
 Le bot ne répond qu'aux comptes de `JARVIS_DISCORD_OWNER_ID`. Mise en place : [DEPLOY.md](DEPLOY.md).
 

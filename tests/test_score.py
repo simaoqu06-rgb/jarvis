@@ -73,12 +73,6 @@ def test_dilution_et_actus_negatives_font_baisser(s):
     assert bad < 3 < good
 
 
-def test_peu_liquide_penalise(s):
-    liquid = SC.risk(plan(), daily(vol=1e6), s)[0]
-    thin = SC.risk(plan(), daily(vol=1e3), s)[0]
-    assert thin <= liquid - 3
-
-
 def test_tonalite_des_titres():
     assert C.tone("Acme beats estimates and raises guidance") == "positive"
     assert C.tone("Acme downgraded at Morgan Stanley") == "negative"

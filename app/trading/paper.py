@@ -2,8 +2,8 @@
 y est passée en silence, pour apprendre quels critères paient vraiment.
 
 Rien de tout ça n'arrive sur Discord trade par trade : pas de « tu as raté +12 % ». Seul un bilan
-agrégé par critère part le vendredi soir, avec des propositions de réglages chiffrées
-(appliquées seulement si Simão les valide, via !regle ou PUT /api/trading/settings).
+agrégé par critère part le vendredi soir ; JARVIS en tire des propositions de réglages chiffrées
+que Simão approuve ou refuse (proposals.py).
 
 Mécanique : 3 ordres « bracket » par plan (un tiers de la taille vers TP1, TP2 et TP3, même stop),
 entrée à cours limité au prix du plan. Pas d'entrée dans la première séance : ordres annulés
@@ -245,8 +245,8 @@ def suggestions(st: dict, s=settings) -> list[dict]:
                     "why": f"volume veille < 1,5× : {low_rvol['avg_r']:+.2f} R sur {low_rvol['n']} plans"})
     big_gap = g("gap", "≥ 5 %")
     if big_gap and big_gap["avg_r"] < -0.2:
-        out.append({"key": "scan_gap_min_pct", "value": s["scan_gap_min_pct"],
-                    "why": f"gaps ≥ 5 % : {big_gap['avg_r']:+.2f} R sur {big_gap['n']} plans ; à creuser (entrée sur repli ?)"})
+        out.append({"key": None, "value": None,
+                    "why": f"gaps ≥ 5 % : {big_gap['avg_r']:+.2f} R sur {big_gap['n']} plans ; une entrée sur repli serait à étudier"})
     mid = g("composite", "6-7")
     if mid and mid["avg_r"] > 0.2 and s["go_min"] > 6:
         out.append({"key": "go_min", "value": 6.5, "why": f"notes 6-7 : {mid['avg_r']:+.2f} R sur {mid['n']} plans, le seuil de 7 est peut-être trop strict"})
@@ -275,12 +275,13 @@ def report_text(st: dict) -> str:
             lines.append(f"-# {b['label']} : {cells}")
     if st["timing"]:
         lines.append(f"-# Délais : les TP arrivent en {st['timing']['median_ratio']:g}× le délai prévu (médiane, {st['timing']['n']} TP)")
-    if st["suggestions"]:
-        lines.append("**Réglages à envisager** (rien n'est changé sans toi) :")
-        for sg in st["suggestions"]:
-            cmd = f" → `!regle {sg['key']} {sg['value']:g}`" if sg["key"] else ""
-            lines.append(f"• {sg['why']}{cmd}")
-    else:
+    notes = [sg for sg in st["suggestions"] if not sg["key"]]
+    changes = [sg for sg in st["suggestions"] if sg["key"]]
+    for sg in notes:
+        lines.append(f"• {sg['why']}")
+    if changes:
+        lines.append("Mes propositions de réglages suivent : rien ne change sans ton accord.")
+    elif not notes:
         lines.append(f"-# Pas encore assez d'exemples pour proposer un réglage ({MIN_SAMPLES} par groupe).")
     return "\n".join(lines)
 

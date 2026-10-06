@@ -6,7 +6,7 @@ Trois sous-notes, chacune avec ses raisons en une ligne :
 - catalyseur (30 %, actions seulement) : actus réelles et leur tonalité, résultats trimestriels
   récents ou imminents, augmentation de capital ;
 - risque (30 %) : distance du stop en ATR, mur proche (TP1 trop près), espérance rejouée sur
-  l'historique, liquidité.
+  l'historique.
 Sans catalyseur évaluable (crypto, Finnhub muet), la note se calcule sur les deux autres.
 
 Veto : résultats trimestriels imminents, R/R trop bas. Le R/R n'est pas suivi à la lettre :
@@ -108,11 +108,6 @@ def risk(plan: dict, daily: list[dict] | None, s) -> tuple[float, list[str]]:
     if plan["stop_first_rate"] > 0.6:
         score -= 1
         reasons.append(f"stop touché en premier dans {plan['stop_first_rate']:.0%} des cas")
-    if plan["market"] == "stock" and daily and len(daily) >= 20:
-        dollar_volume = sum(c["c"] * c["v"] for c in daily[-21:-1]) / 20
-        if dollar_volume < s["min_dollar_volume"]:
-            score -= 3
-            reasons.append(f"peu liquide ({dollar_volume / 1e6:.0f} M$ par jour)")
     return _clamp(score), reasons
 
 

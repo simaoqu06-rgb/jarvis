@@ -99,7 +99,7 @@ Trois ajouts dans `.env`, puis `docker compose up -d` :
    ```
 
    Génère une nouvelle paire plutôt que de reprendre celle d'OpenClaw, puis révoque l'ancienne.
-2. **Bot Discord** (commandes `!plan`, `!prends`, `!scan`, `!bilan`, `!regle`) :
+2. **Bot Discord** (commandes `!plan`, `!prends`, `!scan`, `!bilan`, `!oui`, `!non`, et propositions de réglages en privé) :
    - https://discord.com/developers/applications > *New Application* > onglet *Bot* :
      *Reset Token* et copie-le, puis active *Message Content Intent*.
    - Onglet *OAuth2* > *URL Generator* : coche `bot`, puis les permissions *View Channels*,
