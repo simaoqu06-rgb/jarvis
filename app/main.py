@@ -2,20 +2,27 @@
 
 Lancer : uvicorn app.main:app --reload
 """
+import hmac
 import logging
 import os
+import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from app import alerts, needs, scheduler
+from app import alerts, config, needs, scheduler
+from app.lab import catalysts as lab_catalysts
+from app.lab import db as lab_db
+from app.lab import stats as lab_stats
 from app.lab import status as lab_status
+from app.lab import summary as lab_summary
+from app.lab import validator as lab_validator
 from app.notify import discord
 from app.trading import paper, scanner
 from app.trading import proposals as PR
@@ -393,6 +400,131 @@ def lab_state():
     Lecture seule (la base est écrite par le service jarvis-lab)."""
     st = lab_status.status()
     return st | {"text": lab_status.text(st)}
+
+
+# --- Labo : accès en lecture pour la routine du soir (clé JARVIS_LAB_API_KEY) ---------------
+# Lecture seule sur data/lab.db (le worker jarvis-lab est seul à écrire) ; une règle soumise est
+# déposée dans une file de fichiers que le worker lit. Rien ici ne change la méthode en direct.
+LAB_KEY_NAME = "JARVIS_LAB_API_KEY"
+
+
+def lab_key(request: Request) -> None:
+    """Clé dans l'en-tête X-Lab-Key (ou Authorization: Bearer …), comparée en temps constant.
+    Sans clé configurée, ces routes sont désactivées (503)."""
+    expected = config.secret(LAB_KEY_NAME)
+    if not expected:
+        raise HTTPException(503, "Accès au labo désactivé : JARVIS_LAB_API_KEY absente")
+    given = request.headers.get("x-lab-key", "")
+    auth = request.headers.get("authorization", "")
+    if not given and auth.lower().startswith("bearer "):
+        given = auth[7:].strip()
+    if not hmac.compare_digest(given.encode(), expected.encode()):
+        raise HTTPException(401, "Clé du labo invalide")
+
+
+@app.exception_handler(sqlite3.Error)
+async def lab_db_error(_request: Request, exc: sqlite3.Error):
+    """Base du labo illisible ou d'un ancien schéma (worker pas encore redémarré) : 503, pas 500."""
+    return JSONResponse({"detail": f"Base du labo illisible : {exc}"}, status_code=503)
+
+
+def _lab_conn():
+    conn = lab_db.open_readonly()
+    if conn is None:
+        raise HTTPException(503, "Base du labo absente (le service jarvis-lab n'a pas encore démarré)")
+    return conn
+
+
+def _day(value: str | None, name: str) -> str | None:
+    if value is None:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date().isoformat()
+    except ValueError:
+        raise HTTPException(422, f"{name} : date AAAA-MM-JJ attendue")
+
+
+@app.get("/api/lab/summary", dependencies=[Depends(lab_key)])
+def lab_summary_get(day: str | None = None):
+    """Dernier résumé du soir (ou celui d'un jour) : JSON compact et texte."""
+    conn = _lab_conn()
+    try:
+        out = lab_summary.latest(conn, _day(day, "day"))
+    finally:
+        conn.close()
+    if not out:
+        raise HTTPException(404, "Aucun résumé pour l'instant")
+    return out
+
+
+@app.get("/api/lab/stats", dependencies=[Depends(lab_key)])
+def lab_stats_get(market: str | None = Query(None, pattern="^(stock|crypto)$"),
+                  origin: str | None = Query(None, pattern="^(replay|live)$"),
+                  version: str | None = Query(None, max_length=40), since: str | None = None,
+                  until: str | None = None):
+    """Statistiques : sans filtre, celles du cache (version en cours, calculées par le worker) ;
+    avec des filtres, calculées à la demande."""
+    filters = {"market": market, "origin": origin, "version": version,
+               "since": _day(since, "since"), "until": _day(until, "until")}
+    conn = _lab_conn()
+    try:
+        if not any(filters.values()):
+            cached = lab_stats.cached(conn)
+            if cached:
+                return cached
+            filters["version"] = lab_validator.current_version(conn)
+        return lab_stats.compute(conn, **{k: v for k, v in filters.items() if v})
+    finally:
+        conn.close()
+
+
+@app.get("/api/lab/catalysts", dependencies=[Depends(lab_key)])
+def lab_catalysts_get(day: str | None = None, symbol: str | None = Query(None, max_length=20),
+                      market: str | None = Query(None, pattern="^(stock|crypto)$"),
+                      kind: str | None = Query(None, pattern="^(mouvement|contre_exemple)$"),
+                      since: str | None = None, until: str | None = None, a_classer: bool = False,
+                      limit: int = Query(100, ge=1, le=500)):
+    """Fiches catalyseurs (mouvements de ±8 % et contre-exemples) avec leurs actus."""
+    conn = _lab_conn()
+    try:
+        return lab_catalysts.query(conn, _day(day, "day"), symbol.upper() if symbol else None, market, kind,
+                                   _day(since, "since"), _day(until, "until"), a_classer, limit)
+    finally:
+        conn.close()
+
+
+@app.get("/api/lab/rules", dependencies=[Depends(lab_key)])
+def lab_rules_get(status: str | None = Query(None, pattern="^(en_attente|validee|rejetee|invalide)$"),
+                  limit: int = Query(200, ge=1, le=500)):
+    """Règles soumises, leur verdict et leurs mesures ; compteur d'essais."""
+    conn = _lab_conn()
+    try:
+        return {"compteurs": lab_validator.counts(conn), "seuils": lab_validator.config(conn),
+                "regles": lab_validator.list_rules(conn, status, limit)}
+    finally:
+        conn.close()
+
+
+@app.post("/api/lab/rules", dependencies=[Depends(lab_key)])
+def lab_rules_submit(rule: dict = Body(...)):
+    """Soumet une règle de filtre à tester : elle est seulement mise en file, le worker la valide.
+    Une règle déjà testée renvoie son verdict gardé. Ne change jamais la méthode en direct."""
+    try:
+        canon = lab_validator.parse(rule)
+    except lab_validator.RuleError as exc:
+        raise HTTPException(422, str(exc))
+    conn = lab_db.open_readonly()
+    if conn is not None:
+        try:
+            known = lab_validator.get_rule(conn, lab_validator.rule_hash(canon))
+        finally:
+            conn.close()
+        if known:
+            return known | {"deja_connue": True}
+    try:
+        return lab_validator.enqueue(lab_db.db_path(), rule)
+    except lab_validator.RuleError as exc:
+        raise HTTPException(429, str(exc))
 
 
 COCKPIT_HTML = Path(__file__).parent / "web" / "cockpit.html"

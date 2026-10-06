@@ -2,6 +2,11 @@
 
 Fichier JARVIS_LAB_DB (data/lab.db par défaut), en mode WAL : le serveur peut lire l'état
 (GET /api/lab/status) pendant que le worker écrit.
+
+Labo 2 : régimes de marché (regimes), mouvements du jour de l'univers (day_moves), fiches
+catalyseurs (catalysts), résumés du soir (summaries), règles testées (rules), seuils du validateur
+(lab_config) et statistiques précalculées (stats_cache). Seul le worker écrit ; le serveur web
+n'ouvre la base qu'en lecture seule (les règles soumises passent par une file de fichiers).
 """
 import json
 import os
@@ -45,11 +50,52 @@ CREATE TABLE IF NOT EXISTS progress (
 CREATE TABLE IF NOT EXISTS method_versions (
     version TEXT PRIMARY KEY, created_at TEXT NOT NULL, settings TEXT NOT NULL
 );
+-- Labo 2 : mesures et validation.
+CREATE INDEX IF NOT EXISTS trades_time ON trades (planned_at);
+CREATE INDEX IF NOT EXISTS trades_symbol ON trades (market, symbol, day);
+CREATE TABLE IF NOT EXISTS regimes (
+    market TEXT NOT NULL, day TEXT NOT NULL, trend TEXT, vol_tercile INTEGER, label TEXT NOT NULL, metrics TEXT,
+    PRIMARY KEY (market, day)
+);
+CREATE TABLE IF NOT EXISTS day_moves (
+    market TEXT NOT NULL, day TEXT NOT NULL, symbol TEXT NOT NULL,
+    open REAL, prev_close REAL, high REAL, low REAL, close REAL,
+    up_pct REAL, down_pct REAL, gap_pct REAL, t_high INTEGER, t_low INTEGER, rvol30 REAL,
+    PRIMARY KEY (market, day, symbol)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS day_moves_up ON day_moves (up_pct);
+CREATE TABLE IF NOT EXISTS catalysts (
+    id INTEGER PRIMARY KEY, market TEXT NOT NULL, day TEXT NOT NULL, symbol TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('mouvement', 'contre_exemple')), direction TEXT,
+    amplitude_pct REAL, gap_pct REAL, start_ts INTEGER, extreme_ts INTEGER,
+    signals TEXT, news TEXT, news_status TEXT NOT NULL, note TEXT,
+    catalyst_type TEXT, classified_at TEXT, created_at TEXT NOT NULL,
+    UNIQUE (market, day, symbol)
+);
+CREATE INDEX IF NOT EXISTS catalysts_pending ON catalysts (news_status, day);
+CREATE TABLE IF NOT EXISTS summaries (
+    day TEXT PRIMARY KEY, created_at TEXT NOT NULL, data TEXT NOT NULL, text TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS rules (
+    id INTEGER PRIMARY KEY, hash TEXT NOT NULL UNIQUE, name TEXT, rule TEXT NOT NULL,
+    status TEXT NOT NULL, reason TEXT, metrics TEXT, trial INTEGER,
+    submitted_at TEXT NOT NULL, tested_at TEXT
+);
+CREATE TABLE IF NOT EXISTS lab_config (
+    key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS stats_cache (
+    key TEXT PRIMARY KEY, created_at TEXT NOT NULL, trades INTEGER, data TEXT NOT NULL
+);
 """
 
 
 def db_path() -> str:
     return os.getenv("JARVIS_LAB_DB", DEFAULT_PATH)
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def _bar(row) -> dict:

@@ -1,7 +1,8 @@
 """État du labo en lecture seule (route /api/lab/status et commande Discord !labo).
 
-Seulement des comptes : avancement du rejeu, trades par marché et par origine, dernier jour en
-direct, taille de la base. Les statistiques viendront avec le Labo 2.
+Avancement du rejeu, trades par marché et par origine, dernier jour en direct, taille de la base,
+et quelques chiffres du Labo 2 lus dans le cache du worker : espérance en R avec son intervalle de
+confiance, fiches catalyseurs, règles en attente et testées.
 """
 import json
 import sqlite3
@@ -54,11 +55,36 @@ def status(path: str | None = None) -> dict:
         out["method_version"] = row[0] if row else None
         live_start = conn.execute("SELECT value FROM progress WHERE job = 'lab' AND key = 'live_start'").fetchone()
         out["live_start"] = json.loads(live_start[0]) if live_start else None
+        out["labo2"] = headline(conn)
     except sqlite3.Error as exc:
         out["error"] = f"base illisible : {exc}"
     finally:
         conn.close()
     return out
+
+
+def headline(conn: sqlite3.Connection) -> dict:
+    """Chiffres clés du Labo 2 (cache des statistiques, fiches, règles) ; vide sur une base du Labo 1."""
+    from app.lab import stats as STATS
+    from app.lab import validator as V
+
+    out: dict = {}
+    cached = STATS.cached(conn)
+    if cached:
+        g = cached.get("global") or {}
+        out["stats"] = {"declenches": g.get("declenches"), "esperance_r": g.get("esperance_r"), "ic95": g.get("ic95"),
+                        "version": (cached.get("filtres") or {}).get("version"), "calcule_le": cached.get("calcule_le")}
+    try:
+        row = conn.execute("SELECT COUNT(*), SUM(news_status = 'ok'), SUM(catalyst_type IS NULL) FROM catalysts").fetchone()
+        out["fiches"] = {"total": row[0], "avec_actus": row[1] or 0, "a_classer": row[2] or 0}
+    except sqlite3.Error:
+        pass
+    out["regles"] = V.counts(conn)
+    return out
+
+
+def _fr(x: float, digits: int = 2) -> str:
+    return f"{x:+.{digits}f}".replace(".", ",")
 
 
 def text(st: dict) -> str:
@@ -73,6 +99,16 @@ def text(st: dict) -> str:
         lines.append(f"{MARKET_FR[market].capitalize()} : rejeu {r.get('pct', 0):g} % ({r.get('days_done', 0)}/"
                      f"{r.get('days_total', 0)} jours) · {t.get('replay', 0)} trades rejoués, {t.get('live', 0)} en direct"
                      + (f" · dernier jour en direct {live}" if live else ""))
+    l2 = st.get("labo2") or {}
+    stt = l2.get("stats")
+    if stt and stt.get("esperance_r") is not None:
+        ci = stt.get("ic95")
+        lines.append(f"Espérance {_fr(stt['esperance_r'], 3)} R" + (f" [{_fr(ci[0])} ; {_fr(ci[1])}]" if ci else "")
+                     + f" sur {stt.get('declenches') or 0} trades déclenchés (méthode {stt.get('version') or 'n/d'})")
+    fiches, regles = l2.get("fiches"), l2.get("regles") or {}
+    if fiches is not None or regles:
+        lines.append(f"Fiches catalyseurs : {(fiches or {}).get('total', 0)} · règles : {regles.get('en_attente', 0)} "
+                     f"en attente, {regles.get('validee', 0) + regles.get('rejetee', 0)} testées")
     if st.get("error"):
         lines.append(f"⚠️ {st['error']}")
     return "\n".join(lines)

@@ -127,7 +127,12 @@ JARVIS_LAB_ENABLED=on        # off : le service reste en veille
 JARVIS_LAB_DB=data/lab.db
 JARVIS_LAB_REPLAY_DAYS=504   # séances rejouées (≈ 2 ans)
 JARVIS_LAB_ALPACA_PER_MINUTE=100  # part de la limite Alpaca (200/min) laissée au labo
+JARVIS_LAB_FINNHUB_PER_MINUTE=20  # actus des fiches catalyseurs (Finnhub gratuit : 60/min en tout)
+JARVIS_LAB_API_KEY=              # clé des routes /api/lab/* de la routine du soir ; vide = routes désactivées
 ```
+
+Les fiches catalyseurs utilisent la clé `FINNHUB_API_KEY` déjà présente ; sans elle, les fiches sont
+créées sans actus. Le labo ne demande jamais d'actus pendant la séance US.
 
 Le labo ne touche pas aux actions pendant la séance US (la crypto continue) et tourne surtout la
 nuit et le week-end. Il est limité à 1 cœur et 1,5 Go de mémoire.
@@ -138,6 +143,30 @@ de la base :
 ```bash
 docker compose run --rm jarvis-lab python -m app.lab.check_sources
 ```
+
+### Accès du labo pour la routine du soir (Labo 2)
+
+Les routes `GET /api/lab/summary`, `/api/lab/stats`, `/api/lab/catalysts`, `/api/lab/rules` et
+`POST /api/lab/rules` demandent la clé `JARVIS_LAB_API_KEY` dans l'en-tête `X-Lab-Key` (ou
+`Authorization: Bearer …`). Sans clé dans `.env`, elles répondent 503. Génère une clé longue :
+
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+puis mets-la dans `.env` et relance `docker compose up -d`. Essai depuis le serveur :
+
+```bash
+curl -H "X-Lab-Key: $JARVIS_LAB_API_KEY" http://127.0.0.1:8000/api/lab/summary
+curl -H "X-Lab-Key: $JARVIS_LAB_API_KEY" -H "Content-Type: application/json" \
+     -d '{"nom": "essai", "exclude": {"field": "context.rvol", "op": ">", "value": 5}}' \
+     http://127.0.0.1:8000/api/lab/rules
+```
+
+Une règle soumise est seulement mise en file (`data/lab_queue/`) ; le worker la valide la nuit et
+rien ne change dans la méthode en direct. Le serveur n'ouvre `data/lab.db` qu'en lecture seule.
+`/api/lab/status` reste sans clé, comme avant. L'exposition de ces routes hors du serveur (Tailscale
+Funnel) viendra avec le Labo 3.
 
 Ensuite : `docker compose logs -f jarvis-lab` pour suivre le rejeu, `!labo` sur Discord ou
 `curl http://127.0.0.1:8000/api/lab/status` pour l'avancement. Le premier passage télécharge

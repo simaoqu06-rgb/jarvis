@@ -101,6 +101,16 @@ async def company_news(symbol: str, limit: int, days: int = 7) -> list[dict]:
     return [_news_item(n) for n in items[:limit]]
 
 
+async def company_news_between(symbol: str, start: date, end: date) -> list[dict]:
+    """Actus d'une société entre deux dates (incluses), avec l'heure de publication en epoch
+    (`published_ts`) ; la formule gratuite remonte environ un an. Utilisé par le labo (fiches catalyseurs)."""
+    items = await get_json(
+        f"{BASE}/company-news",
+        params={"symbol": symbol, "from": start.isoformat(), "to": end.isoformat(), "token": _key()},
+    )
+    return [_news_item(n) | {"published_ts": n.get("datetime")} for n in items or [] if n.get("datetime")]
+
+
 async def earnings(symbol: str, start: date, end: date) -> list[dict]:
     """Publications de résultats entre deux dates : date, moment (bmo avant l'ouverture, amc après
     la clôture), BPA estimé et publié."""

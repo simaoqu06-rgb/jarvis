@@ -11,7 +11,7 @@ qu'aux comptes listés dans JARVIS_DISCORD_OWNER_ID et ignore tout le reste sans
   !propositions         réglages que JARVIS propose et qui attendent ta réponse
   !oui 3 / !non 3       approuver ou refuser la proposition 3 (ou les boutons sous le message)
   !regle                réglages actuels
-  !labo                 état du labo de performance (rejeu, trades simulés)
+  !labo                 état du labo de performance (rejeu, trades, espérance, règles)
   !aide                 cette liste
 
 Les propositions de réglages arrivent en message privé, avec des boutons Approuver / Refuser.
