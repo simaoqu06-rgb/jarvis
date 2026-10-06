@@ -129,7 +129,9 @@ async def scan(now: datetime | None = None, s=settings, save: bool = True) -> di
     cats = await asyncio.gather(*(C.safe_check(sym, now) for sym, _ in shortlist))
     picks, skipped = [], []
     for (symbol, f), cat in zip(shortlist, cats):
-        if cat and cat.get("available") and cat.get("market_cap") is None:
+        # ETF seulement si Finnhub a bien répondu sans profil de société ; un profil en échec (quota,
+        # délai) n'exclut rien, et la capitalisation n'entre jamais en compte (choix de Simão).
+        if cat and cat.get("company") is False:
             skipped.append(f"{symbol} (pas une société : ETF ?)")
             continue
         if s["scan_exclude_dilution"] and cat and cat.get("dilution"):
@@ -167,6 +169,10 @@ def _save(result: dict) -> None:
         fh.write(json.dumps(light, ensure_ascii=False) + "\n")
 
 
+def _rvol(rvol: float | None) -> str:
+    return f"{rvol:g}×" if rvol is not None else "n/d"
+
+
 def text(result: dict) -> str:
     """Le scanner en clair pour Discord."""
     now = datetime.fromisoformat(result["at"])
@@ -181,7 +187,7 @@ def text(result: dict) -> str:
         parts = sc["parts"]
         sub = " · ".join(f"{label} {parts[k]['score']:g}" for k, label in
                          (("technique", "tech"), ("catalyst", "cata"), ("risk", "risque")) if parts[k]["score"] is not None)
-        lines.append(f"\n**{i}. {p['symbol']}** {f['gap_pct']:+.1f} % en pré-ouverture · volume veille {f['rvol']:g}× · "
+        lines.append(f"\n**{i}. {p['symbol']}** {f['gap_pct']:+.1f} % en pré-ouverture · volume veille {_rvol(f['rvol'])} · "
                      f"RSI {f['rsi']:.0f} · ATR {f['atr_pct']:.1f} %")
         lines.append(f"{'✅' if sc['go'] else '⛔'} **{sc['decision']} · {sc['composite']:g}/10** ({sub})"
                      + (f" · {' ; '.join(sc['reasons'])}" if sc["reasons"] else ""))

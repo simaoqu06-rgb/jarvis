@@ -268,6 +268,8 @@ const pct = (x) => x == null ? "—" : `${x > 0 ? "+" : ""}${Number(x).toFixed(2
 const rr = (x) => x == null ? "—" : `${x > 0 ? "+" : ""}${Number(x).toFixed(2)} R`;
 const cls = (x) => x > 0 ? "up" : x < 0 ? "down" : "";
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+// Liens venus des actus : seulement http(s) (jamais javascript:, data:…), sinon pas de lien.
+const safeUrl = (u) => { try { const x = new URL(String(u ?? "")); return x.protocol === "http:" || x.protocol === "https:" ? x.href : ""; } catch (e) { return ""; } };
 const TZ = { timeZone: "Europe/Paris" };
 const hm = (iso) => iso ? new Date(iso).toLocaleTimeString("fr-FR", { ...TZ, hour: "2-digit", minute: "2-digit" }) : "—";
 function when(iso) {
@@ -641,7 +643,7 @@ function scoreHtml(p) {
   return `<div class="row" style="margin-top:10px"><span class="pill ${sc.go ? "go" : "no"}">${sc.decision} · ${sc.composite}/10</span>
       <span class="small muted">${esc(sc.reasons.join(" ; "))}</span></div>
     <div class="checks">${Object.entries(sc.parts).map(([k, v]) => `<div class="check"><b>${labels[k]} ${v.score == null ? "–" : v.score + "/10"}</b>${v.weight ? ` <span class="muted">(${Math.round(v.weight * 100)} %)</span>` : ""}<br><span class="muted">${esc(v.reasons.join(" ; "))}</span></div>`).join("")}</div>
-    ${news.length ? `<div class="small" style="margin-top:8px">${news.map((n) => `<div>${tone[n.tone] || ""} <a href="${esc(n.url)}" target="_blank" rel="noopener">${esc(n.title)}</a></div>`).join("")}</div>` : ""}`;
+    ${news.length ? `<div class="small" style="margin-top:8px">${news.map((n) => `<div>${tone[n.tone] || ""} ${safeUrl(n.url) ? `<a href="${esc(safeUrl(n.url))}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a>` : esc(n.title)}</div>`).join("")}</div>` : ""}`;
 }
 
 function planHtml(p) {

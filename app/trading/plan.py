@@ -5,8 +5,13 @@ Tout est calculé sur des bougies {t, o, h, l, c, v} rangées de la plus ancienn
 Le délai de chaque TP n'est pas deviné : on rejoue le même plan (mêmes écarts en %) depuis chaque
 bougie de l'historique de l'actif et on mesure combien de temps il a fallu pour toucher chaque TP
 avant le stop. Une bougie qui touche à la fois le TP et le stop compte comme un stop (prudence).
+
+La dernière bougie est toujours tenue pour « en cours » (non close) : l'ATR, le stop et les niveaux
+se calculent sur les bougies closes (candles[:-1]), comme le rejeu et la checklist ; seule l'entrée
+par défaut prend le dernier prix.
 """
 from dataclasses import dataclass, field
+from datetime import datetime
 from statistics import median
 
 from app.trading import indicators as I
@@ -18,6 +23,15 @@ STOP_BUFFER_ATR = 0.25   # stop un peu au-delà de l'invalidation, contre la cha
 TARGET_BUFFER_ATR = 0.1  # TP un peu avant le niveau, là où le prix risque de se retourner
 MIN_TARGET_R = 0.5       # objectifs espacés d'au moins 0,5 R (de l'entrée, puis entre eux)
 MERGE_ATR = 0.3          # niveaux plus proches que ça = une seule zone
+PRICE_DIGITS = 8         # chiffres significatifs gardés sur les prix (pas de décimales fixes : 1,1e-05 reste lisible)
+
+
+def round_price(x: float, digits: int = PRICE_DIGITS) -> float:
+    """Arrondi à `digits` chiffres significatifs : un arrondi à 6 décimales écraserait les niveaux
+    d'une crypto à 0,000011 (entrée, stop et TP finiraient égaux)."""
+    if not x:
+        return 0.0
+    return float(f"{x:.{digits}g}")
 
 
 @dataclass
@@ -34,6 +48,7 @@ class Levels:
     targets: list[Target]
     stop_source: str = ""
     notes: list[str] = field(default_factory=list)
+    atr: float | None = None  # ATR des bougies closes qui a servi au plan
 
     @property
     def sign(self) -> int:
@@ -78,7 +93,8 @@ def _invalidation(candles: list[dict], side: str, entry: float, a: float) -> tup
     return entry - sign * clamped, source
 
 
-def _candidate_levels(candles: list[dict], market: str, side: str, entry: float) -> list[Target]:
+def _candidate_levels(candles: list[dict], market: str, side: str, entry: float,
+                      now: datetime | None = None) -> list[Target]:
     """Résistances au-dessus de l'entrée (supports en dessous pour un short) : sommets de swing,
     points pivots de la séance, plus haut et plus bas de la séance précédente."""
     sign = 1 if side == "long" else -1
@@ -86,7 +102,7 @@ def _candidate_levels(candles: list[dict], market: str, side: str, entry: float)
     highs, lows = I.swings(candles[-TARGET_LOOKBACK:], side=3)
     for _, price in (highs if side == "long" else lows):
         out.append(Target(price, "sommet de swing" if side == "long" else "creux de swing"))
-    prev = I.previous_session(candles, market)
+    prev = I.previous_session(candles, market, now)
     if prev:
         for name, price in I.pivots(prev).items():
             out.append(Target(price, f"pivot {name}"))
@@ -110,34 +126,42 @@ def _merge(levels: list[Target], a: float) -> list[Target]:
 def default_levels(
     candles: list[dict], side: str, entry: float | None = None, stop: float | None = None,
     targets: list[float] | None = None, market: str = "crypto", count: int = 3,
+    now: datetime | None = None,
 ) -> Levels:
     """Complète les niveaux non fournis selon la méthode EmperorBTC.
 
     Stop : niveau d'invalidation (dernier creux/sommet de swing) avec une marge, entre 1 et 3 ATR.
     TP : les prochaines résistances (supports pour un short) à au moins 0,5 R, juste avant le niveau ;
     s'il en manque, on complète par des multiples de R au-delà du dernier objectif.
+    `now` : heure du calcul, pour savoir quelle séance est « la veille » (avant l'ouverture US).
     """
     if side not in ("long", "short"):
         raise ValueError("side doit valoir long ou short")
     entry = entry or candles[-1]["c"]
-    a = atr(candles)
+    closed = candles[:-1]  # la dernière bougie est en cours : ni ATR ni niveaux dessus
+    a = atr(closed)
     sign = 1 if side == "long" else -1
     stop_source = "donné"
     if stop is None:
-        stop, stop_source = _invalidation(candles, side, entry, a)
+        if a <= 0:
+            raise ValueError("amplitude nulle sur les bougies closes (ATR = 0) : impossible de placer un stop")
+        stop, stop_source = _invalidation(closed, side, entry, a)
     if (entry - stop) * sign <= 0:
         raise ValueError("le stop doit être sous l'entrée pour un long, au-dessus pour un short")
     risk = abs(entry - stop)
+    if round_price(entry) == round_price(stop):
+        raise ValueError("risque nul : le stop est confondu avec l'entrée")
     if targets:
         chosen = [Target(t, "donné") for t in targets]
         if any((t.price - entry) * sign <= 0 for t in chosen):
             raise ValueError("les TP doivent être au-dessus de l'entrée pour un long, en dessous pour un short")
     else:
-        zones = _merge(_candidate_levels(candles, market, side, entry), a)
+        zones = _merge(_candidate_levels(closed, market, side, entry, now), a)
         chosen = []
         for z in zones:
             price = z.price - sign * TARGET_BUFFER_ATR * a
-            far_enough = abs(price - entry) >= MIN_TARGET_R * risk
+            # distance signée : un niveau que la marge fait passer du mauvais côté de l'entrée est rejeté
+            far_enough = (price - entry) * sign >= MIN_TARGET_R * risk
             spaced = not chosen or (price - chosen[-1].price) * sign >= MIN_TARGET_R * risk
             if far_enough and spaced:
                 chosen.append(Target(price, z.source))
@@ -145,11 +169,15 @@ def default_levels(
                 break
         while len(chosen) < count:
             base = chosen[-1].price if chosen else entry
-            r_from_entry = abs(base - entry) / risk
-            nxt = entry + sign * risk * (int(r_from_entry) + 1)
-            chosen.append(Target(nxt, f"{abs(nxt - entry) / risk:.0f} R (pas de niveau plus loin)"))
+            r_from_entry = (base - entry) * sign / risk
+            n = int(r_from_entry) + 1
+            if n - r_from_entry < MIN_TARGET_R:  # ex. dernier niveau à 2,9 R : pas de TP à 3 R, 0,1 R plus loin
+                n += 1
+            nxt = entry + sign * risk * n
+            chosen.append(Target(nxt, f"{n} R (pas de niveau plus loin)"))
     chosen.sort(key=lambda t: t.price, reverse=(side == "short"))
-    return Levels(side, round(entry, 6), round(stop, 6), [Target(round(t.price, 6), t.source) for t in chosen], stop_source)
+    rounded = [Target(round_price(t.price), t.source) for t in chosen]
+    return Levels(side, round_price(entry), round_price(stop), rounded, stop_source, atr=a)
 
 
 def _quantile(sorted_values: list[float], q: float) -> float:
@@ -162,15 +190,19 @@ def historical_timing(candles: list[dict], levels: Levels, horizon_bars: int) ->
 
     Pour chaque TP : part des départs où il a été touché avant le stop et dans l'horizon,
     part des départs où le stop est venu avant lui, et nombre de bougies qu'il a fallu
-    (médiane, 25 % et 75 % des cas).
+    (médiane, 25 % et 75 % des cas). Le TP est compté au milieu de la bougie qui le touche
+    (j - 0,5) : on ne sait pas à quel moment de la bougie il a été atteint, la fin la
+    surestimerait d'une bougie au pire.
     """
     sign = levels.sign
+    if not levels.entry or levels.risk == 0:
+        raise ValueError("risque nul : le stop est confondu avec l'entrée")
     stop_pct = abs(levels.stop - levels.entry) / levels.entry
     target_pcts = [abs(t.price - levels.entry) / levels.entry for t in levels.targets]
     starts = len(candles) - 1 - horizon_bars
     if starts < 30:
         raise ValueError("historique trop court pour estimer les délais")
-    hits: list[list[int]] = [[] for _ in target_pcts]
+    hits: list[list[float]] = [[] for _ in target_pcts]
     stopped_before = [0] * len(target_pcts)
     stops = 0
     for i in range(starts):
@@ -188,7 +220,7 @@ def historical_timing(candles: list[dict], levels: Levels, horizon_bars: int) ->
             while reached < len(target_px) and (
                 bar["h"] >= target_px[reached] if sign == 1 else bar["l"] <= target_px[reached]
             ):
-                hits[reached].append(j)
+                hits[reached].append(j - 0.5)
                 reached += 1
             if reached == len(target_px):
                 break

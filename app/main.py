@@ -2,12 +2,15 @@
 
 Lancer : uvicorn app.main:app --reload
 """
+import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -16,18 +19,68 @@ from app.notify import discord
 from app.trading import paper, scanner
 from app.trading import proposals as PR
 from app.trading import service as trading
+from app.core import fallback
+from app.core.http import SourceError
 from app.trading.settings import settings
+
+
+def configure_logging() -> None:
+    """Journaux INFO visibles dans `docker compose logs`, avec l'heure.
+
+    httpx et httpcore restent en WARNING : leurs lignes INFO contiennent les URL, donc des clés d'API.
+    """
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s : %(message)s")
+    logging.getLogger().setLevel(logging.INFO)  # même si un autre outil a déjà posé un handler
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
+configure_logging()
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    configure_logging()
     tasks = scheduler.start()
     yield
     for task in tasks:
         task.cancel()
+    fallback.store.flush()  # dernières valeurs pas encore écrites sur disque
 
 
 app = FastAPI(title="JARVIS", version="0.2.0", lifespan=lifespan)
+STATE_CHANGING = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def cross_origin(request: Request) -> bool:
+    """Requête venue d'un autre site (CSRF) : un site visité pendant que le téléphone est sur Tailscale
+    ne doit pas pouvoir approuver une proposition ou clôturer un trade à la place de Simão.
+
+    Sec-Fetch-Site (posé par le navigateur, impossible à falsifier depuis une page) : cross-site refusé,
+    same-origin accepté même si un proxy (tailscale serve) a réécrit l'en-tête Host. Sinon, l'Origin
+    (ou à défaut le Referer) doit correspondre à Host, X-Forwarded-Host ou JARVIS_ALLOWED_ORIGINS.
+    Sans aucun de ces en-têtes (curl, appel serveur), la requête est acceptée.
+    """
+    fetch_site = request.headers.get("sec-fetch-site", "").lower()
+    if fetch_site == "cross-site":
+        return True
+    if fetch_site in ("same-origin", "none"):
+        return False
+    origin = request.headers.get("origin") or request.headers.get("referer")
+    if not origin:
+        return False
+    netloc = urlsplit(origin).netloc.lower()
+    allowed = {request.headers.get("host", "").lower(), request.headers.get("x-forwarded-host", "").lower()}
+    allowed |= {urlsplit(o.strip()).netloc.lower() or o.strip().lower()
+                for o in os.getenv("JARVIS_ALLOWED_ORIGINS", "").split(",") if o.strip()}
+    return not netloc or netloc not in allowed - {""}
+
+
+@app.middleware("http")
+async def reject_cross_site(request: Request, call_next):
+    if request.method in STATE_CHANGING and cross_origin(request):
+        return JSONResponse({"detail": "Requête d'un autre site refusée"}, status_code=403)
+    return await call_next(request)
 
 
 def _list(value: str) -> list[str]:
@@ -216,7 +269,9 @@ async def trading_plan(req: TradeRequest, discord_post: bool = False):
 @app.post("/api/trading/trades")
 async def trading_open(req: TradeRequest):
     """Calcule le plan, l'enregistre et le suit (TP/SL touchés annoncés sur Discord)."""
-    trade = scheduler.book.add(await _plan(req), req.note)
+    plan = await _plan(req)  # calculé hors du verrou
+    async with scheduler._lock:
+        trade = scheduler.book.add(plan, req.note)
     if scheduler.enabled():
         await _send("📌 Nouveau trade suivi\n" + trading.plan_text(trade))
     return trading.summary(trade)
@@ -236,7 +291,8 @@ async def trading_live():
 
 @app.post("/api/trading/trades/{trade_id}/close")
 async def trading_close(trade_id: str, price: float | None = None):
-    trade = scheduler.book.close(trade_id, price)
+    async with scheduler._lock:
+        trade = scheduler.book.close(trade_id, price)
     if not trade:
         raise HTTPException(404, "Trade introuvable")
     return trading.summary(trade)
@@ -244,7 +300,9 @@ async def trading_close(trade_id: str, price: float | None = None):
 
 @app.delete("/api/trading/trades/{trade_id}")
 async def trading_delete(trade_id: str):
-    if not scheduler.book.remove(trade_id):
+    async with scheduler._lock:
+        removed = scheduler.book.remove(trade_id)
+    if not removed:
         raise HTTPException(404, "Trade introuvable")
     return {"deleted": trade_id}
 
@@ -272,7 +330,8 @@ async def trading_settings():
 async def trading_settings_update(changes: dict):
     """Change des réglages : {"rsi_max": 70} ; une valeur null remet le défaut."""
     try:
-        settings.update(changes)
+        async with scheduler._lock:
+            settings.update(changes)
     except KeyError as exc:
         raise HTTPException(422, f"Réglage inconnu : {exc}")
     except ValueError as exc:
@@ -296,7 +355,12 @@ async def trading_paper_stats():
 @app.post("/api/trading/paper")
 async def trading_paper_submit(req: TradeRequest):
     """Passe un plan sur le compte fictif (en plus de ceux du scanner)."""
-    entry = await paper.submit(scheduler.paper_book, await _plan(req), origin="manuel")
+    plan = await _plan(req)  # calculé hors du verrou
+    try:
+        async with scheduler._lock:  # pas deux positions fictives sur la même action
+            entry = await paper.submit(scheduler.paper_book, plan, origin="manuel")
+    except SourceError as exc:
+        raise HTTPException(503, f"Compte fictif Alpaca : {exc}")
     if not entry:
         raise HTTPException(422, "Rien passé : action seulement, clés Alpaca, taille suffisante, pas déjà en cours")
     return entry
@@ -314,7 +378,8 @@ async def trading_proposal_decide(pid: int, choice: str):
     if choice not in ("approve", "refuse"):
         raise HTTPException(422, "choice doit valoir approve ou refuse")
     try:
-        return PR.proposals.decide(pid, choice == "approve")
+        async with scheduler._lock:
+            return PR.proposals.decide(pid, choice == "approve")
     except KeyError as exc:
         raise HTTPException(404, str(exc))
     except ValueError as exc:

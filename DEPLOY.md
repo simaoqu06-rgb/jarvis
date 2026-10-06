@@ -59,6 +59,7 @@ curl -X POST http://127.0.0.1:8000/api/notify/test      # message de test sur Di
 ```
 
 Le conteneur redémarre tout seul si le serveur redémarre (`restart: unless-stopped`).
+`docker ps` indique aussi son état de santé (`healthy` / `unhealthy`), vérifié chaque minute sur `/api/health`.
 Les routes ne sont ouvertes que sur le serveur lui-même (127.0.0.1), pas sur Internet.
 
 ## Ouvrir le Trading Cockpit sur ton PC et ton téléphone (Tailscale)
@@ -87,7 +88,7 @@ une fois (clic droit > Épingler), JARVIS le réécrit chaque minute.
 
 ## Scanner, forward-test et commandes Discord
 
-Trois ajouts dans `.env`, puis `docker compose up -d` :
+Deux ajouts dans `.env`, puis `docker compose up -d` :
 
 1. **Alpaca** (scanner et compte fictif) : sur https://app.alpaca.markets, passe sur le compte
    *Paper*, section *API Keys*, génère une paire de clés et colle-les :
@@ -99,7 +100,8 @@ Trois ajouts dans `.env`, puis `docker compose up -d` :
    ```
 
    Génère une nouvelle paire plutôt que de reprendre celle d'OpenClaw, puis révoque l'ancienne.
-2. **Bot Discord** (commandes `!plan`, `!prends`, `!scan`, `!bilan`, `!oui`, `!non`, et propositions de réglages en privé) :
+2. **Bot Discord** (commandes `!plan`, `!prends`, `!scan`, `!bilan`, `!propositions`, `!oui`, `!non`,
+   `!regle`, `!aide`, et propositions de réglages en privé ; détail dans le [README](README.md#commandes-discord)) :
    - https://discord.com/developers/applications > *New Application* > onglet *Bot* :
      *Reset Token* et copie-le, puis active *Message Content Intent*.
    - Onglet *OAuth2* > *URL Generator* : coche `bot`, puis les permissions *View Channels*,

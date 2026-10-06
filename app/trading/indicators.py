@@ -57,9 +57,24 @@ def session_key(t: int, market: str) -> str:
     return datetime.fromtimestamp(t, tz).date().isoformat()
 
 
-def vwap(candles: list[dict], market: str) -> float | None:
-    """VWAP de la séance en cours (prix typique pondéré par le volume)."""
-    today = session_key(candles[-1]["t"], market)
+def current_session(candles: list[dict], market: str, now: datetime | None = None) -> str:
+    """Séance « du jour ».
+
+    Crypto : jour UTC de la dernière bougie (inchangé). Actions : jour de New York de `now`
+    (maintenant par défaut) s'il est plus récent que la dernière bougie. Avant l'ouverture, la
+    dernière bougie est celle d'une séance terminée : la séance du jour n'a encore aucune bougie,
+    la « veille » est bien la dernière séance complète et le VWAP du jour est vide.
+    """
+    last = session_key(candles[-1]["t"], market)
+    if market != "stock":
+        return last
+    now = now or datetime.now(timezone.utc)
+    return max(last, session_key(int(now.timestamp()), market))
+
+
+def vwap(candles: list[dict], market: str, now: datetime | None = None) -> float | None:
+    """VWAP de la séance en cours (prix typique pondéré par le volume) ; None si elle n'a pas commencé."""
+    today = current_session(candles, market, now)
     num = den = 0.0
     for c in reversed(candles):
         if session_key(c["t"], market) != today:
@@ -70,9 +85,9 @@ def vwap(candles: list[dict], market: str) -> float | None:
     return num / den if den else None
 
 
-def previous_session(candles: list[dict], market: str) -> dict | None:
+def previous_session(candles: list[dict], market: str, now: datetime | None = None) -> dict | None:
     """Plus haut, plus bas et clôture de la séance précédente (pour les points pivots)."""
-    today = session_key(candles[-1]["t"], market)
+    today = current_session(candles, market, now)
     prev_day, rows = None, []
     for c in reversed(candles):
         day = session_key(c["t"], market)

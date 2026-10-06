@@ -5,6 +5,7 @@ Les champs utilisés viennent du schéma officiel de la documentation
 par tests/live/test_finnhub.py dès que la clé est disponible.
 """
 import asyncio
+import logging
 from datetime import date, datetime, timedelta, timezone
 
 from app.config import secret
@@ -12,6 +13,7 @@ from app.core.http import SourceError, get_json, to_float
 
 BASE = "https://finnhub.io/api/v1"
 KEY_NAME = "FINNHUB_API_KEY"
+log = logging.getLogger(__name__)
 
 
 def _key() -> str:
@@ -43,9 +45,30 @@ async def _quote(symbol: str, key: str) -> dict:
     }
 
 
+def _failed(symbol: str, error: Exception) -> dict:
+    """Cours manquant pour un symbole : même forme, valeurs vides, et l'erreur en clair."""
+    return {"symbol": symbol, "name": None, "exchange": None, "currency": "USD", "price": None, "open": None,
+            "high": None, "low": None, "previous_close": None, "change_pct": None, "volume": None,
+            "is_market_open": None, "as_of": None, "error": str(error)}
+
+
 async def stock_quotes(symbols: list[str]) -> list[dict]:
     key = _key()
-    return list(await asyncio.gather(*(_quote(s, key) for s in symbols)))
+    results = await asyncio.gather(*(_quote(s, key) for s in symbols), return_exceptions=True)
+    quotes, errors = [], []
+    for symbol, r in zip(symbols, results):
+        if isinstance(r, SourceError):  # un ticker inconnu ne fait pas tomber les autres
+            errors.append(str(r))
+            quotes.append(_failed(symbol, r))
+        elif isinstance(r, BaseException):
+            raise r
+        else:
+            quotes.append(r)
+    if symbols and len(errors) == len(symbols):
+        raise SourceError(" ; ".join(errors))
+    if errors:
+        log.warning("Finnhub : cours manquants (%s)", " ; ".join(errors))
+    return quotes
 
 
 def _news_item(n: dict) -> dict:

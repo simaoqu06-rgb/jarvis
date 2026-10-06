@@ -8,6 +8,8 @@ Sortie : « un renversement n'est pas un signal de trade inverse, c'est un signa
 bénéfices » : divergence RSI contraire, anomalie corps/volume (Weis), mouvement sans volume,
 bougie de retournement contre le trade.
 """
+from datetime import datetime
+
 from app.trading import indicators as I
 
 
@@ -16,7 +18,9 @@ def _item(key: str, label: str, ok: bool | None, detail: str) -> dict:
 
 
 def checklist(bars: list[dict], daily: list[dict] | None, h4: list[dict] | None, market: str, side: str,
-              atr_value: float) -> dict:
+              atr_value: float, now: datetime | None = None) -> dict:
+    """`now` : heure du calcul (maintenant par défaut) ; avant l'ouverture US, la séance du jour
+    n'a pas commencé : pas de VWAP du jour, pivots tirés de la dernière séance complète."""
     long = side == "long"
     sign = 1 if long else -1
     last = bars[-1]
@@ -51,14 +55,16 @@ def checklist(bars: list[dict], daily: list[dict] | None, h4: list[dict] | None,
                        f"K {k[-1]:.0f} / D {d[-1]:.0f}, croisement {'haussier' if long else 'baissier'} "
                        f"{'récent' if crossed else 'absent sur les 3 dernières bougies'}"))
 
-    vw = I.vwap(bars, market)
+    vw = I.vwap(bars, market, now)
     if vw:
         items.append(_item("vwap", "VWAP de la séance", (price - vw) * sign > 0,
                            f"prix {'au-dessus' if price > vw else 'en dessous'} du VWAP ({vw:.4g})"))
     else:
-        items.append(_item("vwap", "VWAP de la séance", None, "pas de volume sur la séance"))
+        items.append(_item("vwap", "VWAP de la séance", None,
+                           "séance du jour pas encore ouverte" if I.current_session(bars, market, now)
+                           != I.session_key(bars[-1]["t"], market) else "pas de volume sur la séance"))
 
-    prev = I.previous_session(bars, market)
+    prev = I.previous_session(bars, market, now)
     if prev:
         levels = I.pivots(prev)
         held = broke = None

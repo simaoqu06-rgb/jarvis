@@ -5,6 +5,7 @@ Les trades suivis sont gardés dans data/trades.json (JARVIS_TRADES_PATH).
 """
 import json
 import logging
+import math
 import os
 import time as clock
 import uuid
@@ -12,10 +13,10 @@ from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from app import needs
 from app.config import env_float
 from app.core.http import SourceError
 from app.sources import alpaca, kraken, twelvedata
+from app.trading import calendar as CAL
 from app.trading import catalyst as C
 from app.trading import plan as P
 from app.trading import score as SC
@@ -38,21 +39,27 @@ SETTINGS = {
 }
 # Taille demandée à Twelve Data selon l'intervalle (1 crédit par appel, quelle que soit la taille).
 STOCK_OUTPUTSIZE = {1: 60, 15: 5000, 240: 400, 1440: 300}
+TWELVEDATA_MAX_OUTPUTSIZE = 5000
 # 1 min : 15 s pour que le cockpit suive le prix en direct (Kraken est gratuit ; les actions restent
 # limitées par STOCK_CHECK_SECONDS, la page ne déclenche jamais d'appel Twelve Data).
 TTL = {1: 15, 15: 300, 60: 120, 240: 1800, 1440: 1800}
 LIVE_BARS = 120  # mini-graphe du cockpit : les 2 dernières heures en bougies d'1 min
 # Actions : 1 crédit Twelve Data par appel (800 par jour en gratuit). On ne relit les bougies d'1 min
-# qu'une fois toutes les 2 minutes, et seulement pendant la séance.
-STOCK_CHECK_SECONDS = 110
-_last_stock_check: dict[str, float] = {}
+# qu'une fois toutes les 2 minutes par action (quel que soit le nombre de trades dessus), et seulement
+# pendant la séance ; les bougies du plan (signaux de sortie) une fois par bougie close.
+STOCK_CHECK_SECONDS = env_float("JARVIS_STOCK_CHECK_SECONDS", 110)
+_last_stock_check: dict[str, float] = {}       # action -> dernier appel (horloge monotone)
+_last_plan_bar: dict[tuple, int] = {}          # (symbole, marché) -> dernière bougie du plan lue (fin, epoch)
+_catchup_done: dict[str, str] = {}             # action -> séance déjà rattrapée après la clôture
+# Cache des bougies : borné en âge et en taille pour ne pas grossir jour après jour.
+CACHE_MAX_AGE = 24 * 3600
+CACHE_MAX_ENTRIES = 256
+_candle_cache: dict[tuple, tuple[float, list[dict]]] = {}
 
 
 def nyse_session_open(now: datetime) -> bool:
-    """Séance régulière en cours (jours fériés ignorés : au pire un appel pour rien)."""
-    local = now.astimezone(NEW_YORK)
-    return local.weekday() < 5 and OPEN <= local.time() < CLOSE
-_candle_cache: dict[tuple, tuple[float, list[dict]]] = {}
+    """Séance régulière en cours (fériés et séances courtes compris, calendrier calculé)."""
+    return CAL.session_open(now)
 
 
 class PlanError(Exception):
@@ -66,16 +73,31 @@ def _market(market: str) -> str:
     return market
 
 
-async def candles(symbol: str, market: str, interval: int, source: str | None = None) -> list[dict]:
+def _prune_cache(now_mono: float) -> None:
+    """Oublie les bougies trop anciennes, puis les plus vieilles au-delà de CACHE_MAX_ENTRIES."""
+    for key in [k for k, (at, _) in _candle_cache.items() if now_mono - at > CACHE_MAX_AGE]:
+        _candle_cache.pop(key, None)
+    if len(_candle_cache) > CACHE_MAX_ENTRIES:
+        oldest = sorted(_candle_cache, key=lambda k: _candle_cache[k][0])
+        for key in oldest[: len(_candle_cache) - CACHE_MAX_ENTRIES]:
+            _candle_cache.pop(key, None)
+
+
+async def candles(symbol: str, market: str, interval: int, source: str | None = None,
+                  max_age: float | None = None, outputsize: int | None = None) -> list[dict]:
     """Bougies de la plus ancienne à la plus récente ; la dernière peut être en cours.
 
     Actions : Twelve Data (temps réel, crédits comptés), Alpaca en secours ou sur demande
     (`source="alpaca"`, utilisé par le scanner : gratuit mais avec 16 min de retard).
+    `max_age` : âge maximal accepté pour le cache (TTL de l'intervalle par défaut) ;
+    `outputsize` : nombre de bougies demandées à Twelve Data (pour rattraper une coupure).
     """
     key = (symbol, market, interval)
+    now_mono = clock.monotonic()
     cached = _candle_cache.get(key)
-    if cached and clock.monotonic() - cached[0] < TTL.get(interval, 120):
+    if cached and now_mono - cached[0] < (TTL.get(interval, 120) if max_age is None else max_age):
         return cached[1]
+    size = outputsize or STOCK_OUTPUTSIZE.get(interval, 500)
     try:
         if market == "crypto":
             rows = await kraken.candles(symbol, interval)
@@ -83,20 +105,23 @@ async def candles(symbol: str, market: str, interval: int, source: str | None = 
             rows = await alpaca.candles(symbol, interval)
         else:
             try:
-                rows = await twelvedata.candles(symbol, interval, outputsize=STOCK_OUTPUTSIZE.get(interval, 500))
+                rows = await twelvedata.candles(symbol, interval, outputsize=size)
             except SourceError:
                 if not alpaca.configured():
                     raise
-                rows = await alpaca.candles(symbol, interval)
+                days = math.ceil(size / 390) + 2 if interval == 1 and outputsize else None
+                rows = await alpaca.candles(symbol, interval, days)
     except SourceError as exc:
         raise PlanError(f"bougies {symbol} indisponibles : {exc}") from exc
-    _candle_cache[key] = (clock.monotonic(), rows)
+    _prune_cache(now_mono)
+    _candle_cache[key] = (now_mono, rows)
     return rows
 
 
-async def _optional_candles(symbol: str, market: str, interval: int, source: str | None = None) -> list[dict] | None:
+async def _optional_candles(symbol: str, market: str, interval: int, source: str | None = None,
+                            max_age: float | None = None) -> list[dict] | None:
     try:
-        return await candles(symbol, market, interval, source)
+        return await candles(symbol, market, interval, source, max_age=max_age)
     except PlanError as exc:
         log.warning("%s", exc)
         return None
@@ -104,15 +129,18 @@ async def _optional_candles(symbol: str, market: str, interval: int, source: str
 
 # --- Heures de cotation ---------------------------------------------------------------
 
-async def _nyse_calendar(year: int) -> tuple[set[str], set[str]]:
-    result = await needs.us_market_holidays(year)
-    closed = {h["date"] for h in (result.data or []) if h.get("closed")}
-    early = {h["date"] for h in (result.data or []) if h.get("early_close")}
-    return closed, early
+def add_market_minutes(start: datetime, minutes: float, closed: set[str] | None = None,
+                       early: set[str] | None = None) -> datetime:
+    """Avance de `minutes` minutes de cotation NYSE (9 h 30 - 16 h, heure de New York).
 
-
-def add_market_minutes(start: datetime, minutes: float, closed: set[str], early: set[str]) -> datetime:
-    """Avance de `minutes` minutes de cotation NYSE (9 h 30 - 16 h, heure de New York)."""
+    Sans `closed` ni `early`, le calendrier calculé (app.trading.calendar) donne fériés et séances courtes.
+    """
+    if closed is None and early is None:
+        try:
+            return CAL.add_market_minutes(start, minutes)
+        except ValueError as exc:
+            raise PlanError(str(exc)) from exc
+    closed, early = closed or set(), early or set()
     current = start.astimezone(NEW_YORK)
     remaining = timedelta(minutes=minutes)
     for _ in range(400):
@@ -155,12 +183,7 @@ def time_fr(moment: datetime, now: datetime) -> str:
 async def _eta(market: str, start: datetime, minutes: float) -> datetime:
     if market == "crypto":
         return start + timedelta(minutes=minutes)
-    local = start.astimezone(NEW_YORK)
-    closed, early = await _nyse_calendar(local.year)
-    if local.month == 12:  # l'estimation peut déborder sur janvier
-        next_closed, next_early = await _nyse_calendar(local.year + 1)
-        closed, early = closed | next_closed, early | next_early
-    return add_market_minutes(start, minutes, closed, early)
+    return add_market_minutes(start, minutes)
 
 
 # --- Plan --------------------------------------------------------------------------------
@@ -193,15 +216,15 @@ async def build_plan(
     cfg = SETTINGS[market]
     bars = await candles(symbol, market, cfg["interval"], source)
     try:
-        levels = P.default_levels(bars, side, entry, stop, targets, market=market)
+        levels = P.default_levels(bars, side, entry, stop, targets, market=market, now=now)
         timing = P.historical_timing(bars, levels, cfg["horizon_bars"])
-        atr_value = P.atr(bars)
+        atr_value = levels.atr if levels.atr is not None else P.atr(bars)
     except ValueError as exc:
         raise PlanError(str(exc)) from exc
     daily = await _optional_candles(symbol, market, 1440, source)
     h4 = await _optional_candles(symbol, market, 240, source)
     # Signaux sur les bougies closes : la dernière, en cours, fausserait le volume et les figures.
-    check = S.checklist(bars[:-1], daily, h4, market, side, atr_value)
+    check = S.checklist(bars[:-1], daily, h4, market, side, atr_value, now=now)
     step = cfg["interval"]
     clock_word = "" if market == "crypto" else " de cotation"
     estimates = []
@@ -236,7 +259,7 @@ async def build_plan(
     plan = {
         "symbol": symbol, "market": market, "side": side,
         "entry": levels.entry, "stop": levels.stop, "stop_source": levels.stop_source,
-        "stop_pct": round(-abs(levels.pct(levels.stop)), 2), "atr": round(atr_value, 6),
+        "stop_pct": round(-abs(levels.pct(levels.stop)), 2), "atr": P.round_price(atr_value),
         "targets": estimates,
         "stop_first_rate": timing["stop_first_rate"],
         "checklist": check,
@@ -340,7 +363,7 @@ class Book:
         trade = self.get(trade_id)
         if trade and trade["status"] == "open":
             trade["status"] = "closed"
-            trade["events"].append({"kind": "close", "price": price or trade["last_price"], "reason": reason,
+            trade["events"].append({"kind": "close", "price": trade["last_price"] if price is None else price, "reason": reason,
                                     "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
             self.save()
         return trade
@@ -439,27 +462,99 @@ def apply_exit_signals(trade: dict, bars: list[dict]) -> list[str]:
     return messages
 
 
-async def check_trades(book: Book, now: datetime | None = None) -> list[str]:
-    """Vérifie les trades ouverts : TP/SL sur les bougies d'1 min, signaux de sortie sur les bougies du plan."""
+def _watch_exit(trade: dict) -> bool:
+    """Les signaux de sortie ne servent que sur un trade gagnant (cf. apply_exit_signals)."""
+    sign = 1 if trade["side"] == "long" else -1
+    return trade["status"] == "open" and ((trade["last_price"] - trade["entry"]) * sign > 0 or trade["targets_hit"])
+
+
+def minute_outputsize(trades: list[dict], now: datetime) -> int:
+    """Bougies d'1 min à demander pour couvrir tout ce qui s'est passé depuis le dernier passage
+    (coupure, redémarrage) : minutes de cotation écoulées + marge, plafonné à la limite de Twelve Data."""
+    oldest = min(t["last_check"] for t in trades)
+    minutes = CAL.market_minutes_between(datetime.fromtimestamp(oldest, timezone.utc), now)
+    return max(STOCK_OUTPUTSIZE[1], min(math.ceil(minutes) + 5, TWELVEDATA_MAX_OUTPUTSIZE))
+
+
+def _plan_bar_boundary(market: str, interval: int, now: datetime) -> int | None:
+    """Fin de la dernière bougie du plan close à `now` (epoch), None si aucune bougie de séance n'a clos."""
+    step = interval * 60
+    boundary = int(now.timestamp()) // step * step
+    if market == "stock":
+        moment = datetime.fromtimestamp(boundary, timezone.utc)
+        bounds = CAL.session_bounds(moment.astimezone(NEW_YORK).date())
+        if not bounds or not bounds[0] < moment <= bounds[1]:
+            return None
+    return boundary
+
+
+async def _check_symbol(symbol: str, market: str, trades: list[dict], now: datetime, out: list[str]) -> None:
+    """Un seul appel de bougies d'1 min par symbole, appliqué à tous ses trades ouverts."""
+    outputsize = None
+    if market == "stock":
+        if CAL.session_open(now):
+            ready = clock.monotonic() - _last_stock_check.get(symbol, float("-inf")) >= STOCK_CHECK_SECONDS
+        else:
+            # Après la clôture : un seul rattrapage si la fin de séance n'a pas été lue (coupure).
+            prev = CAL.previous_session(now)
+            day = prev[1].date().isoformat() if prev else None
+            ready = bool(prev) and _catchup_done.get(symbol) != day and \
+                any(t["last_check"] < prev[1].timestamp() - 60 for t in trades)
+            if ready:
+                _catchup_done[symbol] = day
+        if not ready:
+            for trade in trades:
+                out += apply_bars(trade, [], now)  # seulement l'alerte de retard éventuelle
+            return
+        _last_stock_check[symbol] = clock.monotonic()
+        outputsize = minute_outputsize(trades, now)
+    try:
+        bars = await candles(symbol, market, 1, max_age=0 if market == "stock" else None, outputsize=outputsize)
+    except PlanError as exc:
+        log.warning("Suivi %s impossible : %s", symbol, exc)
+        return
+    for trade in trades:
+        out += apply_bars(trade, bars, now)
+    # Signaux de sortie : une seule lecture par bougie du plan close, et seulement sur un trade gagnant.
+    interval = SETTINGS[market]["interval"]
+    key = (symbol, market)
+    boundary = _plan_bar_boundary(market, interval, now)
+    watched = [t for t in trades if _watch_exit(t)]
+    if boundary is None or not watched or _last_plan_bar.get(key, 0) >= boundary:
+        return
+    plan_bars = await _optional_candles(symbol, market, interval, max_age=now.timestamp() - boundary)
+    if not plan_bars:
+        return
+    _last_plan_bar[key] = boundary
+    closed = [b for b in plan_bars if b["t"] + interval * 60 <= now.timestamp()]
+    for trade in watched:
+        out += apply_exit_signals(trade, closed)
+
+
+async def check_trades(book: Book, now: datetime | None = None, save: bool = True) -> list[str]:
+    """Vérifie les trades ouverts : TP/SL sur les bougies d'1 min, signaux de sortie sur les bougies du plan.
+
+    `save=False` : l'appelant enregistre le carnet lui-même (après avoir mis les messages en file d'envoi).
+    """
     now = now or datetime.now(timezone.utc)
-    messages = []
+    messages: list[str] = []
+    groups: dict[tuple[str, str], list[dict]] = {}
     for trade in book.open_trades():
-        if trade["market"] == "stock":
-            last = _last_stock_check.get(trade["symbol"], 0.0)
-            if not nyse_session_open(now) or clock.monotonic() - last < STOCK_CHECK_SECONDS:
-                messages += apply_bars(trade, [], now)  # seulement l'alerte de retard éventuelle
-                continue
-            _last_stock_check[trade["symbol"]] = clock.monotonic()
+        groups.setdefault((trade["symbol"], trade["market"]), []).append(trade)
+    for (symbol, market), trades in groups.items():
         try:
-            bars = await candles(trade["symbol"], trade["market"], 1)
-        except PlanError as exc:
-            log.warning("Suivi %s impossible : %s", trade["symbol"], exc)
-            continue
-        messages += apply_bars(trade, bars, now)
-        plan_bars = await _optional_candles(trade["symbol"], trade["market"], SETTINGS[trade["market"]]["interval"])
-        if plan_bars:
-            messages += apply_exit_signals(trade, plan_bars[:-1])
-    book.save()
+            await _check_symbol(symbol, market, trades, now, messages)
+        except Exception:  # une réponse inattendue d'une source ne doit pas arrêter le suivi des autres
+            log.exception("Suivi %s en échec", symbol)
+    # Les états par action ne gardent que les symboles encore suivis.
+    symbols = {s for s, _ in groups}
+    for d in (_last_stock_check, _catchup_done):
+        for k in [k for k in d if k not in symbols]:
+            d.pop(k, None)
+    for k in [k for k in _last_plan_bar if k not in groups]:
+        _last_plan_bar.pop(k, None)
+    if save:
+        book.save()
     return messages
 
 

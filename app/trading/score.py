@@ -43,7 +43,7 @@ def technique(plan: dict, daily: list[dict] | None, s) -> tuple[float, list[str]
         slots += 1
         reasons.append(f"RSI 14 j {rsi:.0f} {'dans' if good else 'hors de'} la zone {lo:.0f}-{hi:.0f}")
     rr = plan_rr(plan)
-    points += min(rr / s["rr_min"], 1.0)
+    points += min(rr / s["rr_min"], 1.0) if s["rr_min"] > 0 else 1.0  # rr_min ≤ 0 : aucun R/R exigé
     slots += 1
     reasons.append(f"R/R {rr:g} pour {s['rr_min']:g} visé")
     bonus = [items[k]["label"].replace(" (bonus)", "").lower() for k in BONUS if items[k]["ok"]]
@@ -87,8 +87,11 @@ def catalyst(cat: dict | None, side: str, s) -> tuple[float | None, list[str]]:
 
 def risk(plan: dict, daily: list[dict] | None, s) -> tuple[float, list[str]]:
     score, reasons = 10.0, []
-    stop_atr = abs(plan["entry"] - plan["stop"]) / plan["atr"] if plan["atr"] else 0
-    if stop_atr > s["max_stop_atr"]:
+    # ATR nul ou absent (ex. arrondi à 6 décimales d'une crypto à 0,00001) : distance en ATR non mesurable.
+    stop_atr = abs(plan["entry"] - plan["stop"]) / plan["atr"] if plan.get("atr") else None
+    if stop_atr is None:
+        reasons.append("stop en ATR non mesurable (ATR indisponible)")
+    elif stop_atr > s["max_stop_atr"]:
         score -= 2
         reasons.append(f"stop large ({stop_atr:.1f} ATR)")
     else:

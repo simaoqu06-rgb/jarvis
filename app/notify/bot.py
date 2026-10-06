@@ -33,11 +33,52 @@ CRYPTO = {"BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "AVAX", "LINK", "DOT", "LTC
 HELP = __doc__.split("\n\n")[2].strip()
 PROPOSAL_PREFIX = "jarvis:prop:"
 outbox: asyncio.Queue = asyncio.Queue()  # propositions à envoyer en privé avec leurs boutons
+delivered: set[tuple[int, int]] = set()  # (proposition, propriétaire) déjà reçues en privé
+RETRY_FIRST, RETRY_MAX = 5.0, 600.0  # attente entre deux essais d'envoi en privé (secondes)
+MAX_ATTEMPTS = 12  # ensuite on abandonne l'envoi privé : la proposition reste dans !propositions et le cockpit
 
 
 def offer(proposal: dict) -> None:
     """Envoie une proposition au propriétaire dès que le bot est connecté."""
     outbox.put_nowait(proposal)
+
+
+def queue_pending() -> int:
+    """Remet en file les propositions en attente gardées sur disque (data/trading_proposals.json).
+
+    Appelé à chaque connexion du bot : rien n'est perdu si le serveur a redémarré ou si un envoi
+    a échoué. Celles déjà reçues par tous les propriétaires sont ignorées à l'envoi.
+    """
+    pending = PR.proposals.pending()
+    for p in pending:
+        outbox.put_nowait(p)
+    return len(pending)
+
+
+async def deliver_once(p: dict, owner_ids: set[int], fetch_user, view_for, users: dict | None = None) -> bool:
+    """Envoie la proposition en privé à chaque propriétaire qui ne l'a pas encore reçue.
+
+    Renvoie True quand tous l'ont reçue (ou qu'elle n'est plus en attente), False s'il faut réessayer.
+    """
+    current = PR.proposals.get(p["id"])
+    if current is not None and current["status"] != "pending":
+        return True  # déjà décidée (cockpit, !oui/!non) : plus rien à envoyer
+    users = {} if users is None else users
+    ok = True
+    for oid in sorted(owner_ids):
+        if (p["id"], oid) in delivered:
+            continue
+        try:
+            user = users.get(oid) or await fetch_user(oid)
+            users[oid] = user
+            await user.send(f"🧪 {PR.text(p)}", view=view_for(p["id"]))
+            delivered.add((p["id"], oid))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Proposition %s non envoyée en privé au compte %s", p["id"], oid)
+            ok = False
+    return ok
 
 
 def owners() -> set[int]:
@@ -138,13 +179,34 @@ async def run(lock: asyncio.Lock | None = None) -> None:
 
     async def deliver():
         await client.wait_until_ready()
-        owner = await client.fetch_user(next(iter(allowed)))
+        queue_pending()
+        users: dict = {}
+        attempts: dict[int, int] = {}
+        delay = RETRY_FIRST
         while True:
             p = await outbox.get()
             try:
-                await owner.send(f"🧪 {PR.text(p)}", view=buttons(p["id"]))
-            except discord.HTTPException:
-                log.exception("Proposition %s non envoyée en privé", p["id"])
+                done = await deliver_once(p, allowed, client.fetch_user, buttons, users)
+            except asyncio.CancelledError:
+                outbox.put_nowait(p)  # reconnexion : la proposition repart au prochain passage
+                raise
+            except Exception:
+                log.exception("Envoi de la proposition %s en échec", p.get("id"))
+                done = False
+            if done:
+                attempts.pop(p["id"], None)
+                delay = RETRY_FIRST
+                continue
+            attempts[p["id"]] = attempts.get(p["id"], 0) + 1
+            if attempts[p["id"]] >= MAX_ATTEMPTS:
+                log.error("Proposition %s : envoi privé abandonné après %s essais (voir !propositions ou le cockpit)",
+                          p["id"], MAX_ATTEMPTS)
+                continue
+            users.clear()  # un compte introuvable sera recherché à nouveau
+            outbox.put_nowait(p)  # remise en file, nouvel essai après une attente croissante
+            log.warning("Proposition %s : nouvel essai dans %.0f s", p["id"], delay)
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, RETRY_MAX)
 
     @client.event
     async def on_interaction(interaction):
@@ -178,6 +240,9 @@ async def run(lock: asyncio.Lock | None = None) -> None:
                 await message.channel.send(chunk)
 
     sender = asyncio.create_task(deliver())
+    sender.add_done_callback(
+        lambda t: t.cancelled() or not t.exception() or log.error("Envoi des propositions arrêté", exc_info=t.exception())
+    )
     try:
         await client.start(config.secret(TOKEN_NAME))
     finally:

@@ -1,5 +1,9 @@
 """Twelve Data : cours des actions US (clé gratuite TWELVEDATA_API_KEY, 8 requêtes/min)."""
 import asyncio
+import logging
+import os
+import time
+from collections import deque
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -8,9 +12,43 @@ from app.core.http import SourceError, get_json, to_float
 
 URL = "https://api.twelvedata.com/quote"
 KEY_NAME = "TWELVEDATA_API_KEY"
+log = logging.getLogger(__name__)
+# Offre gratuite : 8 crédits par minute (1 crédit par symbole et par appel). Plan payant : à relever.
+PER_MINUTE = max(1, int(os.getenv("TWELVEDATA_CREDITS_PER_MINUTE", "8") or 8))
+_calls: deque[float] = deque()  # heures (monotones) des appels de la dernière minute
+
+
+MAX_WAIT = 2.0  # au-delà, on n'attend pas : la source de secours prend le relais
+
+
+async def _spend() -> None:
+    """Réserve un crédit pour rester sous PER_MINUTE appels sur 60 s glissantes.
+
+    Si le prochain crédit libre est à plus de MAX_WAIT secondes, lève SourceError plutôt que
+    d'attendre : JARVIS bascule aussitôt sur la source de secours au lieu de bloquer jusqu'à une minute.
+    """
+    while True:
+        now = time.monotonic()
+        while _calls and now - _calls[0] >= 60:
+            _calls.popleft()
+        if len(_calls) < PER_MINUTE:
+            _calls.append(now)
+            return
+        wait = 60 - (now - _calls[0]) + 0.1
+        if wait > MAX_WAIT:
+            raise SourceError(f"limite de {PER_MINUTE} appels par minute atteinte (libre dans {wait:.0f} s)")
+        await asyncio.sleep(wait)
+
+
+def _failed(symbol: str, error: Exception) -> dict:
+    """Cours manquant pour un symbole : même forme, valeurs vides, et l'erreur en clair."""
+    return {"symbol": symbol, "name": None, "exchange": None, "currency": None, "price": None, "open": None,
+            "high": None, "low": None, "previous_close": None, "change_pct": None, "volume": None,
+            "is_market_open": None, "as_of": None, "error": str(error)}
 
 
 async def _quote(symbol: str, apikey: str) -> dict:
+    await _spend()
     q = await get_json(URL, params={"symbol": symbol, "apikey": apikey})
     if q.get("status") == "error":
         raise SourceError(f"{symbol} : {q.get('message', 'erreur')}")
@@ -36,7 +74,25 @@ async def stock_quotes(symbols: list[str], apikey: str | None = None) -> list[di
     key = apikey or secret(KEY_NAME)
     if not key:
         raise SourceError(f"clé {KEY_NAME} absente")
-    return list(await asyncio.gather(*(_quote(s, key) for s in symbols)))
+    quotes: list[dict] = []
+    errors: list[str] = []
+    # Par paquets de PER_MINUTE : un ticker en erreur ne fait pas tomber les autres.
+    for i in range(0, len(symbols), PER_MINUTE):
+        chunk = symbols[i:i + PER_MINUTE]
+        results = await asyncio.gather(*(_quote(s, key) for s in chunk), return_exceptions=True)
+        for symbol, r in zip(chunk, results):
+            if isinstance(r, SourceError):
+                errors.append(str(r))
+                quotes.append(_failed(symbol, r))
+            elif isinstance(r, BaseException):
+                raise r
+            else:
+                quotes.append(r)
+    if symbols and len(errors) == len(symbols):
+        raise SourceError(" ; ".join(errors))  # tout a échoué : on passe à la source de secours
+    if errors:
+        log.warning("Twelve Data : cours manquants (%s)", " ; ".join(errors))
+    return quotes
 
 
 SERIES_URL = "https://api.twelvedata.com/time_series"
@@ -47,6 +103,7 @@ async def candles(symbol: str, interval_min: int, outputsize: int = 5000, apikey
     key = apikey or secret(KEY_NAME)
     if not key:
         raise SourceError(f"clé {KEY_NAME} absente")
+    await _spend()
     if interval_min >= 1440:
         interval = "1day"
     else:

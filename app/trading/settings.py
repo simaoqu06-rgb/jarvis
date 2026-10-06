@@ -7,7 +7,9 @@ du forward-test, et ne s'appliquent qu'une fois approuvées par Simão.
 """
 import json
 import logging
+import math
 import os
+import re
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -44,6 +46,77 @@ DEFAULTS: dict = {
 }
 
 
+TRUE, FALSE = ("1", "true", "oui", "on", "vrai"), ("0", "false", "non", "off", "faux")
+TICKER = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
+POSITIVE_KEYS = {"rr_min"}  # doivent être strictement positifs (le R/R visé sert de diviseur)
+
+
+def _number(key: str, value) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{key} : nombre attendu, pas {value!r}")
+    if isinstance(value, str):
+        try:
+            value = float(value.strip().replace(",", "."))
+        except ValueError:
+            raise ValueError(f"{key} : nombre attendu, pas {value!r}") from None
+    if not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError(f"{key} : nombre attendu, pas {value!r}")
+    return float(value)
+
+
+def validate(key: str, value):
+    """Valeur convertie au type du défaut ; ValueError (message en français) si elle ne convient pas."""
+    default = DEFAULTS[key]
+    if isinstance(default, bool):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int) and value in (0, 1):
+            return bool(value)
+        if isinstance(value, str) and value.strip().lower() in TRUE + FALSE:
+            return value.strip().lower() in TRUE
+        raise ValueError(f"{key} : oui/non attendu, pas {value!r}")
+    if isinstance(default, int):
+        number = _number(key, value)
+        if not number.is_integer():
+            raise ValueError(f"{key} : nombre entier attendu, pas {value!r}")
+        return int(number)
+    if default is None or isinstance(default, float):
+        number = _number(key, value)
+        if key in POSITIVE_KEYS and number <= 0:
+            raise ValueError(f"{key} doit être strictement positif")
+        return number
+    if isinstance(default, list):
+        if isinstance(value, str):
+            value = [x for x in re.split(r"[,\s;]+", value) if x]
+        if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+            raise ValueError(f"{key} : liste de tickers attendue (ex. « NVDA, AMD »), pas {value!r}")
+        symbols = list(dict.fromkeys(x.strip().upper() for x in value if x.strip()))
+        bad = [x for x in symbols if not TICKER.match(x)]
+        if bad:
+            raise ValueError(f"{key} : ticker invalide {', '.join(bad)}")
+        return symbols
+    if isinstance(default, dict):
+        if not isinstance(value, dict):
+            raise ValueError(f"{key} : dictionnaire attendu avec {', '.join(default)}")
+        missing, extra = set(default) - set(value), set(value) - set(default)
+        if missing or extra:
+            raise ValueError(f"{key} : clés attendues {', '.join(default)}"
+                             + (f" (manque {', '.join(sorted(missing))})" if missing else "")
+                             + (f" (inconnues {', '.join(sorted(extra))})" if extra else ""))
+        out = {k: _number(f"{key}.{k}", value[k]) for k in default}
+        if any(v < 0 for v in out.values()) or not sum(out.values()) > 0:
+            raise ValueError(f"{key} : poids positifs attendus, de somme non nulle")
+        return out
+    if isinstance(default, str):
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{key} : texte attendu, pas {value!r}")
+        value = value.strip()
+        if key.endswith("_time_ny") and not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", value):
+            raise ValueError(f"{key} : heure HH:MM attendue, pas {value!r}")
+        return value
+    return value
+
+
 class Settings:
     def __init__(self, path: str | None = SETTINGS_PATH):
         self.path = Path(path) if path else None
@@ -64,19 +137,16 @@ class Settings:
         return DEFAULTS | self.overrides
 
     def update(self, changes: dict) -> dict:
-        """Applique des changements ; une valeur None remet le défaut. Refuse les clés inconnues."""
+        """Applique des changements ; une valeur None remet le défaut. Refuse les clés inconnues et,
+        sans rien appliquer, les valeurs du mauvais type (ValueError)."""
         unknown = set(changes) - set(DEFAULTS)
         if unknown:
             raise KeyError(", ".join(sorted(unknown)))
-        for key, value in changes.items():
+        checked = {key: None if value is None else validate(key, value) for key, value in changes.items()}
+        for key, value in checked.items():
             if value is None:
                 self.overrides.pop(key, None)
             else:
-                default = DEFAULTS[key]
-                if isinstance(default, bool):
-                    value = value if isinstance(value, bool) else str(value).lower() in ("1", "true", "oui", "on")
-                elif (default is None or isinstance(default, (int, float))) and isinstance(value, str):
-                    value = float(value.replace(",", "."))
                 self.overrides[key] = value
         self.save()
         return self.all()
