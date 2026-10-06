@@ -8,6 +8,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app import alerts, needs, scheduler
@@ -224,6 +225,12 @@ async def trading_list(status: str | None = Query(None, description="open ou clo
     return [trading.summary(t) for t in reversed(trades)]
 
 
+@app.get("/api/trading/live")
+async def trading_live():
+    """Dernier prix et mini-graphe (2 h en 1 min) des trades ouverts ; le cockpit le lit toutes les 10 s."""
+    return await trading.live(scheduler.book)
+
+
 @app.post("/api/trading/trades/{trade_id}/close")
 async def trading_close(trade_id: str, price: float | None = None):
     trade = scheduler.book.close(trade_id, price)
@@ -240,6 +247,10 @@ async def trading_delete(trade_id: str):
 
 
 COCKPIT_HTML = Path(__file__).parent / "web" / "cockpit.html"
+
+
+# Icônes et manifeste : le cockpit s'installe comme une appli sur l'écran d'accueil du téléphone.
+app.mount("/cockpit-static", StaticFiles(directory=COCKPIT_HTML.parent / "static"), name="cockpit-static")
 
 
 @app.get("/cockpit", response_class=HTMLResponse, include_in_schema=False)

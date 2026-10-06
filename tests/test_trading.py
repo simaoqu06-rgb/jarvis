@@ -148,3 +148,17 @@ def test_cockpit_texte():
     t["events"].append({"kind": "tp1", "price": 102.0, "at": "2026-10-06T01:00:00+00:00"})
     text = S.cockpit_text(book, NOW)
     assert "BTC" in text and "✅ touché" in text and "TP2" in text
+
+
+async def test_cockpit_live_sans_appel_pour_les_actions(monkeypatch):
+    async def fail(*args, **kwargs):
+        raise AssertionError("aucun appel Twelve Data depuis le cockpit")
+
+    monkeypatch.setattr(S.twelvedata, "candles", fail)
+    book = S.Book(None)
+    t = book.add(trade(symbol="NVDA", market="stock"))
+    S._candle_cache.pop(("NVDA", "stock", 1), None)
+    assert (await S.live(book))[0] == {"id": t["id"], "price": 100.0, "chart": [], "as_of": None}
+    S._candle_cache[("NVDA", "stock", 1)] = (0.0, bars([100.0, 101.5], start=T0, step=60))
+    live = (await S.live(book))[0]
+    assert live["price"] == 101.5 and live["chart"] == [[T0, 100.0], [T0 + 60, 101.5]]

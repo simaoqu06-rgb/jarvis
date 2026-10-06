@@ -71,15 +71,19 @@ de cache dans `app/needs.py`. Chaque appel a un délai maximum de 8 secondes.
 JARVIS propose des plans selon la méthode EmperorBTC ([docs/emperorbtc.md](docs/emperorbtc.md)) ;
 c'est toi qui passes les ordres : aucun ordre n'est envoyé à un courtier.
 
-**Cockpit** : `/cockpit` (page web, rafraîchie toutes les 30 s). On y calcule un plan, on clique
-« Je prends ce trade » pour le suivre, et on voit pour chaque trade le prix, les TP/SL touchés avec
-l'heure, les délais estimés des TP restants, les signes de sortie et le journal des trades terminés.
+**Cockpit** : `/cockpit` (page web). On y calcule un plan, on clique « Je prends ce trade » pour le
+suivre, et on voit pour chaque trade le prix en direct (toutes les 10 s) avec un mini-graphe des
+2 dernières heures et les niveaux SL/entrée/TP, les TP/SL touchés avec l'heure, un compte à rebours
+vers chaque TP restant, les signes de sortie et le journal des trades terminés (résultats en R).
+Les prix des actions viennent des bougies déjà lues par le suivi : la page ne coûte aucun crédit
+Twelve Data. Ajoutée à l'écran d'accueil du téléphone, elle s'ouvre comme une appli.
 Le même tableau est réécrit chaque minute dans un message Discord (à épingler une fois). Tout tourne sur ton serveur : aucun token Claude n'est consommé.
 
 | Route | Rôle |
 |---|---|
 | `POST /api/trading/plan` | Calcule un plan sans l'enregistrer (`?discord_post=true` pour l'envoyer sur Discord) |
 | `POST /api/trading/trades` | Calcule le plan, l'enregistre et le suit (annonce sur Discord) |
+| `GET /api/trading/live` | Dernier prix et mini-graphe (2 h en 1 min) des trades ouverts, pour le cockpit |
 | `GET /api/trading/trades?status=open` | Trades suivis, avec le dernier prix, la variation et le gain en R |
 | `POST /api/trading/trades/{id}/close?price=…` | Clôture à la main |
 | `DELETE /api/trading/trades/{id}` | Supprime un trade |

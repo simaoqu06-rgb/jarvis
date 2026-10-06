@@ -35,7 +35,10 @@ SETTINGS = {
 }
 # Taille demandée à Twelve Data selon l'intervalle (1 crédit par appel, quelle que soit la taille).
 STOCK_OUTPUTSIZE = {1: 60, 15: 5000, 240: 400, 1440: 300}
-TTL = {1: 50, 15: 300, 60: 120, 240: 1800, 1440: 1800}
+# 1 min : 15 s pour que le cockpit suive le prix en direct (Kraken est gratuit ; les actions restent
+# limitées par STOCK_CHECK_SECONDS, la page ne déclenche jamais d'appel Twelve Data).
+TTL = {1: 15, 15: 300, 60: 120, 240: 1800, 1440: 1800}
+LIVE_BARS = 120  # mini-graphe du cockpit : les 2 dernières heures en bougies d'1 min
 # Actions : 1 crédit Twelve Data par appel (800 par jour en gratuit). On ne relit les bougies d'1 min
 # qu'une fois toutes les 2 minutes, et seulement pendant la séance.
 STOCK_CHECK_SECONDS = 110
@@ -422,6 +425,26 @@ def summary(trade: dict) -> dict:
     risk = abs(trade["entry"] - trade["stop"])
     r_now = sign * (trade["last_price"] - trade["entry"]) / risk if risk else 0
     return trade | {"move_pct": round(move, 2), "r_now": round(r_now, 2)}
+
+
+async def live(book: Book) -> list[dict]:
+    """Dernier prix et mini-graphe de chaque trade ouvert, pour le cockpit.
+
+    Crypto : bougies d'1 min Kraken (gratuit, cache 15 s). Actions : uniquement les bougies que le
+    suivi a déjà lues, pour ne dépenser aucun crédit Twelve Data de plus.
+    """
+    out = []
+    for t in book.open_trades():
+        if t["market"] == "crypto":
+            bars = await _optional_candles(t["symbol"], "crypto", 1) or []
+        else:
+            cached = _candle_cache.get((t["symbol"], "stock", 1))
+            bars = cached[1] if cached else []
+        bars = bars[-LIVE_BARS:]
+        price = bars[-1]["c"] if bars else t["last_price"]
+        out.append({"id": t["id"], "price": price, "chart": [[b["t"], b["c"]] for b in bars],
+                    "as_of": datetime.fromtimestamp(bars[-1]["t"], timezone.utc).isoformat() if bars else None})
+    return out
 
 
 def cockpit_text(book: Book, now: datetime | None = None) -> str:
