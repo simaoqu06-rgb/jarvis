@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from app import alerts, config
 from app.core.outbox import Outbox
+from app.lab import morning as lab_morning
 from app.notify import bot, discord
 from app.sources import alpaca
 from app.trading import calendar as CAL
@@ -214,6 +215,24 @@ async def tick_paper() -> None:
         _kick_outbox()
 
 
+async def tick_lab(now: datetime | None = None) -> dict | None:
+    """Labo 3 : message du matin (8 h - 9 h à Paris, au plus un par jour) et annonces du worker.
+
+    Tourne même sans webhook (le rodage garde le message sans l'envoyer). L'envoi privé est fait par
+    le bot (bot.deliver_lab) ; sans bot, les annonces partent sur le salon (webhook) si possible."""
+    now = now or datetime.now(timezone.utc)
+    st = lab_morning.shared_state()
+    digest = lab_morning.tick(now, proposals, st, bot.enabled())
+    for ev in lab_morning.pull_events(st, now):
+        log.info("Labo : %s", ev["texte"])
+        if bot.enabled():
+            bot.offer_lab_text(ev["texte"])
+        elif enabled():
+            outbox.add(ev["texte"], "labo", key=f"labo:{ev['id']}")
+            _kick_outbox()
+    return digest
+
+
 # (nom, job, période, verrou global pendant tout le job)
 JOBS = [
     ("suivi des trades et cockpit Discord", tick_trades, MINUTE, True),
@@ -261,6 +280,8 @@ async def _bot() -> None:
 
 def start() -> list[asyncio.Task]:
     tasks = []
+    # Labo 3 : message du matin et annonces, avec ou sans webhook (rodage : journalisé seulement).
+    tasks.append(asyncio.create_task(_loop("labo : message du matin", tick_lab, MINUTE, True)))
     if bot.enabled():
         tasks.append(asyncio.create_task(_bot()))
     else:

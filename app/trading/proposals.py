@@ -5,6 +5,11 @@ propositions numérotées. Rien ne change tant que Simão n'a pas approuvé (bou
 Discord, `!oui 3` / `!non 3`, ou la route POST /api/trading/proposals/{id}/approve|refuse).
 Une proposition refusée n'est pas reproposée avec la même valeur.
 Gardées dans data/trading_proposals.json (JARVIS_PROPOSALS_PATH).
+
+Labo 3 : les règles validées par le labo arrivent ici aussi (kind « labo », même numérotation,
+mêmes `!oui N` / `!non N`, mêmes boutons, même cockpit). Leur décision ne touche pas aux réglages :
+elle est déposée dans la file du labo (data/lab_queue/decisions/) ; approuvée, la règle part en essai
+comme challenger ; refusée, elle rejoint la mémoire des échecs et n'est jamais reproposée.
 """
 import json
 import logging
@@ -40,8 +45,24 @@ class Proposals:
     def get(self, pid: int) -> dict | None:
         return next((p for p in self.items if p["id"] == pid), None)
 
-    def pending(self) -> list[dict]:
-        return [p for p in self.items if p["status"] == "pending"]
+    def pending(self, kind: str | None = None) -> list[dict]:
+        return [p for p in self.items if p["status"] == "pending" and (kind is None or p.get("kind") == kind)]
+
+    def lab(self, rule_hash: str) -> dict | None:
+        return next((p for p in self.items if p.get("kind") == "labo" and p.get("empreinte") == rule_hash), None)
+
+    def propose_lab(self, rule_hash: str, name: str, champion: str | None, proof: str, why: str | None,
+                    group: str) -> dict | None:
+        """Proposition d'une règle validée par le labo ; None si elle a déjà été proposée (une seule fois)."""
+        if self.lab(rule_hash):
+            return None
+        item = {"id": max((p["id"] for p in self.items), default=0) + 1, "kind": "labo", "key": "méthode",
+                "value": f"+ « {name} »", "current": champion or "v1", "why": proof, "pourquoi": why,
+                "empreinte": rule_hash, "nom": name, "groupe": group, "offerte": False, "status": "pending",
+                "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "decided_at": None}
+        self.items.append(item)
+        self.save()
+        return item
 
     def propose(self, key: str, value, why: str) -> dict | None:
         """Ajoute une proposition ; None si elle ne changerait rien, attend déjà, ou a été refusée."""
@@ -66,7 +87,15 @@ class Proposals:
             raise KeyError(f"proposition {pid} introuvable")
         if p["status"] != "pending":
             raise ValueError(f"proposition {pid} déjà {label(p['status'])}")
-        if approve:
+        if p.get("kind") == "labo":
+            from app.lab import db as lab_db
+            from app.lab import method as lab_method
+
+            try:  # d'abord la file du labo : si elle est inaccessible, la proposition reste en attente
+                lab_method.enqueue_decision(lab_db.db_path(), p["empreinte"], "approuvee" if approve else "refusee", pid)
+            except OSError as exc:
+                raise ValueError(f"file du labo inaccessible ({exc}), proposition {pid} toujours en attente")
+        elif approve:
             self.settings.update({p["key"]: p["value"]})
         p["status"] = "approved" if approve else "refused"
         p["decided_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -79,10 +108,16 @@ def label(status: str) -> str:
 
 
 def text(p: dict) -> str:
+    if p.get("kind") == "labo":
+        return f"**Proposition {p['id']}** : méthode {p['current']} + « {p['nom']} » · {p['why']}"
     return f"**Proposition {p['id']}** : `{p['key']}` {p['current']} → {p['value']} · {p['why']}"
 
 
 def decision_text(p: dict) -> str:
+    if p.get("kind") == "labo":
+        if p["status"] == "approved":
+            return f"✅ Proposition {p['id']} approuvée : « {p['nom']} » part en essai au labo (challenger)"
+        return f"❌ Proposition {p['id']} refusée : « {p['nom']} » ne sera plus proposée"
     if p["status"] == "approved":
         return f"✅ Proposition {p['id']} approuvée : `{p['key']}` = {p['value']}"
     return f"❌ Proposition {p['id']} refusée : `{p['key']}` reste à {p['current']}"

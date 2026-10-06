@@ -19,6 +19,8 @@ Format d'une règle (JSON) — v1 : règles de FILTRE seulement :
   un ordre posé à 9 h 10 et déjà « au marché » est exécuté à l'ouverture, au moment même où le gap
   est connu ; un filtre sur le gap ne serait pas applicable en direct ;
 - "markets" (facultatif) : marchés concernés (sinon tous) ;
+- "pourquoi" (≤ 1 000 caractères) et "council" (≤ 2 000) (facultatifs, Labo 3) : raison courte et
+  verdict du conseil de la routine du soir, gardés avec la règle, sans effet sur l'empreinte ;
 - une règle qui demanderait de régénérer les plans (nouveaux paramètres de stop, de TP…) est refusée
   en v1 : la régénération sur les bougies stockées coûterait des heures de calcul par idée sur
   1 cœur ; elle viendra plus tard.
@@ -40,6 +42,8 @@ Critères, tous obligatoires (seuils dans la table lab_config, défauts DEFAULTS
 Mémoire : chaque règle a une empreinte canonique (ordre des clés et des conditions sans effet, nom et
 description ignorés) ; une règle déjà testée renvoie son verdict gardé, sans nouvel essai.
 Un verdict « validée » ne change rien au direct : c'est une candidate pour une proposition (Labo 3).
+Labo 3 : les trades testés sont ceux que garde la méthode championne (ses filtres déjà appliqués),
+pour qu'une idée ne soit pas créditée d'un gain que le champion fait déjà.
 """
 import hashlib
 import json
@@ -55,7 +59,9 @@ from app.lab.db import LabDB, now_iso
 log = logging.getLogger(__name__)
 DEFAULTS = {"windows": 3, "embargo_days": 1, "min_affected": 100, "min_improvement_r": 0.05,
             "min_windows_better": 2, "alpha": 0.05, "max_capture_drop": 0.10, "min_days": 60,
-            "auto_min_affected": 30, "missing_max": 0.95}
+            "auto_min_affected": 30, "missing_max": 0.95,
+            # Labo 3 : challenger en direct (trades déclenchés depuis sa création, gardés par lui).
+            "challenger_min_trades": 100, "challenger_max_trades": 300}
 OPS = {">": ">", ">=": ">=", "<": "<", "<=": "<=", "==": "=", "!=": "<>"}
 SET_OPS = ("in", "not_in")
 ALL_OPS = (*OPS, *SET_OPS, "between", "is_null", "not_null")
@@ -74,7 +80,8 @@ SIZE_FIELDS = {"context.dollar_volume", "context.universe_rank", "context.univer
 SIZE_WORDS = ("dollar_volume", "market_cap", "marketcap", "capitalis", "capitaliz", "liquid")
 PATH = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\[\d{1,2}\])?(\.[A-Za-z_][A-Za-z0-9_]*(\[\d{1,2}\])?)*$")
 MAX_LEAVES, MAX_DEPTH = 12, 6
-RULE_KEYS = {"nom", "name", "description", "exclude", "keep", "markets"}
+NOTE_KEYS = {"pourquoi": 1000, "council": 2000}  # notes de la routine du soir (longueur maximale)
+RULE_KEYS = {"nom", "name", "description", "exclude", "keep", "markets", *NOTE_KEYS}
 REGEN_KEYS = {"parametres", "parameters", "overrides", "regenerer", "regenerate", "settings"}
 QUEUE_MAX = 50
 
@@ -445,8 +452,17 @@ def judge(m: dict, cfg: dict, trial: int) -> tuple[str, list[str], list[str]]:
 # --- Base -----------------------------------------------------------------------------------
 
 def current_version(conn) -> str | None:
-    row = conn.execute("SELECT version FROM method_versions ORDER BY created_at DESC, version DESC LIMIT 1").fetchone()
-    return row[0] if row else None
+    """Version de génération (celle sous laquelle les trades sont journalisés)."""
+    from app.lab.db import generation_version
+
+    return generation_version(conn)
+
+
+def champion_filter(conn) -> tuple[str, list]:
+    """Expression SQL (alias t et r) des trades gardés par la méthode championne ; « 1 » sans filtre."""
+    from app.lab import method as M
+
+    return M.kept_sql(M.champion(conn)["regles"])
 
 
 def load_rows(conn, canon: dict, version: str) -> list[tuple]:
@@ -458,9 +474,11 @@ def load_rows(conn, canon: dict, version: str) -> list[tuple]:
     else:
         col, cparams = compile_cond(cond)
         col = f"COALESCE({col}, 0)"
+    kept, kparams = champion_filter(conn)
     sql = (f"SELECT t.day, t.market, t.symbol, t.triggered, t.r_net, t.tp1_hit, {col} "
-           "FROM trades t LEFT JOIN regimes r ON r.market = t.market AND r.day = t.day WHERE t.method_version = ?")
-    params = [*cparams, version]
+           "FROM trades t LEFT JOIN regimes r ON r.market = t.market AND r.day = t.day WHERE t.method_version = ? "
+           f"AND {kept}")
+    params = [*cparams, version, *kparams]
     if canon["markets"]:
         sql += f" AND t.market IN ({', '.join('?' * len(canon['markets']))})"
         params += canon["markets"]
@@ -478,16 +496,18 @@ def load_movers(conn, markets: list | None, threshold: float = STATS.MOVE_PCT) -
 def missing_share(conn, canon: dict, version: str) -> dict[str, float]:
     """Part des trades sans valeur pour chaque champ JSON de la règle (marchés de la règle seulement)."""
     out = {}
-    msql, mparams = "", []
+    kept, kparams = champion_filter(conn)
+    msql, mparams = f" AND {kept}", list(kparams)
     if canon.get("markets"):
         msql = f" AND t.market IN ({', '.join('?' * len(canon['markets']))})"
-        mparams = list(canon["markets"])
+        mparams += list(canon["markets"])
     for leaf in leaves_of(canon["cond"]):
         field = leaf["field"]
         if field in out or field in FLAT:
             continue
         expr, params = _field_sql(field)
-        row = conn.execute(f"SELECT AVG({expr} IS NULL) FROM trades t WHERE t.method_version = ?{msql}",
+        row = conn.execute(f"SELECT AVG({expr} IS NULL) FROM trades t LEFT JOIN regimes r ON r.market = t.market "
+                           f"AND r.day = t.day WHERE t.method_version = ?{msql}",
                            (*params, version, *mparams)).fetchone()
         out[field] = row[0] if row[0] is not None else 1.0
     return out
@@ -520,13 +540,17 @@ def evaluate(conn, canon: dict, trial: int, cfg: dict | None = None) -> dict:
 
 
 def _row(r) -> dict:
-    rid, h, name, rule, status, reason, metrics, trial, submitted, tested = r
-    return {"id": rid, "empreinte": h, "nom": name, "regle": json.loads(rule), "etat": status,
-            "raisons": json.loads(reason) if reason else [], "mesures": json.loads(metrics) if metrics else None,
-            "essai": trial, "soumise_le": submitted, "testee_le": tested}
+    rid, h, name, rule, status, reason, metrics, trial, submitted, tested, *labo3 = r
+    out = {"id": rid, "empreinte": h, "nom": name, "regle": json.loads(rule), "etat": status,
+           "raisons": json.loads(reason) if reason else [], "mesures": json.loads(metrics) if metrics else None,
+           "essai": trial, "soumise_le": submitted, "testee_le": tested}
+    if labo3:
+        out.update(zip(("pourquoi", "council", "soiree", "decision", "decidee_le"), labo3))
+    return out
 
 
-RULE_COLUMNS = "id, hash, name, rule, status, reason, metrics, trial, submitted_at, tested_at"
+RULE_COLUMNS = ("id, hash, name, rule, status, reason, metrics, trial, submitted_at, tested_at, "
+                "pourquoi, council, soiree, decision, decided_at")
 
 
 def get_rule(conn, h: str) -> dict | None:
@@ -539,16 +563,35 @@ def list_rules(conn, status: str | None = None, limit: int = 200) -> list[dict]:
     return [_row(r) for r in conn.execute(sql, (status, limit) if status else (limit,))]
 
 
-def submit(db: LabDB, raw) -> dict:
-    """Enregistre une règle à tester (ou renvoie celle déjà connue, verdict compris)."""
+def notes(raw) -> dict:
+    """Notes de la routine du soir (pourquoi, council) : texte, tronqué à la longueur permise."""
+    out = {}
+    if isinstance(raw, dict):
+        for key, limit in NOTE_KEYS.items():
+            value = raw.get(key)
+            if value is not None and not isinstance(value, str):
+                raise RuleError(f"« {key} » : texte attendu")
+            out[key] = value.strip()[:limit] if value else None
+    return out
+
+
+def submit(db: LabDB, raw, soiree: str | None = None) -> dict:
+    """Enregistre une règle à tester (ou renvoie celle déjà connue, verdict compris). `soiree` : soirée
+    (date de Paris) de la soumission par la routine ; peut venir du fichier de file (« _soiree »)."""
+    if isinstance(raw, dict) and "_soiree" in raw:
+        raw = dict(raw)
+        soiree = soiree or raw.pop("_soiree")
     canon = parse(raw)
     h = rule_hash(canon)
     known = get_rule(db.conn, h)
     if known:
         return known | {"deja_connue": True}
     name = (raw.get("nom") or raw.get("name") or "") if isinstance(raw, dict) else ""
-    db.conn.execute("INSERT INTO rules (hash, name, rule, status, submitted_at) VALUES (?, ?, ?, 'en_attente', ?)",
-                    (h, str(name)[:120], json.dumps(canon, ensure_ascii=False), now_iso()))
+    note = notes(raw)
+    db.conn.execute("INSERT INTO rules (hash, name, rule, status, submitted_at, pourquoi, council, soiree) "
+                    "VALUES (?, ?, ?, 'en_attente', ?, ?, ?, ?)",
+                    (h, str(name)[:120], json.dumps(canon, ensure_ascii=False), now_iso(), note.get("pourquoi"),
+                     note.get("council"), soiree))
     return get_rule(db.conn, h) | {"deja_connue": False}
 
 
@@ -601,9 +644,10 @@ def queue_dir(db_file: str) -> Path:
     return Path(db_file).parent / "lab_queue"
 
 
-def enqueue(db_file: str, raw: dict) -> dict:
+def enqueue(db_file: str, raw: dict, soiree: str | None = None) -> dict:
     """Dépose une règle dans la file (fichier <empreinte>.json, écriture atomique)."""
     canon = parse(raw)
+    notes(raw)
     h = rule_hash(canon)
     q = queue_dir(db_file)
     q.mkdir(parents=True, exist_ok=True)
@@ -612,7 +656,7 @@ def enqueue(db_file: str, raw: dict) -> dict:
         if sum(1 for _ in q.glob("*.json")) >= QUEUE_MAX:
             raise RuleError(f"file pleine ({QUEUE_MAX} règles en attente de lecture par le worker)")
         tmp = q / f".{h}.tmp"
-        tmp.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+        tmp.write_text(json.dumps(raw | ({"_soiree": soiree} if soiree else {}), ensure_ascii=False), encoding="utf-8")
         tmp.replace(target)
     return {"empreinte": h, "etat": "en_file", "regle": canon}
 

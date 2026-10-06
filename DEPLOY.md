@@ -64,7 +64,7 @@ Les routes ne sont ouvertes que sur le serveur lui-même (127.0.0.1), pas sur In
 
 ## Ouvrir le Trading Cockpit sur ton PC et ton téléphone (Tailscale)
 
-Le cockpit est à l'adresse `/cockpit` du serveur, qui n'est pas ouvert sur Internet. Tailscale
+Le cockpit est à l'adresse `/cockpit` du serveur (page du labo : `/cockpit/labo`), qui n'est pas ouvert sur Internet. Tailscale
 (gratuit pour un usage personnel) crée un réseau privé entre tes appareils : le cockpit n'est
 visible que par toi, sans ouvrir de port dans le firewall.
 
@@ -144,6 +144,11 @@ de la base :
 docker compose run --rm jarvis-lab python -m app.lab.check_sources
 ```
 
+Ensuite : `docker compose logs -f jarvis-lab` pour suivre le rejeu, `!labo` sur Discord ou
+`curl http://127.0.0.1:8000/api/lab/status` pour l'avancement. Le premier passage télécharge
+l'historique (bougies journalières de toutes les actions, puis 5 min des valeurs de chaque jour) :
+compter quelques heures avant la fin du rejeu, surtout la nuit et le week-end.
+
 ### Accès du labo pour la routine du soir (Labo 2)
 
 Les routes `GET /api/lab/summary`, `/api/lab/stats`, `/api/lab/catalysts`, `/api/lab/rules` et
@@ -165,13 +170,68 @@ curl -H "X-Lab-Key: $JARVIS_LAB_API_KEY" -H "Content-Type: application/json" \
 
 Une règle soumise est seulement mise en file (`data/lab_queue/`) ; le worker la valide la nuit et
 rien ne change dans la méthode en direct. Le serveur n'ouvre `data/lab.db` qu'en lecture seule.
-`/api/lab/status` reste sans clé, comme avant. L'exposition de ces routes hors du serveur (Tailscale
-Funnel) viendra avec le Labo 3.
+`/api/lab/status` reste sans clé depuis le serveur et ton réseau Tailscale ; depuis Internet (Funnel),
+il demande la clé lui aussi.
 
-Ensuite : `docker compose logs -f jarvis-lab` pour suivre le rejeu, `!labo` sur Discord ou
-`curl http://127.0.0.1:8000/api/lab/status` pour l'avancement. Le premier passage télécharge
-l'historique (bougies journalières de toutes les actions, puis 5 min des valeurs de chaque jour) :
-compter quelques heures avant la fin du rejeu, surtout la nuit et le week-end.
+### Labo 3 : message du matin et méthode en place
+
+Deux réglages dans `.env` :
+
+```
+JARVIS_LAB_API_KEY=...   # la clé ci-dessus (la routine du soir s'en sert)
+JARVIS_LAB_DM=off        # rodage : tout tourne, le message du matin est gardé sans être envoyé
+```
+
+- **Rodage** : laisse `JARVIS_LAB_DM=off` pendant ~5 séances. Le message du matin est préparé chaque
+  jour entre 8 h et 9 h (heure de Paris) et gardé : `!labo`, `!propositions`, la page
+  `https://<…>.ts.net/cockpit/labo` et `GET /api/lab/matin` le montrent. Les propositions peuvent
+  déjà être approuvées (`!oui N`, cockpit).
+- **En service** : `JARVIS_LAB_DM=on` puis `docker compose up -d`. Un seul message privé par jour,
+  entre 8 h et 9 h, seulement s'il y a des règles validées (boutons Approuver / Refuser par règle).
+  Il faut le bot Discord (`DISCORD_BOT_TOKEN`, `JARVIS_DISCORD_OWNER_ID`).
+- Une règle approuvée part en essai au labo (challenger, « v2 ») ; elle ne s'applique au scanner
+  en direct qu'après 100 trades en direct meilleurs que la méthode en place (message « Méthode v2 en
+  place »). Le worker écrit la méthode en place dans `data/lab_champion.json`, que JARVIS relit ; sans
+  ce fichier, JARVIS tourne sans filtre.
+
+### Ouvrir l'accès à la tâche du soir
+
+La routine du soir (tâche Claude planifiée à 23 h) tourne hors de ton réseau : elle passe par
+**Tailscale Funnel**, qui publie sur Internet un seul chemin, `/api/lab`, sur un port à part (8443).
+Le cockpit reste privé (`tailscale serve`, port 443, réseau Tailscale seulement).
+
+1. Active Funnel pour ton réseau la première fois : la commande ci-dessous affiche un lien si besoin
+   (console Tailscale > *Access controls* : attribut `funnel` pour le serveur) ; ouvre-le et accepte.
+2. Sur le serveur :
+
+   ```bash
+   sudo tailscale funnel --bg --https=8443 --set-path=/api/lab http://127.0.0.1:8000/api/lab
+   tailscale funnel status
+   ```
+
+   `status` doit montrer **seulement** `https://<…>.ts.net:8443/api/lab` publié sur Internet
+   (*Funnel on*), et `https://<…>.ts.net/` (le cockpit) en réseau privé (*tailnet only*).
+3. Vérifie depuis un téléphone **hors Wi-Fi et sans Tailscale** :
+   - `https://<…>.ts.net:8443/api/lab/brief` → 401 sans clé (normal) ;
+   - `https://<…>.ts.net:8443/cockpit` → 404, et `https://<…>.ts.net/cockpit` ne répond pas.
+4. Donne à la routine l'adresse `https://<…>.ts.net:8443/api/lab` et la clé (en-tête `X-Lab-Key`).
+   Elle utilise :
+   - `GET /api/lab/brief` : tout en un appel (résumé du soir, statistiques, fiches à classer,
+     règles récentes, méthode en place et challenger, place restante ce soir) ;
+   - `POST /api/lab/rules` : une règle, avec `"pourquoi"` (≤ 1 000 caractères) et `"council"`
+     (≤ 2 000) ; au plus 3 nouvelles règles par soirée (au-delà : 429) ;
+   - `POST /api/lab/catalysts/types` : `[{"id": 12, "type": "resultats"}, …]` (types : `types_permis`
+     du brief) ;
+   - au besoin `GET /api/lab/summary`, `/stats`, `/catalysts`, `/rules`.
+
+**Ne lance jamais** `tailscale funnel` sur le port 443 ni sans `--set-path` : Funnel s'active pour
+tout un port, et sur 443 il publierait aussi le cockpit. Pour tout couper :
+
+```bash
+sudo tailscale funnel --https=8443 --set-path=/api/lab off
+```
+
+Change la clé (`JARVIS_LAB_API_KEY`, puis `docker compose up -d`) si elle a pu fuiter.
 
 ## Mettre à jour
 

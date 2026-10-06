@@ -82,6 +82,16 @@ def _movers(conn, market: str, day: str, version: str | None) -> list[dict]:
     return out
 
 
+def _methode(conn) -> dict:
+    """Labo 3 : méthode en place et challenger (les chiffres ci-dessus portent sur tous les plans de la
+    version de génération, filtres de la méthode non appliqués)."""
+    from app.lab import method as M
+
+    champ, chall = M.champion(conn), M.challenger(conn)
+    return {"en_place": champ["version"], "filtres": [r["nom"] for r in champ["regles"]],
+            "challenger": chall["version"] if chall else None}
+
+
 def build(conn, day: str, full: dict | None = None) -> dict:
     """Résumé du jour `day` (date de Paris). `full` : statistiques cumulées déjà calculées (version en cours)."""
     d = date.fromisoformat(day)
@@ -106,6 +116,7 @@ def build(conn, day: str, full: dict | None = None) -> dict:
                          for g in (full.get("degradations") or [])[:MAX_DEGRADATIONS]],
         "potentiel_10": _movers(conn, "stock", sd, version) + _movers(conn, "crypto", cd, version),
         "regles": V.counts(conn),
+        "methode": _methode(conn),
         "idees_rejetees": [{"empreinte": r["empreinte"], "nom": r["nom"], "raison": (r["raison"] or "")[:120],
                             "regle": json.dumps(r["regle"], ensure_ascii=False, separators=(",", ":"))[:200]}
                            for r in V.rejected(conn, MAX_REJECTED)],

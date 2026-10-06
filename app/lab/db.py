@@ -7,6 +7,11 @@ Labo 2 : régimes de marché (regimes), mouvements du jour de l'univers (day_mov
 catalyseurs (catalysts), résumés du soir (summaries), règles testées (rules), seuils du validateur
 (lab_config) et statistiques précalculées (stats_cache). Seul le worker écrit ; le serveur web
 n'ouvre la base qu'en lecture seule (les règles soumises passent par une file de fichiers).
+
+Labo 3 : versions de méthode « filtres » (v2 = v1 + règles approuvées) dans method_versions
+(colonnes base, rules, role…), décision de Simão sur chaque règle validée (rules.decision) et
+événements à annoncer sur Discord (lab_events). Les trades restent journalisés sous la version de
+génération (base IS NULL, « v1 ») : champion et challenger en sont des sous-ensembles filtrés.
 """
 import json
 import os
@@ -87,7 +92,39 @@ CREATE TABLE IF NOT EXISTS lab_config (
 CREATE TABLE IF NOT EXISTS stats_cache (
     key TEXT PRIMARY KEY, created_at TEXT NOT NULL, trades INTEGER, data TEXT NOT NULL
 );
+-- Labo 3 : événements à annoncer (méthode en place, challenger retiré), lus par le serveur web.
+CREATE TABLE IF NOT EXISTS lab_events (
+    id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, ts INTEGER NOT NULL, kind TEXT NOT NULL,
+    version TEXT, text TEXT NOT NULL, data TEXT
+);
 """
+# Colonnes ajoutées après coup (ALTER TABLE à l'ouverture par le worker ; idempotent).
+MIGRATIONS = {
+    "rules": (("pourquoi", "TEXT"), ("council", "TEXT"), ("soiree", "TEXT"), ("decision", "TEXT"),
+              ("decided_at", "TEXT")),
+    "method_versions": (("base", "TEXT"), ("rules", "TEXT"), ("role", "TEXT"), ("started_ts", "INTEGER"),
+                        ("decided_at", "TEXT"), ("note", "TEXT")),
+}
+GENERATION_SQL = "SELECT version FROM method_versions WHERE base IS NULL ORDER BY created_at DESC, version DESC LIMIT 1"
+LEGACY_VERSION_SQL = "SELECT version FROM method_versions ORDER BY created_at DESC, version DESC LIMIT 1"
+
+
+def migrate(conn: sqlite3.Connection) -> None:
+    for table, columns in MIGRATIONS.items():
+        have = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for name, decl in columns:
+            if name not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
+
+def generation_version(conn: sqlite3.Connection) -> str | None:
+    """Version sous laquelle les trades sont journalisés (la dernière sans base) ; marche aussi sur une
+    base d'avant le Labo 3 (lecture seule, colonne base absente)."""
+    try:
+        row = conn.execute(GENERATION_SQL).fetchone()
+    except sqlite3.OperationalError:
+        row = conn.execute(LEGACY_VERSION_SQL).fetchone()
+    return row[0] if row else None
 
 
 def db_path() -> str:
@@ -113,6 +150,7 @@ class LabDB:
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
         self.conn.executescript(SCHEMA)
+        migrate(self.conn)
         self._depth = 0
 
     def close(self) -> None:
@@ -219,12 +257,13 @@ class LabDB:
 
     # --- Versions de méthode ----------------------------------------------------------------
     def method_version(self, snapshot: dict) -> tuple[str, dict]:
-        """Version en cours : la dernière enregistrée, sinon « v1 » = `snapshot` (réglages du moment)."""
-        row = self.conn.execute("SELECT version, settings FROM method_versions ORDER BY created_at DESC, version DESC "
-                                "LIMIT 1").fetchone()
+        """Version de génération en cours (celle des trades journalisés) : la dernière sans base, sinon
+        « v1 » = `snapshot` (réglages du moment). Les versions « filtres » (Labo 3) n'en sont pas."""
+        row = self.conn.execute("SELECT version, settings FROM method_versions WHERE base IS NULL "
+                                "ORDER BY created_at DESC, version DESC LIMIT 1").fetchone()
         if row:
             return row[0], json.loads(row[1])
-        self.conn.execute("INSERT INTO method_versions VALUES (?, ?, ?)",
+        self.conn.execute("INSERT INTO method_versions (version, created_at, settings) VALUES (?, ?, ?)",
                           ("v1", datetime.now(timezone.utc).isoformat(timespec="seconds"),
                            json.dumps(snapshot, ensure_ascii=False)))
         return "v1", snapshot

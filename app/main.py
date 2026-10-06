@@ -4,6 +4,7 @@ Lancer : uvicorn app.main:app --reload
 """
 import asyncio
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -19,8 +20,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app import alerts, config, needs, scheduler
+from app.lab import brief as lab_brief
 from app.lab import catalysts as lab_catalysts
 from app.lab import db as lab_db
+from app.lab import method as lab_method
+from app.lab import morning as lab_morning
+from app.lab import page as lab_page
 from app.lab import stats as lab_stats
 from app.lab import status as lab_status
 from app.lab import summary as lab_summary
@@ -396,18 +401,48 @@ async def trading_proposal_decide(pid: int, choice: str):
         raise HTTPException(409, str(exc))
 
 
-@app.get("/api/lab/status")
-def lab_state():
-    """Labo de performance : avancement du rejeu, trades simulés par marché et origine, taille de la base.
-    Lecture seule (la base est écrite par le service jarvis-lab)."""
-    st = lab_status.status()
-    return st | {"text": lab_status.text(st)}
-
-
 # --- Labo : accès en lecture pour la routine du soir (clé JARVIS_LAB_API_KEY) ---------------
 # Lecture seule sur data/lab.db (le worker jarvis-lab est seul à écrire) ; une règle soumise est
 # déposée dans une file de fichiers que le worker lit. Rien ici ne change la méthode en direct.
+# Labo 3 : tout ce que la routine du soir utilise est sous /api/lab/ (seul chemin ouvert par Tailscale
+# Funnel, sur le port 8443) et demande la clé ; /api/lab/status aussi dès que la requête vient d'Internet.
 LAB_KEY_NAME = "JARVIS_LAB_API_KEY"
+PRIVATE_NETS = [ipaddress.ip_network(n) for n in ("127.0.0.0/8", "::1/128", "100.64.0.0/10", "fd7a:115c:a1e0::/48",
+                                                   "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]
+
+
+FUNNEL_PORTS = {"8443", "10000"}
+
+
+def public_request(request: Request) -> bool:
+    """Requête venue d'Internet par Tailscale Funnel : en-tête Tailscale-Funnel-Request, adresse
+    demandée sur un port de Funnel (8443, 10000), ou adresse d'origine (X-Forwarded-For posé par
+    tailscale serve/funnel) hors du réseau Tailscale et du serveur. Prudence plutôt qu'exactitude."""
+    if request.headers.get("tailscale-funnel-request"):
+        return True
+    for host in (request.headers.get("host", ""), request.headers.get("x-forwarded-host", "")):
+        if host.rsplit(":", 1)[-1] in FUNNEL_PORTS and ":" in host:
+            return True  # ports réservés à Funnel (le cockpit est servi sur 443 par tailscale serve)
+    forwarded = request.headers.get("x-forwarded-for", "")
+    for part in [x.strip() for x in forwarded.split(",") if x.strip()]:
+        try:
+            ip = ipaddress.ip_address(part)
+        except ValueError:
+            return True
+        if not any(ip in net for net in PRIVATE_NETS):
+            return True
+    return False
+
+
+@app.get("/api/lab/status")
+def lab_state(request: Request):
+    """Labo de performance : avancement du rejeu, trades simulés par marché et origine, taille de la base.
+    Lecture seule (la base est écrite par le service jarvis-lab). Sans clé depuis le serveur et le
+    réseau Tailscale ; avec la clé depuis Internet (Funnel)."""
+    if public_request(request):
+        lab_key(request)
+    st = lab_status.status()
+    return st | {"text": lab_status.text(st)}
 
 
 def lab_key(request: Request) -> None:
@@ -511,7 +546,7 @@ def lab_rules_get(status: str | None = Query(None, pattern="^(en_attente|validee
 LAB_RULE_MAX_BYTES = 16_384
 
 
-async def _lab_rule_body(request: Request) -> dict:
+async def _lab_rule_body(request: Request, expect: type = dict):
     """Corps JSON d'une règle, lu APRÈS la vérification de la clé (un paramètre Body serait lu par
     FastAPI avant les dépendances, donc sans clé) et plafonné à LAB_RULE_MAX_BYTES."""
     declared = request.headers.get("content-length")
@@ -527,36 +562,93 @@ async def _lab_rule_body(request: Request) -> dict:
         rule = json.loads(b"".join(chunks) or b"null")
     except (ValueError, RecursionError):
         raise HTTPException(422, "JSON illisible")
-    if not isinstance(rule, dict):
-        raise HTTPException(422, "Objet JSON attendu")
+    if not isinstance(rule, expect):
+        raise HTTPException(422, "Objet JSON attendu" if expect is dict else "Liste JSON attendue")
     return rule
 
 
 @app.post("/api/lab/rules", dependencies=[Depends(lab_key)])
 async def lab_rules_submit(request: Request):
     """Soumet une règle de filtre à tester : elle est seulement mise en file, le worker la valide.
-    Une règle déjà testée renvoie son verdict gardé. Ne change jamais la méthode en direct."""
+    Une règle déjà testée renvoie son verdict gardé. Ne change jamais la méthode en direct.
+    Champs facultatifs « pourquoi » (≤ 1 000 caractères) et « council » (≤ 2 000) gardés avec la règle ;
+    au plus 3 nouvelles règles par soirée (heure de Paris, de midi à midi), au-delà : 429."""
     rule = await _lab_rule_body(request)
     return await asyncio.to_thread(_lab_rule_enqueue, rule)
 
 
-def _lab_rule_enqueue(rule: dict):
+def _lab_rule_enqueue(rule: dict, now: datetime | None = None):
+    now = now or datetime.now(timezone.utc)
+    for key, limit in lab_validator.NOTE_KEYS.items():
+        value = rule.get(key)
+        if value is not None and (not isinstance(value, str) or len(value) > limit):
+            raise HTTPException(422, f"« {key} » : texte de {limit} caractères au plus")
     try:
         canon = lab_validator.parse(rule)
     except lab_validator.RuleError as exc:
         raise HTTPException(422, str(exc))
+    h = lab_validator.rule_hash(canon)
     conn = lab_db.open_readonly()
     if conn is not None:
         try:
-            known = lab_validator.get_rule(conn, lab_validator.rule_hash(canon))
+            known = lab_validator.get_rule(conn, h)
         finally:
             conn.close()
         if known:
             return known | {"deja_connue": True}
+    db_file = lab_db.db_path()
     try:
-        return lab_validator.enqueue(lab_db.db_path(), rule)
-    except lab_validator.RuleError as exc:
+        left = lab_brief.take_quota(db_file, h, now)
+    except lab_brief.QuotaFull as exc:
         raise HTTPException(429, str(exc))
+    try:
+        out = lab_validator.enqueue(db_file, rule, lab_brief.soiree(now))
+    except lab_validator.RuleError as exc:
+        lab_brief.release_quota(db_file, h, now)
+        raise HTTPException(429, str(exc))
+    return out | {"regles_restantes_ce_soir": left}
+
+
+LAB_TYPES_MAX = 200
+
+
+@app.post("/api/lab/catalysts/types", dependencies=[Depends(lab_key)])
+async def lab_catalyst_types(request: Request):
+    """Classe des fiches catalyseurs : [{"id": 12, "type": "resultats"}, …] (types : GET /api/lab/brief,
+    « types_permis » ; null remet « à classer »). Mis en file, enregistré par le worker."""
+    items = await _lab_rule_body(request, expect=list)
+    if not items or len(items) > LAB_TYPES_MAX:
+        raise HTTPException(422, f"Liste de 1 à {LAB_TYPES_MAX} fiches attendue")
+    clean = []
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), int) or isinstance(item.get("id"), bool):
+            raise HTTPException(422, "Chaque élément : {\"id\": entier, \"type\": …}")
+        kind = item.get("type")
+        if kind is not None and kind not in lab_catalysts.TYPES:
+            raise HTTPException(422, f"type inconnu : {kind} (permis : {', '.join(lab_catalysts.TYPES)})")
+        clean.append({"id": item["id"], "type": kind})
+    await asyncio.to_thread(lab_method.enqueue_types, lab_db.db_path(), clean)
+    return {"en_file": len(clean)}
+
+
+@app.get("/api/lab/brief", dependencies=[Depends(lab_key)])
+def lab_brief_get():
+    """Tout ce qu'il faut à la routine du soir en un appel (< ~20 Ko)."""
+    conn = _lab_conn()
+    try:
+        return lab_brief.build(conn, datetime.now(timezone.utc), lab_db.db_path(),
+                               lab_morning.shared_state().latest(), lab_morning.dm_on())
+    finally:
+        conn.close()
+
+
+@app.get("/api/lab/matin", dependencies=[Depends(lab_key)])
+def lab_morning_get(limit: int = Query(7, ge=1, le=60)):
+    """Derniers messages du matin du labo (envoyés ou gardés pendant le rodage) et propositions du labo."""
+    st = lab_morning.shared_state()
+    days = sorted(st.data["jours"].values(), key=lambda d: d["jour"], reverse=True)[:limit]
+    return {"message_prive": "activé" if lab_morning.dm_on() else "rodage", "jours": days,
+            "propositions": [p for p in reversed(PR.proposals.items) if p.get("kind") == "labo"][:30]}
 
 
 COCKPIT_HTML = Path(__file__).parent / "web" / "cockpit.html"
@@ -564,6 +656,25 @@ COCKPIT_HTML = Path(__file__).parent / "web" / "cockpit.html"
 
 # Icônes et manifeste : le cockpit s'installe comme une appli sur l'écran d'accueil du téléphone.
 app.mount("/cockpit-static", StaticFiles(directory=COCKPIT_HTML.parent / "static"), name="cockpit-static")
+
+
+@app.get("/cockpit/labo", response_class=HTMLResponse, include_in_schema=False)
+def cockpit_lab(request: Request):
+    """Page Labo du cockpit (lecture seule, rendue côté serveur)."""
+    if public_request(request):
+        raise HTTPException(404)
+    st = lab_status.status()
+    rules: list = []
+    conn = lab_db.open_readonly()
+    if conn is not None:
+        try:
+            rules = lab_validator.list_rules(conn, limit=20)
+        except sqlite3.Error:
+            rules = []
+        finally:
+            conn.close()
+    proposals = [p for p in reversed(PR.proposals.items) if p.get("kind") == "labo"]
+    return HTMLResponse(lab_page.render(st, proposals, rules, lab_morning.shared_state().latest(), lab_morning.dm_on()))
 
 
 @app.get("/cockpit", response_class=HTMLResponse, include_in_schema=False)
