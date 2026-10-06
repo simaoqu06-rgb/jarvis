@@ -13,6 +13,8 @@ cp .env.example .env   # puis remplis les clés
 
 La liste des routes est sur http://localhost:8000/docs.
 
+Pour le faire tourner 24 h/24 sur un serveur (Docker), voir [DEPLOY.md](DEPLOY.md).
+
 ## Format commun
 
 Chaque route renvoie le même format, quelle que soit la source :

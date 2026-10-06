@@ -1,0 +1,10 @@
+services:
+  jarvis:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    # Accessible seulement depuis le serveur lui-même (pas d'accès public aux routes)
+    ports:
+      - "127.0.0.1:8000:8000"
