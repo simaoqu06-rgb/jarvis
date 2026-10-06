@@ -61,6 +61,11 @@ async def tick_news() -> None:
 
 async def tick_trades() -> None:
     await _post_all(await trading.check_trades(book))
+    if os.getenv("JARVIS_DISCORD_COCKPIT", "on").lower() != "off" and (book.trades or state.data.get("cockpit_message_id")):
+        # Message « cockpit » réécrit à chaque passage : à épingler une fois dans le salon.
+        state.data["cockpit_message_id"] = await discord.upsert(
+            trading.cockpit_text(book), state.data.get("cockpit_message_id")
+        )
 
 
 JOBS = [

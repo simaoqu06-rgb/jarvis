@@ -66,33 +66,40 @@ Chaque route renvoie le même format, quelle que soit la source :
 Un module par source dans `app/sources/`, les associations principale/secours et les durées
 de cache dans `app/needs.py`. Chaque appel a un délai maximum de 8 secondes.
 
-## Plans de trade et suivi
+## Plans de trade, suivi et Trading Cockpit
 
-JARVIS propose des plans, c'est toi qui passes les ordres : aucun ordre n'est envoyé à un courtier.
+JARVIS propose des plans selon la méthode EmperorBTC ([docs/emperorbtc.md](docs/emperorbtc.md)) ;
+c'est toi qui passes les ordres : aucun ordre n'est envoyé à un courtier.
+
+**Cockpit** : `/cockpit` (page web, rafraîchie toutes les 30 s). On y calcule un plan, on clique
+« Je prends ce trade » pour le suivre, et on voit pour chaque trade le prix, les TP/SL touchés avec
+l'heure, les délais estimés des TP restants, les signes de sortie et le journal des trades terminés.
+Le même tableau est réécrit toutes les 2 minutes dans un message Discord (à épingler une fois).
 
 | Route | Rôle |
 |---|---|
 | `POST /api/trading/plan` | Calcule un plan sans l'enregistrer (`?discord_post=true` pour l'envoyer sur Discord) |
 | `POST /api/trading/trades` | Calcule le plan, l'enregistre et le suit (annonce sur Discord) |
-| `GET /api/trading/trades?status=open` | Trades suivis, avec le dernier prix et la variation |
+| `GET /api/trading/trades?status=open` | Trades suivis, avec le dernier prix, la variation et le gain en R |
 | `POST /api/trading/trades/{id}/close?price=…` | Clôture à la main |
 | `DELETE /api/trading/trades/{id}` | Supprime un trade |
 
 Corps des requêtes : `{"symbol": "NVDA", "market": "stock", "side": "long"}` (`market` : `crypto` ou
-`stock`). `entry`, `stop` et `targets` sont facultatifs : sans eux, l'entrée est le dernier cours,
-le stop se place sous le dernier creux (entre 1 et 3 ATR) et les TP valent 1 R, 2 R et 3 R.
+`stock`). Facultatifs : `entry` (vide = dernier cours), `stop` (vide = niveau d'invalidation),
+`targets` (vide = prochaines résistances), `capital` et `risk_pct` pour la taille de position.
 
 **Délais estimés.** Pour chaque TP, JARVIS rejoue le même plan (mêmes écarts en %) depuis chaque
 bougie de l'historique de l'actif et mesure le temps qu'il a fallu pour toucher le TP avant le
-stop : médiane, fourchette 25-75 %, heure estimée (Paris) et part des cas où le TP a été atteint.
-Crypto : bougies d'1 h sur 30 jours (Kraken), horizon 24 h. Actions : bougies de 15 min sur environ
-190 séances (Twelve Data), horizon 2 séances, en ne comptant que les heures de cotation.
+stop : médiane, fourchette 25-75 %, heure estimée (Paris), part des cas où le TP a été atteint
+avant le stop et espérance en R. Crypto : bougies d'1 h sur 30 jours (Kraken), horizon 24 h.
+Actions : bougies de 15 min sur environ 190 séances (Twelve Data), horizon 2 séances, en ne
+comptant que les heures de cotation.
 
-**Suivi.** Toutes les 2 minutes, les bougies d'1 minute disent si un TP ou le stop a été touché.
-Discord reçoit alors une alerte, avec le prochain TP et son délai. Après le TP1, le stop suivi
-remonte au prix d'entrée ; après le TP2, au TP1. Si un TP n'est pas touché à l'heure où 3 cas
-passés sur 4 l'avaient atteint, JARVIS prévient une fois. Les trades sont gardés dans
-`data/trades.json` (`JARVIS_TRADES_PATH`).
+**Suivi.** Toutes les 2 minutes, les bougies d'1 minute disent si un TP ou le stop a été touché ;
+Discord reçoit l'alerte avec le prochain TP et son délai. Le stop reste en place après le TP1 et
+remonte à l'entrée après le TP2. Un TP en retard sur ce que 3 cas passés sur 4 avaient fait, ou un
+signe de retournement (divergence, anomalie de volume, bougie de retournement), déclenche une
+alerte de sortie anticipée. Les trades sont gardés dans `data/trades.json` (`JARVIS_TRADES_PATH`).
 
 ## Tests
 

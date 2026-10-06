@@ -47,7 +47,10 @@ async def candles(symbol: str, interval_min: int, outputsize: int = 5000, apikey
     key = apikey or secret(KEY_NAME)
     if not key:
         raise SourceError(f"clé {KEY_NAME} absente")
-    interval = f"{interval_min}min" if interval_min < 60 else f"{interval_min // 60}h"
+    if interval_min >= 1440:
+        interval = "1day"
+    else:
+        interval = f"{interval_min}min" if interval_min < 60 else f"{interval_min // 60}h"
     payload = await get_json(
         SERIES_URL, params={"symbol": symbol, "interval": interval, "outputsize": outputsize, "apikey": key}
     )

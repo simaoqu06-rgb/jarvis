@@ -13,10 +13,12 @@ def bars(closes, spread=1.0, start=0, step=3600):
 
 
 def test_niveaux_par_defaut_long():
-    candles = bars([100.0] * 30)
+    candles = bars([100.0] * 30, step=60)  # une seule séance : pas de pivots
     lv = P.default_levels(candles, "long")
-    assert lv.stop < lv.entry < lv.targets[0] < lv.targets[1] < lv.targets[2]
-    assert lv.targets[1] - lv.entry == pytest.approx(2 * lv.risk)
+    prices = [t.price for t in lv.targets]
+    assert lv.stop < lv.entry < prices[0] < prices[1] < prices[2]
+    # Marché plat : pas de résistance, on complète par 1 R, 2 R, 3 R.
+    assert prices[1] - lv.entry == pytest.approx(2 * lv.risk)
 
 
 def test_niveaux_incoherents_refuses():
@@ -29,7 +31,7 @@ def test_niveaux_incoherents_refuses():
 def test_delais_sur_tendance_reguliere():
     # +1 par bougie, amplitude ±0,5 : le TP à +2 % est atteint, le stop à -3 % jamais.
     candles = bars([100.0 + i for i in range(100)], spread=0.5)
-    lv = P.Levels("long", 100.0, 97.0, [102.0])
+    lv = P.Levels("long", 100.0, 97.0, [P.Target(102.0, "test")])
     timing = P.historical_timing(candles, lv, horizon_bars=10)
     assert timing["stop_first_rate"] == 0
     assert timing["targets"][0]["hit_rate"] == 1
@@ -38,7 +40,7 @@ def test_delais_sur_tendance_reguliere():
 
 def test_bougie_qui_touche_tp_et_stop_compte_comme_stop():
     candles = bars([100.0] * 60, spread=5.0)
-    lv = P.Levels("long", 100.0, 98.0, [102.0])
+    lv = P.Levels("long", 100.0, 98.0, [P.Target(102.0, "test")])
     timing = P.historical_timing(candles, lv, horizon_bars=5)
     assert timing["targets"][0]["hit_rate"] == 0
     assert timing["stop_first_rate"] == 1
@@ -61,7 +63,7 @@ def trade(**over):
     t = {"symbol": "BTC", "side": "long", "entry": 100.0, "stop": 98.0, "stop_pct": -2.0,
          "created_at": "2026-10-06T00:00:00+00:00",
          "targets": [{"name": f"TP{i}", "price": p, "pct": p - 100, "minutes_median": 60, "eta_latest": None,
-                      "eta_text": "~1 h"} for i, p in enumerate([102.0, 104.0, 106.0], start=1)]}
+                      "eta_text": "~1 h", "source": "test"} for i, p in enumerate([102.0, 104.0, 106.0], start=1)]}
     book = S.Book(None)
     return book.add(t | over)
 
@@ -70,14 +72,16 @@ NOW = datetime(2026, 10, 6, 3, 0, tzinfo=timezone.utc)
 T0 = int(datetime(2026, 10, 6, tzinfo=timezone.utc).timestamp())
 
 
-def test_tp1_puis_stop_remonte_a_l_entree():
+def test_stop_inchange_apres_tp1_puis_a_l_entree_apres_tp2():
     tr = trade()
     msgs = S.apply_bars(tr, bars([101.0, 102.5], spread=0.5, start=T0, step=60), NOW)
-    assert len(msgs) == 1 and "TP1 touché" in msgs[0]
-    assert tr["stop_current"] == 100.0 and tr["status"] == "open"
+    assert len(msgs) == 1 and "TP1 touché" in msgs[0] and "pas de break-even" in msgs[0]
+    assert tr["stop_current"] == 98.0 and tr["status"] == "open"
     # La même bougie relue au passage suivant ne renvoie pas d'alerte en double.
     assert S.apply_bars(tr, bars([102.5], spread=0.5, start=T0 + 60, step=60), NOW) == []
-    msgs = S.apply_bars(tr, bars([99.0], spread=0.5, start=T0 + 120, step=60), NOW)
+    msgs = S.apply_bars(tr, bars([104.2], spread=0.5, start=T0 + 120, step=60), NOW)
+    assert "TP2 touché" in msgs[0] and tr["stop_current"] == 100.0
+    msgs = S.apply_bars(tr, bars([99.0], spread=0.5, start=T0 + 180, step=60), NOW)
     assert "stop suivi" in msgs[0] and tr["status"] == "closed"
 
 
@@ -99,3 +103,48 @@ def test_alerte_de_retard_une_seule_fois():
     msgs = S.apply_bars(tr, bars([100.5], spread=0.2, start=T0, step=60), NOW)
     assert len(msgs) == 1 and "pas encore touché" in msgs[0]
     assert S.apply_bars(tr, bars([100.5], spread=0.2, start=T0 + 60, step=60), NOW) == []
+
+
+def test_esperance_et_rr_minimal():
+    e = P.expectancy(2.0, hit_rate=0.4, stop_rate=0.5)
+    assert e["expectancy_r"] == pytest.approx(0.3)
+    assert e["breakeven_r"] == pytest.approx(1.25)
+
+
+def test_objectifs_sur_les_resistances():
+    # Deux sommets nets au-dessus du prix : les TP s'y placent, juste avant le niveau.
+    closes = [100.0] * 20 + [110.0] + [100.0] * 20 + [120.0] + [100.0] * 20
+    candles = bars(closes, spread=0.5, step=60)  # une seule séance : pas de pivots
+    lv = P.default_levels(candles, "long", entry=100.0, stop=98.0)
+    assert [t.source for t in lv.targets[:2]] == ["sommet de swing", "sommet de swing"]
+    assert 109 < lv.targets[0].price < 110.5 and 119 < lv.targets[1].price < 120.5
+
+
+def test_sizing_emperorbtc():
+    s = S.sizing(entry=100.0, stop=95.0, capital=10_000, risk_pct=3)
+    assert s["risk_amount"] == 300 and s["quantity"] == 60 and s["leverage"] == pytest.approx(1.0)
+
+
+def test_signal_de_sortie_une_seule_fois(monkeypatch):
+    tr = trade()
+    tr["last_price"] = 101.0
+    monkeypatch.setattr(S.S, "exit_signals", lambda bars, side: [("weis", "anomalie")])
+    assert len(S.apply_exit_signals(tr, [])) == 1
+    assert S.apply_exit_signals(tr, []) == []
+
+
+def test_pas_de_signal_de_sortie_en_perte(monkeypatch):
+    tr = trade()
+    tr["last_price"] = 99.0
+    monkeypatch.setattr(S.S, "exit_signals", lambda bars, side: [("weis", "anomalie")])
+    assert S.apply_exit_signals(tr, []) == []
+
+
+def test_cockpit_texte():
+    book = S.Book(None)
+    assert "Aucun trade" in S.cockpit_text(book, NOW)
+    t = book.add(trade())
+    t["targets_hit"] = 1
+    t["events"].append({"kind": "tp1", "price": 102.0, "at": "2026-10-06T01:00:00+00:00"})
+    text = S.cockpit_text(book, NOW)
+    assert "BTC" in text and "✅ touché" in text and "TP2" in text
