@@ -61,6 +61,30 @@ curl -X POST http://127.0.0.1:8000/api/notify/test      # message de test sur Di
 Le conteneur redémarre tout seul si le serveur redémarre (`restart: unless-stopped`).
 Les routes ne sont ouvertes que sur le serveur lui-même (127.0.0.1), pas sur Internet.
 
+## Ouvrir le Trading Cockpit sur ton PC et ton téléphone (Tailscale)
+
+Le cockpit est à l'adresse `/cockpit` du serveur, qui n'est pas ouvert sur Internet. Tailscale
+(gratuit pour un usage personnel) crée un réseau privé entre tes appareils : le cockpit n'est
+visible que par toi, sans ouvrir de port dans le firewall.
+
+1. Crée un compte sur https://login.tailscale.com/start et installe l'application Tailscale sur
+   ton PC et ton téléphone (connecte-les au même compte).
+2. Sur le serveur :
+
+   ```bash
+   curl -fsSL https://tailscale.com/install.sh | sh
+   tailscale up                      # ouvre le lien affiché pour relier le serveur à ton compte
+   tailscale serve --bg 8000         # publie JARVIS dans ton réseau privé, en HTTPS
+   ```
+
+   Si la commande `serve` affiche un lien pour activer HTTPS sur ton réseau Tailscale, ouvre-le et
+   accepte, puis relance la commande.
+3. `tailscale serve status` affiche l'adresse, du type `https://<nom-du-serveur>.<ton-réseau>.ts.net`.
+   Ouvre `https://<…>.ts.net/cockpit` sur ton PC ou ton téléphone (ajoute-la à l'écran d'accueil).
+
+Le message « Trading Cockpit » apparaît aussi sur Discord dès le premier trade suivi : épingle-le
+une fois (clic droit > Épingler), JARVIS le réécrit chaque minute.
+
 ## Mettre à jour
 
 ```bash

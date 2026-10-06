@@ -4,11 +4,15 @@ Lancer : uvicorn app.main:app --reload
 """
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
 
 from app import alerts, needs, scheduler
 from app.notify import discord
+from app.trading import service as trading
 
 
 @asynccontextmanager
@@ -172,3 +176,73 @@ async def notify_brief():
 async def brief_preview():
     """Montre le point du matin sans l'envoyer."""
     return {"text": await alerts.morning_brief(datetime.now(timezone.utc))}
+
+
+# --- Trading : plans de trade et suivi (JARVIS propose, Simão passe les ordres) ---
+
+class TradeRequest(BaseModel):
+    symbol: str
+    market: str = "crypto"          # crypto ou stock
+    side: str = "long"              # long ou short
+    entry: float | None = None      # vide = dernier cours
+    stop: float | None = None       # vide = niveau d'invalidation (dernier creux de swing, 1 à 3 ATR)
+    targets: list[float] | None = None  # vide = prochaines résistances (supports pour un short)
+    capital: float | None = None    # vide = JARVIS_CAPITAL ; sert à la taille de position
+    risk_pct: float | None = None   # vide = JARVIS_RISK_PCT (3 %)
+    note: str | None = None
+
+
+async def _plan(req: TradeRequest) -> dict:
+    try:
+        return await trading.build_plan(req.symbol, req.market, req.side, req.entry, req.stop, req.targets,
+                                        capital=req.capital, risk_pct=req.risk_pct)
+    except trading.PlanError as exc:
+        raise HTTPException(422, str(exc))
+
+
+@app.post("/api/trading/plan")
+async def trading_plan(req: TradeRequest, discord_post: bool = False):
+    """Calcule un plan (entrée, stop, TP1-3, délais estimés) sans l'enregistrer."""
+    plan = await _plan(req)
+    if discord_post:
+        await _send(trading.plan_text(plan))
+    return plan | {"text": trading.plan_text(plan)}
+
+
+@app.post("/api/trading/trades")
+async def trading_open(req: TradeRequest):
+    """Calcule le plan, l'enregistre et le suit (TP/SL touchés annoncés sur Discord)."""
+    trade = scheduler.book.add(await _plan(req), req.note)
+    if scheduler.enabled():
+        await _send("📌 Nouveau trade suivi\n" + trading.plan_text(trade))
+    return trading.summary(trade)
+
+
+@app.get("/api/trading/trades")
+async def trading_list(status: str | None = Query(None, description="open ou closed")):
+    trades = [t for t in scheduler.book.trades if status is None or t["status"] == status]
+    return [trading.summary(t) for t in reversed(trades)]
+
+
+@app.post("/api/trading/trades/{trade_id}/close")
+async def trading_close(trade_id: str, price: float | None = None):
+    trade = scheduler.book.close(trade_id, price)
+    if not trade:
+        raise HTTPException(404, "Trade introuvable")
+    return trading.summary(trade)
+
+
+@app.delete("/api/trading/trades/{trade_id}")
+async def trading_delete(trade_id: str):
+    if not scheduler.book.remove(trade_id):
+        raise HTTPException(404, "Trade introuvable")
+    return {"deleted": trade_id}
+
+
+COCKPIT_HTML = Path(__file__).parent / "web" / "cockpit.html"
+
+
+@app.get("/cockpit", response_class=HTMLResponse, include_in_schema=False)
+async def cockpit():
+    """Le Trading Cockpit : trades suivis, TP/SL touchés, délais, journal (rafraîchi toutes les 30 s)."""
+    return HTMLResponse(COCKPIT_HTML.read_text(encoding="utf-8"))

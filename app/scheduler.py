@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from app import alerts, config
 from app.notify import discord
+from app.trading import service as trading
 
 log = logging.getLogger(__name__)
 NEW_YORK = ZoneInfo("America/New_York")
@@ -17,6 +18,7 @@ BRIEF_TIME_NY = time(9, 0)  # 30 min avant l'ouverture, soit 15 h à Paris la pl
 MINUTE = 60
 
 state = alerts.State(config.ALERTS_STATE_PATH)
+book = trading.Book()
 _lock = asyncio.Lock()  # un seul job modifie l'état à la fois
 
 
@@ -57,7 +59,17 @@ async def tick_news() -> None:
     await _post_all(await alerts.check_news(state))
 
 
+async def tick_trades() -> None:
+    await _post_all(await trading.check_trades(book))
+    if os.getenv("JARVIS_DISCORD_COCKPIT", "on").lower() != "off" and (book.trades or state.data.get("cockpit_message_id")):
+        # Message « cockpit » réécrit à chaque passage : à épingler une fois dans le salon.
+        state.data["cockpit_message_id"] = await discord.upsert(
+            trading.cockpit_text(book), state.data.get("cockpit_message_id")
+        )
+
+
 JOBS = [
+    ("suivi des trades et cockpit Discord", tick_trades, MINUTE),
     ("point du matin", tick_brief, MINUTE),
     ("mouvements de cours", tick_moves, 5 * MINUTE),
     ("séismes", tick_quakes, 5 * MINUTE),

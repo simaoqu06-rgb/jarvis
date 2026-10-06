@@ -3,6 +3,7 @@ import pytest
 from app.config import secret
 
 # Champs que JARVIS utilise pour chaque type de donnée : s'ils disparaissent, le test échoue.
+CANDLE = {"t", "o", "h", "l", "c", "v"}
 PRICE = {"symbol", "currency", "price", "bid", "ask", "high_24h", "low_24h", "volume_24h_eur", "change_24h_pct"}
 RANKING = {"rank", "symbol", "name", "price_usd", "change_24h_pct", "market_cap_usd", "volume_24h_usd"}
 FX = {"base", "date", "rates"}

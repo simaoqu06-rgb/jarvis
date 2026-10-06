@@ -39,3 +39,26 @@ async def crypto_prices(symbols: list[str]) -> list[dict]:
             }
         )
     return prices
+
+
+OHLC_URL = "https://api.kraken.com/0/public/OHLC"
+
+
+async def candles(symbol: str, interval_min: int, quote: str = "USD") -> list[dict]:
+    """Bougies OHLC (720 au maximum), de la plus ancienne à la plus récente.
+
+    La dernière bougie est celle en cours (pas encore close).
+    """
+    code = _kraken_code(symbol)
+    payload = await get_json(OHLC_URL, params={"pair": f"{code}{quote}", "interval": interval_min})
+    if payload.get("error"):
+        raise SourceError("; ".join(payload["error"]))
+    result = payload.get("result") or {}
+    rows = next((v for k, v in result.items() if k != "last"), None)
+    if not rows:
+        raise SourceError(f"paire {symbol}/{quote} absente de la réponse")
+    # [heure, ouverture, haut, bas, clôture, vwap, volume, nombre de transactions]
+    return [
+        {"t": int(r[0]), "o": float(r[1]), "h": float(r[2]), "l": float(r[3]), "c": float(r[4]), "v": float(r[6])}
+        for r in rows
+    ]

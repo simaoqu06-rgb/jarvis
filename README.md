@@ -66,6 +66,41 @@ Chaque route renvoie le même format, quelle que soit la source :
 Un module par source dans `app/sources/`, les associations principale/secours et les durées
 de cache dans `app/needs.py`. Chaque appel a un délai maximum de 8 secondes.
 
+## Plans de trade, suivi et Trading Cockpit
+
+JARVIS propose des plans selon la méthode EmperorBTC ([docs/emperorbtc.md](docs/emperorbtc.md)) ;
+c'est toi qui passes les ordres : aucun ordre n'est envoyé à un courtier.
+
+**Cockpit** : `/cockpit` (page web, rafraîchie toutes les 30 s). On y calcule un plan, on clique
+« Je prends ce trade » pour le suivre, et on voit pour chaque trade le prix, les TP/SL touchés avec
+l'heure, les délais estimés des TP restants, les signes de sortie et le journal des trades terminés.
+Le même tableau est réécrit chaque minute dans un message Discord (à épingler une fois). Tout tourne sur ton serveur : aucun token Claude n'est consommé.
+
+| Route | Rôle |
+|---|---|
+| `POST /api/trading/plan` | Calcule un plan sans l'enregistrer (`?discord_post=true` pour l'envoyer sur Discord) |
+| `POST /api/trading/trades` | Calcule le plan, l'enregistre et le suit (annonce sur Discord) |
+| `GET /api/trading/trades?status=open` | Trades suivis, avec le dernier prix, la variation et le gain en R |
+| `POST /api/trading/trades/{id}/close?price=…` | Clôture à la main |
+| `DELETE /api/trading/trades/{id}` | Supprime un trade |
+
+Corps des requêtes : `{"symbol": "NVDA", "market": "stock", "side": "long"}` (`market` : `crypto` ou
+`stock`). Facultatifs : `entry` (vide = dernier cours), `stop` (vide = niveau d'invalidation),
+`targets` (vide = prochaines résistances), `capital` et `risk_pct` pour la taille de position.
+
+**Délais estimés.** Pour chaque TP, JARVIS rejoue le même plan (mêmes écarts en %) depuis chaque
+bougie de l'historique de l'actif et mesure le temps qu'il a fallu pour toucher le TP avant le
+stop : médiane, fourchette 25-75 %, heure estimée (Paris), part des cas où le TP a été atteint
+avant le stop et espérance en R. Crypto : bougies d'1 h sur 30 jours (Kraken), horizon 24 h.
+Actions : bougies de 15 min sur environ 190 séances (Twelve Data), horizon 2 séances, en ne
+comptant que les heures de cotation.
+
+**Suivi.** Chaque minute pour la crypto, et toutes les 2 minutes pendant la séance pour les actions (limite gratuite de Twelve Data), les bougies d'1 minute disent si un TP ou le stop a été touché ;
+Discord reçoit l'alerte avec le prochain TP et son délai. Le stop reste en place après le TP1 et
+remonte à l'entrée après le TP2. Un TP en retard sur ce que 3 cas passés sur 4 avaient fait, ou un
+signe de retournement (divergence, anomalie de volume, bougie de retournement), déclenche une
+alerte de sortie anticipée. Les trades sont gardés dans `data/trades.json` (`JARVIS_TRADES_PATH`).
+
 ## Tests
 
 ```bash

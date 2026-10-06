@@ -66,3 +66,31 @@ async def send(text: str, webhook_url: str | None = None, transport: httpx.Async
                 sent += 1
                 break
     return sent
+
+
+async def upsert(text: str, message_id: str | None, webhook_url: str | None = None,
+                 transport: httpx.AsyncBaseTransport | None = None) -> str:
+    """Réécrit le message `message_id` du webhook (ou en poste un nouveau s'il n'existe plus).
+
+    Renvoie l'identifiant du message. Doc : https://discord.com/developers/docs/resources/webhook#edit-webhook-message
+    """
+    url = webhook_url or secret(KEY_NAME)
+    if not url:
+        raise DiscordError(f"{KEY_NAME} absente")
+    body = {"content": text[:MAX_LENGTH], "allowed_mentions": {"parse": []}}
+    async with httpx.AsyncClient(
+        timeout=TIMEOUT_SECONDS, headers={"User-Agent": USER_AGENT}, transport=transport
+    ) as client:
+        try:
+            if message_id:
+                response = await client.patch(f"{url.split('?')[0]}/messages/{message_id}", json=body)
+                if response.status_code == 200:
+                    return message_id
+                if response.status_code != 404:
+                    raise DiscordError(f"HTTP {response.status_code} : {response.text[:200]}")
+            response = await client.post(url, params={"wait": "true"}, json=body)
+        except httpx.HTTPError as exc:
+            raise DiscordError(f"erreur réseau ({type(exc).__name__})") from exc
+    if response.status_code != 200:
+        raise DiscordError(f"HTTP {response.status_code} : {response.text[:200]}")
+    return response.json()["id"]

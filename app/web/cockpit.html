@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trading Cockpit</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎯</text></svg>">
+<style>
+:root {
+  --bg: #f6f7f9; --card: #ffffff; --text: #14161a; --muted: #667085; --line: #e4e7ec;
+  --up: #067647; --up-bg: #ecfdf3; --down: #b42318; --down-bg: #fef3f2;
+  --warn: #b54708; --warn-bg: #fffaeb; --accent: #3538cd; --accent-bg: #eef4ff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d0f12; --card: #16191e; --text: #eceef2; --muted: #98a2b3; --line: #2a2f37;
+    --up: #47cd89; --up-bg: #0b2a1c; --down: #f97066; --down-bg: #2f1210;
+    --warn: #fdb022; --warn-bg: #2b1d05; --accent: #8098f9; --accent-bg: #161b3a;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+main { max-width: 980px; margin: 0 auto; padding: 16px; }
+header { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+h1 { font-size: 20px; margin: 0; }
+h2 { font-size: 15px; margin: 24px 0 8px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; margin-bottom: 12px; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.between { justify-content: space-between; }
+.pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+.long { background: var(--up-bg); color: var(--up); }
+.short { background: var(--down-bg); color: var(--down); }
+.go { background: var(--up-bg); color: var(--up); }
+.wait { background: var(--warn-bg); color: var(--warn); }
+.no { background: var(--down-bg); color: var(--down); }
+.up { color: var(--up); } .down { color: var(--down); }
+.price { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.num { font-variant-numeric: tabular-nums; }
+table { width: 100%; border-collapse: collapse; }
+td, th { padding: 6px 4px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+th { font-size: 12px; color: var(--muted); font-weight: 600; }
+.track { position: relative; height: 8px; border-radius: 4px; background: var(--line); margin: 22px 4px 26px; }
+.track .fill { position: absolute; top: 0; bottom: 0; border-radius: 4px; }
+.mark { position: absolute; top: -5px; width: 2px; height: 18px; background: var(--muted); }
+.mark span { position: absolute; top: 20px; left: 50%; transform: translateX(-50%); font-size: 11px; color: var(--muted); white-space: nowrap; }
+.mark.now { background: var(--accent); width: 4px; top: -7px; height: 22px; border-radius: 2px; }
+.mark.now span { top: -18px; color: var(--accent); font-weight: 700; }
+.mark.hit { background: var(--up); }
+.checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 6px; margin-top: 8px; }
+.check { padding: 6px 8px; border-radius: 8px; background: var(--bg); font-size: 12px; }
+.alert { background: var(--warn-bg); color: var(--warn); padding: 8px 10px; border-radius: 8px; margin-top: 8px; font-size: 13px; }
+form { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; align-items: end; }
+label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+input, select, button { font: inherit; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--card); color: var(--text); min-width: 0; }
+button { cursor: pointer; background: var(--text); color: var(--bg); border-color: var(--text); font-weight: 600; }
+button.ghost { background: transparent; color: var(--text); }
+button:disabled { opacity: .5; cursor: wait; }
+.error { color: var(--down); margin-top: 8px; }
+.scroll { overflow-x: auto; }
+.tps { display: grid; gap: 6px; margin-top: 10px; }
+.tp { padding: 8px 10px; border-radius: 8px; background: var(--bg); display: grid; gap: 2px; }
+.tp.done { outline: 1px solid var(--up); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>🎯 Trading Cockpit</h1>
+      <div class="muted small" id="status">Chargement…</div>
+    </div>
+    <div class="muted small" id="updated"></div>
+  </header>
+
+  <section class="card">
+    <form id="plan-form">
+      <label>Symbole<input name="symbol" placeholder="BTC, NVDA…" required autocomplete="off"></label>
+      <label>Marché<select name="market"><option value="crypto">Crypto</option><option value="stock">Action US</option></select></label>
+      <label>Sens<select name="side"><option value="long">Long</option><option value="short">Short</option></select></label>
+      <label>Entrée (vide = cours)<input name="entry" type="number" step="any"></label>
+      <label>Stop (vide = auto)<input name="stop" type="number" step="any"></label>
+      <label>Capital (option)<input name="capital" type="number" step="any"></label>
+      <button type="submit">Calculer le plan</button>
+    </form>
+    <div id="preview"></div>
+  </section>
+
+  <h2>Trades suivis</h2>
+  <div id="open"><div class="muted">Chargement…</div></div>
+
+  <h2>Journal</h2>
+  <div class="card scroll" id="closed"></div>
+</main>
+<script>
+const $ = (sel) => document.querySelector(sel);
+const fmt = (x) => x == null ? "—" : Number(x).toLocaleString("fr-FR", { maximumSignificantDigits: 6 });
+const pct = (x) => x == null ? "—" : `${x > 0 ? "+" : ""}${Number(x).toFixed(2)} %`;
+const cls = (x) => x > 0 ? "up" : x < 0 ? "down" : "";
+const paris = (iso) => iso ? new Date(iso).toLocaleString("fr-FR", { timeZone: "Europe/Paris", weekday: "short", hour: "2-digit", minute: "2-digit" }) : "—";
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+async function api(path, options) {
+  const r = await fetch(path, options);
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
+  return body;
+}
+
+function verdictClass(v) { return v.startsWith("Feu vert") ? "go" : v.startsWith("Contre") ? "no" : "wait"; }
+
+function checklistHtml(c) {
+  const mark = { true: "✅", false: "❌", null: "➖" };
+  return `<div class="row" style="margin-top:10px"><span class="pill ${verdictClass(c.verdict)}">${esc(c.verdict)}</span>
+    <span class="muted small">checklist EmperorBTC ${c.score}/${c.max_score}</span></div>
+    <div class="checks">${c.items.map(i => `<div class="check">${mark[i.ok]} <b>${esc(i.label)}</b><br><span class="muted">${esc(i.detail)}</span></div>`).join("")}</div>`;
+}
+
+function track(t) {
+  const sign = t.side === "long" ? 1 : -1;
+  const points = [t.stop, t.entry, ...t.targets.map(x => x.price), t.last_price ?? t.entry];
+  const lo = Math.min(...points), hi = Math.max(...points);
+  const pos = (p) => ((p - lo) / (hi - lo || 1)) * 100;
+  const now = t.last_price ?? t.entry;
+  const a = pos(t.entry), b = pos(now);
+  const color = (now - t.entry) * sign >= 0 ? "var(--up)" : "var(--down)";
+  const hit = t.targets_hit || 0;
+  return `<div class="track">
+    <div class="fill" style="left:${Math.min(a, b)}%;width:${Math.abs(b - a)}%;background:${color}"></div>
+    <div class="mark" style="left:${pos(t.stop_current ?? t.stop)}%;background:var(--down)"><span>SL</span></div>
+    <div class="mark" style="left:${a}%"><span>Entrée</span></div>
+    ${t.targets.map((x, i) => `<div class="mark ${i < hit ? "hit" : ""}" style="left:${pos(x.price)}%"><span>${x.name}</span></div>`).join("")}
+    <div class="mark now" style="left:${b}%"><span>${fmt(now)}</span></div>
+  </div>`;
+}
+
+function dur(m) {
+  if (m == null) return "—";
+  m = Math.round(m);
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60), r = m % 60;
+  return r ? `${h} h ${String(r).padStart(2, "0")}` : `${h} h`;
+}
+
+function targetsTable(t) {
+  return `<div class="tps">${t.targets.map((x, i) => {
+    const ev = (t.events || []).find(e => e.kind === x.name.toLowerCase());
+    const when = ev ? `<span class="up"><b>✅ touché ${paris(ev.at)}</b></span>`
+      : x.minutes_median == null ? `<span class="muted">jamais atteint dans l'historique</span>`
+      : `⏱️ <b>~${dur(x.minutes_median)}</b> <span class="muted">(${dur(x.minutes_p25)} à ${dur(x.minutes_p75)})</span> · vers <b>${paris(x.eta_median)}</b> · au plus tard ${paris(x.eta_latest)}`;
+    return `<div class="tp ${ev ? "done" : ""}">
+      <div class="row between"><div><b>${x.name}</b> <span class="num">${fmt(x.price)}</span>
+        <span class="muted small">${pct(x.pct)} · ${x.r_multiple} R</span></div>
+        <div class="small num">${Math.round(x.hit_rate * 100)} % avant le stop · <span class="${cls(x.expectancy_r)}">${x.expectancy_r > 0 ? "+" : ""}${x.expectancy_r} R</span></div></div>
+      <div class="small">${when}</div>
+      <div class="muted small">${esc(x.source)}</div>
+    </div>`;
+  }).join("")}</div>`;
+}
+
+function sizingHtml(s) {
+  if (!s) return "";
+  return `<div class="muted small" style="margin-top:6px">💰 Risque ${s.risk_pct} % = ${fmt(s.risk_amount)} · taille ${fmt(s.quantity)} (${fmt(s.notional)}) · levier ${s.leverage}×</div>`;
+}
+
+function planCard(p, preview) {
+  return `<div class="card" style="margin:12px 0 0">
+    <div class="row between">
+      <div class="row"><span class="pill ${p.side}">${p.side.toUpperCase()}</span><b style="font-size:18px">${esc(p.symbol)}</b></div>
+      <div class="num">Entrée <b>${fmt(p.entry)}</b> · Stop <b class="down">${fmt(p.stop)}</b> <span class="muted">(${pct(p.stop_pct)})</span></div>
+    </div>
+    <div class="muted small">Stop ${esc(p.stop_source)}</div>
+    ${targetsTable(p)}
+    ${sizingHtml(p.sizing)}
+    ${checklistHtml(p.checklist)}
+    <div class="muted small" style="margin-top:8px">${esc(p.method)}</div>
+    ${preview ? `<div class="row" style="margin-top:12px"><button id="follow">Je prends ce trade : le suivre</button>
+      <button class="ghost" id="discard">Fermer</button></div>` : ""}
+  </div>`;
+}
+
+function openCard(t) {
+  const signals = (t.exit_signals || []).length ? `<div class="alert">⚠️ Signes de sortie : ${t.exit_signals.map(esc).join(", ")}</div>` : "";
+  return `<div class="card">
+    <div class="row between">
+      <div>
+        <div class="row"><span class="pill ${t.side}">${t.side.toUpperCase()}</span><b style="font-size:18px">${esc(t.symbol)}</b>
+          <span class="muted small">depuis ${paris(t.created_at)}</span></div>
+        <div class="muted small">Entrée ${fmt(t.entry)} · stop suivi ${fmt(t.stop_current)} · ${t.targets_hit}/${t.targets.length} TP touchés</div>
+      </div>
+      <div style="text-align:right"><div class="price">${fmt(t.last_price)}</div>
+        <div class="num ${cls(t.move_pct)}">${pct(t.move_pct)} · ${t.r_now > 0 ? "+" : ""}${t.r_now} R</div></div>
+    </div>
+    ${track(t)}
+    ${targetsTable(t)}
+    ${signals}
+    ${t.note ? `<div class="muted small" style="margin-top:6px">📝 ${esc(t.note)}</div>` : ""}
+    <div class="row" style="margin-top:12px">
+      <button class="ghost" data-close="${t.id}">Clôturer</button>
+      <button class="ghost" data-delete="${t.id}">Supprimer</button>
+    </div>
+  </div>`;
+}
+
+function outcome(t) {
+  const last = (t.events || []).at(-1);
+  if (!last) return "—";
+  const labels = { stop: "🛑 stop", close: "✋ à la main", tp1: "🎯 TP1", tp2: "🎯 TP2", tp3: "🏁 TP3" };
+  return `${labels[last.kind] || last.kind} à ${fmt(last.price)} <span class="muted small">${paris(last.at)}</span>`;
+}
+
+function resultR(t) {
+  const last = (t.events || []).at(-1);
+  if (!last) return null;
+  const sign = t.side === "long" ? 1 : -1;
+  return Math.round(sign * (last.price - t.entry) / Math.abs(t.entry - t.stop) * 100) / 100;
+}
+
+async function refresh() {
+  try {
+    const [trades, market] = await Promise.all([api("/api/trading/trades"), api("/api/markets/us/status").catch(() => null)]);
+    const open = trades.filter(t => t.status === "open");
+    const closed = trades.filter(t => t.status !== "open");
+    $("#open").innerHTML = open.length ? open.map(openCard).join("") : `<div class="card muted">Aucun trade suivi. Calcule un plan ci-dessus puis clique sur « Je prends ce trade ».</div>`;
+    $("#closed").innerHTML = closed.length ? `<table><tr><th>Actif</th><th>Sens</th><th>Entrée</th><th>Sortie</th><th>Résultat</th></tr>
+      ${closed.map(t => { const r = resultR(t); return `<tr><td><b>${esc(t.symbol)}</b><div class="muted small">${paris(t.created_at)}</div></td>
+        <td><span class="pill ${t.side}">${t.side}</span></td><td class="num">${fmt(t.entry)}</td><td>${outcome(t)}</td>
+        <td class="num ${cls(r)}">${r == null ? "—" : `${r > 0 ? "+" : ""}${r} R`}</td></tr>`; }).join("")}</table>`
+      : `<span class="muted">Les trades terminés apparaîtront ici.</span>`;
+    if (market) $("#status").textContent = `Bourse de New York : ${market.is_open ? "🟢 ouverte" : "⚪ fermée"} (${market.reason}) · crypto 24 h/24`;
+    $("#updated").textContent = `Mis à jour ${new Date().toLocaleTimeString("fr-FR", { timeZone: "Europe/Paris" })} (Paris)`;
+  } catch (e) {
+    $("#updated").textContent = `Erreur de mise à jour : ${e.message}`;
+  }
+}
+
+let lastRequest = null;
+$("#plan-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const data = Object.fromEntries(new FormData(ev.target));
+  const body = { symbol: data.symbol, market: data.market, side: data.side };
+  for (const k of ["entry", "stop", "capital"]) if (data[k]) body[k] = Number(data[k]);
+  const button = ev.target.querySelector("button");
+  button.disabled = true;
+  $("#preview").innerHTML = `<div class="muted" style="margin-top:12px">Calcul en cours (historique, délais, checklist)…</div>`;
+  try {
+    const plan = await api("/api/trading/plan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    lastRequest = body;
+    $("#preview").innerHTML = planCard(plan, true);
+  } catch (e) {
+    $("#preview").innerHTML = `<div class="error">${esc(e.message)}</div>`;
+  } finally {
+    button.disabled = false;
+  }
+});
+
+document.addEventListener("click", async (ev) => {
+  const el = ev.target;
+  try {
+    if (el.id === "discard") $("#preview").innerHTML = "";
+    if (el.id === "follow" && lastRequest) {
+      const note = prompt("Note pour ce trade (facultatif)") || null;
+      el.disabled = true;
+      await api("/api/trading/trades", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...lastRequest, note }) });
+      $("#preview").innerHTML = "";
+      await refresh();
+    }
+    if (el.dataset.close) {
+      const price = prompt("Prix de sortie (vide = dernier cours)");
+      if (price === null) return;
+      await api(`/api/trading/trades/${el.dataset.close}/close${price ? `?price=${encodeURIComponent(price)}` : ""}`, { method: "POST" });
+      await refresh();
+    }
+    if (el.dataset.delete && confirm("Supprimer ce trade du cockpit et du journal ?")) {
+      await api(`/api/trading/trades/${el.dataset.delete}`, { method: "DELETE" });
+      await refresh();
+    }
+  } catch (e) {
+    alert(e.message);
+  }
+});
+
+refresh();
+setInterval(refresh, 30000);
+</script>
+</body>
+</html>
