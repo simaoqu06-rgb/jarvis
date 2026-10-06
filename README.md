@@ -74,7 +74,7 @@ c'est toi qui passes les ordres : aucun ordre n'est envoyé à un courtier.
 **Cockpit** : `/cockpit` (page web, rafraîchie toutes les 30 s). On y calcule un plan, on clique
 « Je prends ce trade » pour le suivre, et on voit pour chaque trade le prix, les TP/SL touchés avec
 l'heure, les délais estimés des TP restants, les signes de sortie et le journal des trades terminés.
-Le même tableau est réécrit toutes les 2 minutes dans un message Discord (à épingler une fois).
+Le même tableau est réécrit chaque minute dans un message Discord (à épingler une fois). Tout tourne sur ton serveur : aucun token Claude n'est consommé.
 
 | Route | Rôle |
 |---|---|
@@ -95,7 +95,7 @@ avant le stop et espérance en R. Crypto : bougies d'1 h sur 30 jours (Kraken), 
 Actions : bougies de 15 min sur environ 190 séances (Twelve Data), horizon 2 séances, en ne
 comptant que les heures de cotation.
 
-**Suivi.** Toutes les 2 minutes, les bougies d'1 minute disent si un TP ou le stop a été touché ;
+**Suivi.** Chaque minute pour la crypto, et toutes les 2 minutes pendant la séance pour les actions (limite gratuite de Twelve Data), les bougies d'1 minute disent si un TP ou le stop a été touché ;
 Discord reçoit l'alerte avec le prochain TP et son délai. Le stop reste en place après le TP1 et
 remonte à l'entrée après le TP2. Un TP en retard sur ce que 3 cas passés sur 4 avaient fait, ou un
 signe de retournement (divergence, anomalie de volume, bougie de retournement), déclenche une

@@ -35,7 +35,17 @@ SETTINGS = {
 }
 # Taille demandée à Twelve Data selon l'intervalle (1 crédit par appel, quelle que soit la taille).
 STOCK_OUTPUTSIZE = {1: 60, 15: 5000, 240: 400, 1440: 300}
-TTL = {1: 50, 15: 120, 60: 120, 240: 1800, 1440: 1800}
+TTL = {1: 50, 15: 300, 60: 120, 240: 1800, 1440: 1800}
+# Actions : 1 crédit Twelve Data par appel (800 par jour en gratuit). On ne relit les bougies d'1 min
+# qu'une fois toutes les 2 minutes, et seulement pendant la séance.
+STOCK_CHECK_SECONDS = 110
+_last_stock_check: dict[str, float] = {}
+
+
+def nyse_session_open(now: datetime) -> bool:
+    """Séance régulière en cours (jours fériés ignorés : au pire un appel pour rien)."""
+    local = now.astimezone(NEW_YORK)
+    return local.weekday() < 5 and OPEN <= local.time() < CLOSE
 _candle_cache: dict[tuple, tuple[float, list[dict]]] = {}
 
 
@@ -386,6 +396,12 @@ async def check_trades(book: Book, now: datetime | None = None) -> list[str]:
     now = now or datetime.now(timezone.utc)
     messages = []
     for trade in book.open_trades():
+        if trade["market"] == "stock":
+            last = _last_stock_check.get(trade["symbol"], 0.0)
+            if not nyse_session_open(now) or clock.monotonic() - last < STOCK_CHECK_SECONDS:
+                messages += apply_bars(trade, [], now)  # seulement l'alerte de retard éventuelle
+                continue
+            _last_stock_check[trade["symbol"]] = clock.monotonic()
         try:
             bars = await candles(trade["symbol"], trade["market"], 1)
         except PlanError as exc:

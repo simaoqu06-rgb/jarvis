@@ -69,7 +69,7 @@ async def tick_trades() -> None:
 
 
 JOBS = [
-    ("suivi des trades", tick_trades, 2 * MINUTE),
+    ("suivi des trades et cockpit Discord", tick_trades, MINUTE),
     ("point du matin", tick_brief, MINUTE),
     ("mouvements de cours", tick_moves, 5 * MINUTE),
     ("séismes", tick_quakes, 5 * MINUTE),

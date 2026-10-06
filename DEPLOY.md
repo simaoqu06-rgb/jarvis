@@ -83,7 +83,7 @@ visible que par toi, sans ouvrir de port dans le firewall.
    Ouvre `https://<…>.ts.net/cockpit` sur ton PC ou ton téléphone (ajoute-la à l'écran d'accueil).
 
 Le message « Trading Cockpit » apparaît aussi sur Discord dès le premier trade suivi : épingle-le
-une fois (clic droit > Épingler), JARVIS le réécrit toutes les 2 minutes.
+une fois (clic droit > Épingler), JARVIS le réécrit chaque minute.
 
 ## Mettre à jour
 
