@@ -143,13 +143,31 @@ async def clock() -> dict:
     return await _request("GET", f"{_trading_base()}/v2/clock")
 
 
+def round_price(price: float) -> float:
+    """Pas de cotation US : 2 décimales à partir de 1 $, 4 en dessous (sous-penny refusé sinon)."""
+    return round(price, 2) if price >= 1 else round(price, 4)
+
+
+def _fmt(price: float) -> str:
+    return f"{price:.2f}" if price >= 1 else f"{price:.4f}"
+
+
+def bracket_prices(entry: float, take_profit: float, stop: float) -> tuple[float, float, float]:
+    """Prix arrondis au pas de cotation ; refuse un plan que l'arrondi rendrait absurde."""
+    e, tp, sl = round_price(entry), round_price(take_profit), round_price(stop)
+    if e == sl or e == tp:
+        raise SourceError(f"arrondi au pas de cotation : entrée {e} confondue avec le stop ({sl}) ou le TP ({tp})")
+    return e, tp, sl
+
+
 async def submit_bracket(symbol: str, qty: int, side: str, entry: float, take_profit: float, stop: float,
                          client_order_id: str) -> dict:
     """Ordre à cours limité à l'entrée, avec son TP et son stop attachés (ordre « bracket »)."""
+    entry, take_profit, stop = bracket_prices(entry, take_profit, stop)
     body = {"symbol": symbol, "qty": str(qty), "side": "buy" if side == "long" else "sell",
-            "type": "limit", "limit_price": f"{entry:.2f}", "time_in_force": "gtc",
+            "type": "limit", "limit_price": _fmt(entry), "time_in_force": "gtc",
             "order_class": "bracket", "client_order_id": client_order_id,
-            "take_profit": {"limit_price": f"{take_profit:.2f}"}, "stop_loss": {"stop_price": f"{stop:.2f}"}}
+            "take_profit": {"limit_price": _fmt(take_profit)}, "stop_loss": {"stop_price": _fmt(stop)}}
     return await _request("POST", f"{_trading_base()}/v2/orders", body=body)
 
 

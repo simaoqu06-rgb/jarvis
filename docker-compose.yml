@@ -1,6 +1,7 @@
 services:
   jarvis:
     build: .
+    # Redémarre après un plantage ou un redémarrage du serveur ; santé vérifiée par le HEALTHCHECK du Dockerfile
     restart: unless-stopped
     env_file: .env
     volumes:

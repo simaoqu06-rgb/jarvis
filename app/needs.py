@@ -159,27 +159,31 @@ OPEN, CLOSE, EARLY_CLOSE = time(9, 30), time(16, 0), time(13, 0)
 
 
 async def us_market_status(now: datetime | None = None) -> dict:
-    """Bourse de New York ouverte ou fermée maintenant (heures régulières 9 h 30 à 16 h, heure de New York)."""
+    """Bourse de New York ouverte ou fermée maintenant (heures régulières 9 h 30 à 16 h, heure de New York).
+
+    Même calendrier que le suivi des trades et le scanner (app/trading/calendar.py, calculé sans réseau).
+    """
+    from app.trading import calendar as nyse
+
     now_ny = (now or datetime.now(timezone.utc)).astimezone(NEW_YORK)
-    calendar = await us_market_holidays(now_ny.year)
-    today = now_ny.date().isoformat()
-    holiday = next((h for h in (calendar.data or []) if h["date"] == today), None)
-    close = EARLY_CLOSE if holiday and holiday["early_close"] else CLOSE
+    day = now_ny.date()
+    bounds = nyse.session_bounds(day)
+    holiday = nyse.holidays(day.year).get(day)
     if now_ny.weekday() >= 5:
         is_open, reason = False, "week-end"
-    elif holiday and holiday["closed"]:
-        is_open, reason = False, f"jour férié : {holiday['name']}"
+    elif not bounds:
+        is_open, reason = False, f"jour férié : {holiday}" if holiday else "fermée"
     else:
-        is_open = OPEN <= now_ny.time() < close
+        is_open = bounds[0] <= now_ny < bounds[1]
         reason = "séance en cours" if is_open else "hors des heures de séance"
-        if holiday and holiday["early_close"]:
+        if day in nyse.early_closes(day.year):
             reason += " (fermeture anticipée à 13 h)"
     return {
         "exchange": "NYSE/Nasdaq",
         "is_open": is_open,
         "reason": reason,
         "local_time_new_york": now_ny.isoformat(timespec="minutes"),
-        "calendar": calendar.to_dict() | {"data": None},
+        "calendar": {"source": "calendrier NYSE calculé (jours fériés et séances courtes)"},
     }
 
 

@@ -33,8 +33,20 @@ NEGATIVE = [
 DILUTION = [
     r"public offering", r"stock offering", r"share offering", r"secondary offering", r"registered direct",
     r"private placement", r"at[- ]the[- ]market", r"\batm (program|offering)", r"prices? .*offering",
-    r"convertible notes", r"shelf registration", r"dilut",
+    r"shelf registration",
 ]
+# Indices plus faibles : « dilut » (mais pas « non-dilutive » ni « anti-dilution ») et les convertibles,
+# qui ne comptent pas quand le titre parle d'un rachat ou d'un remboursement (NOT_DILUTION).
+DILUTION_WEAK = [r"convertible notes", r"(?<![\w-])(?<!non )(?<!anti )dilut"]
+# Rachat ou remboursement de titres (« convertible notes repurchase ») : l'inverse d'une dilution.
+NOT_DILUTION = [r"repurchas", r"buy ?back", r"redeem", r"redemption", r"retire[sd]? .*notes", r"tender offer"]
+# Mots trop génériques pour reconnaître une société à eux seuls (« The Trade Desk », « Advanced Micro Devices »).
+GENERIC_WORDS = {
+    "the", "a", "an", "advanced", "american", "first", "united", "general", "global", "new", "international",
+    "national", "applied", "digital", "energy", "financial", "capital", "technologies", "technology", "systems",
+    "health", "healthcare", "bank", "royal", "pacific", "southern", "northern", "western", "eastern", "great",
+    "us", "u.s.", "china", "world", "public", "best", "data", "life", "bio", "solutions", "industries",
+}
 
 
 def _has(patterns: list[str], text: str) -> bool:
@@ -43,7 +55,7 @@ def _has(patterns: list[str], text: str) -> bool:
 
 def tone(title: str) -> str:
     text = title.lower()
-    if _has(DILUTION, text):
+    if _has(DILUTION, text) or (_has(DILUTION_WEAK, text) and not _has(NOT_DILUTION, text)):
         return "dilution"
     neg, pos = _has(NEGATIVE, text), _has(POSITIVE, text)
     if pos and not neg:
@@ -59,8 +71,20 @@ def _about(item: dict, symbol: str, name: str | None) -> bool:
     if re.search(rf"\b{re.escape(symbol)}\b", title):
         return True
     if name:
-        first = re.sub(r"[,.]|\b(inc|corp|corporation|co|ltd|plc|holdings|group|class [a-z])\b", "", name, flags=re.I).split()
-        if first and len(first[0]) >= 3 and re.search(rf"\b{re.escape(first[0])}", title, re.I):
+        words = re.sub(r"[,.]|\b(inc|corp|corporation|co|ltd|plc|holdings|group|class [a-z])\b", " ", name,
+                       flags=re.I).split()
+        while words and words[0].lower() in ("the", "a", "an"):
+            words = words[1:]
+        if not words:
+            return False
+        # Nom complet (sans les articles ni le suffixe juridique), en mots entiers.
+        full = r"\s+".join(re.escape(w) for w in words)
+        if re.search(rf"(?<!\w){full}(?!\w)", title, re.I):
+            return True
+        # Sinon le premier mot, s'il est distinctif (« Nvidia », « Palantir » ; pas « Advanced »).
+        first = words[0]
+        if len(first) >= 4 and first.lower() not in GENERIC_WORDS and re.search(
+                rf"(?<!\w){re.escape(first)}(?!\w)", title, re.I):
             return True
     return False
 
@@ -75,15 +99,21 @@ async def check(symbol: str, now: datetime | None = None, days: int = 7) -> dict
     """Catalyseur d'une action. `available` vaut False si Finnhub ne répond pas (la note l'ignore alors)."""
     now = now or datetime.now(timezone.utc)
     today = now.date()
-    out = {"available": False, "name": None, "market_cap": None, "next_earnings": None, "hours_to_earnings": None,
+    out = {"available": False, "name": None, "market_cap": None, "company": None,
+           "next_earnings": None, "hours_to_earnings": None,
            "last_earnings": None, "news": [], "positive": 0, "negative": 0, "dilution": False, "fresh_news": False,
            "errors": []}
     profile, earnings, news = await asyncio.gather(
         finnhub.profile(symbol), finnhub.earnings(symbol, today - timedelta(days=10), today + timedelta(days=30)),
         finnhub.company_news(symbol, 60, days=days), return_exceptions=True,
     )
+    # company : True si Finnhub a un profil de société, False s'il a répondu sans profil (ETF, fonds),
+    # None si l'appel a échoué (quota, délai) : on ne sait pas, on n'exclut rien.
     if isinstance(profile, dict):
-        out["name"], out["market_cap"] = profile["name"], profile["market_cap"]
+        out["name"], out["market_cap"] = profile["name"], profile.get("market_cap")
+        out["company"] = True
+    elif isinstance(profile, SourceError) and "profil inconnu" in str(profile):
+        out["company"] = False
     for label, value in (("profil", profile), ("résultats", earnings), ("actus", news)):
         if isinstance(value, Exception):
             out["errors"].append(f"{label} : {value}")

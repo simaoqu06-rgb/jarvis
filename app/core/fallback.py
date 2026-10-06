@@ -1,6 +1,7 @@
 """Principale, puis secours, puis dernière valeur connue : jamais de réponse cassée."""
 import asyncio
 import logging
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
@@ -12,7 +13,19 @@ from app.core.result import Result, now_iso
 log = logging.getLogger(__name__)
 
 store = Store(LAST_KNOWN_PATH)
-_locks: dict[str, asyncio.Lock] = {}
+_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
+MAX_LOCKS = 512  # un verrou par clé de cache : on oublie les moins récents qui ne sont pas pris
+
+
+def _lock_for(key: str) -> asyncio.Lock:
+    lock = _locks.get(key)
+    if lock is None:
+        lock = _locks[key] = asyncio.Lock()
+    _locks.move_to_end(key)
+    if len(_locks) > MAX_LOCKS:
+        for old in [k for k, v in _locks.items() if not v.locked() and k != key][: len(_locks) - MAX_LOCKS]:
+            del _locks[old]
+    return lock
 
 
 @dataclass
@@ -27,7 +40,7 @@ async def resolve(need: str, key: str, sources: list[Source], ttl: float, **kwar
     cached = store.get_fresh(key, ttl)
     if cached:
         return cached
-    lock = _locks.setdefault(key, asyncio.Lock())
+    lock = _lock_for(key)
     async with lock:
         cached = store.get_fresh(key, ttl)
         if cached:

@@ -33,6 +33,7 @@ def env_float(name: str, default: float) -> float:
 
 # Notifications Discord
 ALERTS_STATE_PATH = os.getenv("JARVIS_ALERTS_STATE_PATH", "data/alerts_state.json")
+OUTBOX_PATH = os.getenv("JARVIS_OUTBOX_PATH", "data/outbox.json")  # messages pas encore postés
 WATCHLIST_CRYPTO = env_list("JARVIS_WATCHLIST_CRYPTO", "BTC,ETH")
 WATCHLIST_STOCKS = env_list("JARVIS_WATCHLIST_STOCKS", "")
 MOVE_ALERT_PCT = env_float("JARVIS_MOVE_ALERT_PCT", 5.0)

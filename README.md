@@ -156,6 +156,7 @@ accord ; une proposition refusée n'est pas reproposée avec la même valeur.
 | `!propositions` | réglages proposés qui attendent ta réponse |
 | `!oui 3` / `!non 3` | approuver ou refuser la proposition 3 (ou les boutons) |
 | `!regle` | réglages actuels |
+| `!aide` | liste des commandes |
 
 Le bot ne répond qu'aux comptes de `JARVIS_DISCORD_OWNER_ID`. Mise en place : [DEPLOY.md](DEPLOY.md).
 
@@ -187,8 +188,8 @@ Dès que `DISCORD_WEBHOOK_URL` est définie, le serveur envoie sur le salon :
 | Notification | Quand | Réglage |
 |---|---|---|
 | Point du matin (Bourse de NY, agenda économique du jour, crypto, actions suivies, change, météo et air) | chaque jour à 9 h heure de New York, 30 min avant l'ouverture | `JARVIS_WATCHLIST_*`, `JARVIS_CITY` |
-| Variation forte d'une valeur suivie | vérifié toutes les 5 min, une alerte par palier et par jour (actions : pendant la séance) | `JARVIS_MOVE_ALERT_PCT` |
-| Séisme fort dans le monde | vérifié toutes les 5 min | `JARVIS_QUAKE_MIN_MAGNITUDE` |
+| Variation forte d'une valeur suivie | vérifié toutes les 5 min, une alerte par palier et par sens sur 24 h glissantes (cryptos : variation sur 24 h ; actions : sur la séance, pendant la séance) | `JARVIS_MOVE_ALERT_PCT` |
+| Séisme fort dans le monde | vérifié toutes les 5 min, sans doublon si la source passe de l'USGS à l'EMSC | `JARVIS_QUAKE_MIN_MAGNITUDE` |
 | Nouvelles actus de marché et des actions suivies | vérifié toutes les 15 min, 10 au plus par envoi | `JARVIS_WATCHLIST_STOCKS` (actus par action : clé Finnhub) |
 
 Chaque message porte la mention des sources et signale une valeur qui n'est plus à jour.

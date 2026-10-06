@@ -16,13 +16,13 @@ import logging
 import math
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from statistics import median
 
 from app.core.http import SourceError
 from app.sources import alpaca
-from app.trading import service as T
+from app.trading import calendar as CAL
 from app.trading.settings import settings
 
 log = logging.getLogger(__name__)
@@ -87,16 +87,48 @@ async def submit(book: PaperBook, plan: dict, features: dict | None = None, orig
     legs = legs_for(qty_total, plan["targets"])
     if not legs:
         return None
+    try:  # arrondis du courtier vérifiés avant le moindre ordre (entrée = stop ou entrée = TP refusés)
+        for _, target in legs:
+            alpaca.bracket_prices(plan["entry"], target["price"], plan["stop"])
+    except SourceError as exc:
+        log.warning("Forward-test %s non passé : %s", plan["symbol"], exc)
+        return None
     entry = record(plan, features, origin)
     for qty, target in legs:
-        order = await alpaca.submit_bracket(plan["symbol"], qty, plan["side"], plan["entry"], target["price"],
-                                            plan["stop"], client_order_id=f"jarvis-{entry['id']}-{target['name']}")
+        try:
+            order = await alpaca.submit_bracket(plan["symbol"], qty, plan["side"], plan["entry"], target["price"],
+                                                plan["stop"], client_order_id=f"jarvis-{entry['id']}-{target['name']}")
+        except Exception as exc:
+            await _rollback(book, entry, exc)
+            raise
         entry["legs"].append({"name": target["name"], "qty": qty, "target": target["price"],
                               "predicted_minutes": target["minutes_median"], "order_id": order["id"],
                               "filled_at": None, "fill_price": None, "exit": None, "exit_price": None, "exit_at": None})
     book.entries.append(entry)
     book.save()
     return entry
+
+
+async def _rollback(book: PaperBook, entry: dict, exc: Exception) -> None:
+    """Une jambe refusée : on annule celles déjà passées pour ne pas laisser d'ordres orphelins.
+
+    Celles qu'on n'a pas pu annuler restent suivies (entrée gardée, annulation retentée au passage suivant).
+    """
+    log.warning("Forward-test %s : jambe refusée (%s), annulation des %d jambes déjà passées",
+                entry["symbol"], exc, len(entry["legs"]))
+    left = []
+    for leg in entry["legs"]:
+        try:
+            await alpaca.cancel_order(leg["order_id"])
+        except SourceError as cancel_exc:
+            log.warning("Annulation %s impossible : %s", leg["order_id"], cancel_exc)
+            left.append(leg)
+    if left:
+        entry["legs"] = left
+        entry["submit_error"] = str(exc)
+        entry["cancel_pending"] = True  # check() retente l'annulation sans attendre la fin de séance
+        book.entries.append(entry)
+        book.save()
 
 
 def _ts(iso: str | None) -> datetime | None:
@@ -108,6 +140,8 @@ def apply_order(leg: dict, order: dict) -> None:
     if order.get("filled_at") and not leg["filled_at"]:
         leg["filled_at"] = order["filled_at"]
         leg["fill_price"] = float(order["filled_avg_price"])
+    if order.get("status") in ("canceled", "expired", "rejected") and not leg["filled_at"]:
+        leg["cancelled"] = True
     leg["child_ids"] = [c["id"] for c in order.get("legs") or []]
     for child in order.get("legs") or []:
         if child.get("status") == "filled" and not leg["exit"]:
@@ -150,28 +184,41 @@ async def check(book: PaperBook, now: datetime | None = None, s=settings) -> Non
         if any(leg["fill_price"] is not None for leg in entry["legs"]):
             entry["status"] = "open"
         created = datetime.fromisoformat(entry["created_at"])
-        entry_deadline = await T._eta("stock", created, SESSION_MINUTES - 5)
-        horizon = await T._eta("stock", created, SESSION_MINUTES * s["paper_horizon_sessions"] - 5)
+        # Clôture de la séance d'entrée (13 h les jours de séance courte), puis de la n-ième séance.
+        entry_deadline = CAL.nth_session_close(created, 1) - timedelta(minutes=5)
+        horizon = CAL.nth_session_close(created, s["paper_horizon_sessions"]) - timedelta(minutes=5)
         unfilled = [leg for leg in entry["legs"] if leg["fill_price"] is None]
-        if now >= entry_deadline and unfilled and not entry.get("entry_cancelled"):
-            for leg in unfilled:
+        to_cancel = [leg for leg in unfilled if not leg.get("cancelled")]
+        if (now >= entry_deadline or entry.get("cancel_pending")) and unfilled and not entry.get("entry_cancelled"):
+            for leg in to_cancel:
                 try:
                     await alpaca.cancel_order(leg["order_id"])
+                    leg["cancelled"] = True
                 except SourceError as exc:
                     log.warning("Annulation %s : %s", leg["order_id"], exc)
-            entry["entry_cancelled"] = True
+            # Seulement si toutes les annulations ont réussi ; sinon on retente au prochain passage.
+            if all(leg.get("cancelled") for leg in unfilled):
+                entry["entry_cancelled"] = True
         still_open = [leg for leg in entry["legs"] if leg["fill_price"] is not None and not leg["exit"]]
         if now >= horizon and still_open:
             for leg in still_open:
                 try:
-                    for child_id in leg.get("child_ids", []):  # TP et stop encore en attente
-                        await alpaca.cancel_order(child_id)
+                    if not leg.get("children_cancelled"):
+                        for child_id in leg.get("child_ids", []):  # TP et stop encore en attente
+                            await alpaca.cancel_order(child_id)
+                        leg["children_cancelled"] = True
                     await alpaca.close_position(entry["symbol"], leg["qty"])
                 except SourceError as exc:
+                    # Position pas soldée : la jambe reste ouverte, nouvelle tentative au prochain passage.
                     log.warning("Clôture fictive %s : %s", entry["symbol"], exc)
-                snap = (await alpaca.snapshots([entry["symbol"]])).get(entry["symbol"]) or {}
+                    continue
+                try:
+                    snap = (await alpaca.snapshots([entry["symbol"]])).get(entry["symbol"]) or {}
+                except SourceError as exc:
+                    log.warning("Cours de clôture fictive %s : %s", entry["symbol"], exc)
+                    snap = {}
                 leg["exit"], leg["exit_price"], leg["exit_at"] = "expiré", snap.get("price"), now.isoformat(timespec="seconds")
-            still_open = []
+            still_open = [leg for leg in entry["legs"] if leg["fill_price"] is not None and not leg["exit"]]
         if not still_open and (entry.get("entry_cancelled") or not unfilled):
             finish(entry)
     book.save()

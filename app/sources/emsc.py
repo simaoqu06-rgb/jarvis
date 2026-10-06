@@ -1,7 +1,7 @@
 """EMSC (centre sismologique euro-méditerranéen) : séismes mondiaux (sans clé). Secours de l'USGS."""
 from datetime import datetime, timedelta, timezone
 
-from app.core.http import get_json
+from app.core.http import get_json, to_float
 
 URL = "https://www.seismicportal.eu/fdsnws/event/1/query"
 
@@ -21,11 +21,12 @@ async def earthquakes(min_magnitude: float, hours: int) -> list[dict]:
         {
             "id": f["properties"].get("unid") or f["id"],
             "time": f["properties"]["time"],
-            "magnitude": f["properties"].get("mag"),
+            "magnitude": to_float(f["properties"].get("mag")),
             "place": f["properties"].get("flynn_region"),
-            "lat": f["properties"].get("lat"),
-            "lon": f["properties"].get("lon"),
-            "depth_km": f["properties"].get("depth"),
+            "lat": to_float(f["properties"].get("lat")),
+            "lon": to_float(f["properties"].get("lon")),
+            # Profondeur parfois absente chez l'EMSC : None (affichée « n/d »), jamais d'erreur.
+            "depth_km": to_float(f["properties"].get("depth")),
             "tsunami": None,
             "url": None,
         }

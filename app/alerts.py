@@ -3,10 +3,14 @@
 Chaque fonction `check_*` renvoie la liste des messages à envoyer et retient ce qui a
 déjà été signalé (fichier data/alerts_state.json) pour ne jamais envoyer deux fois la même alerte.
 """
+import difflib
 import json
 import logging
+import math
 import os
-from datetime import datetime, timezone
+import re
+import unicodedata
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -129,72 +133,177 @@ async def morning_brief(now: datetime | None = None) -> str:
     return "\n".join(line for line in lines if line)
 
 
+MOVE_WINDOW = timedelta(hours=24)
+
+
 async def check_price_moves(state: State, now: datetime | None = None) -> list[str]:
-    """Alerte quand une valeur suivie dépasse ±X % sur 24 h (une fois par palier et par jour)."""
+    """Alerte quand une valeur suivie dépasse ±X % (une fois par palier et par sens sur 24 h glissantes).
+
+    La variation crypto est calculée sur 24 h glissantes : la mémoire suit donc une fenêtre de 24 h
+    (et non le jour de Paris, sinon la même baisse était réannoncée chaque nuit à minuit).
+    Dans la fenêtre, on ne réalerte que si la variation franchit un palier de plus.
+    """
     now = now or datetime.now(timezone.utc)
     step = config.MOVE_ALERT_PCT
-    day = now.astimezone(PARIS).date().isoformat()
-    sent = state.data.setdefault("moves", {})
-    sent = state.data["moves"] = {k: v for k, v in sent.items() if k.startswith(day)}
-    moves: list[tuple[str, str, float | None, float, Result]] = []
+    sent = state.data.get("moves")
+    sent = state.data["moves"] = {
+        k: v for k, v in (sent if isinstance(sent, dict) else {}).items()
+        if isinstance(v, dict) and now - datetime.fromisoformat(v["at"]) < MOVE_WINDOW
+    }
+    # (symbole, unité, prix, variation, résultat, période, clé de séance)
+    moves: list[tuple[str, str, float | None, float, Result, str, str]] = []
 
     if config.WATCHLIST_CRYPTO:
         ranking = await needs.crypto_ranking(100)
         for c in ranking.data or []:
             if c["symbol"] in config.WATCHLIST_CRYPTO and c["change_24h_pct"] is not None:
-                moves.append((c["symbol"], "$", c["price_usd"], c["change_24h_pct"], ranking))
+                moves.append((c["symbol"], "$", c["price_usd"], c["change_24h_pct"], ranking, "sur 24 h", ""))
     if config.WATCHLIST_STOCKS:
         status = await needs.us_market_status(now)
         if status["is_open"]:
             quotes = await needs.stock_quotes(config.WATCHLIST_STOCKS)
+            # Variation des actions = depuis la clôture de la veille : une mémoire par séance.
+            session = now.astimezone(needs.NEW_YORK).date().isoformat()
             for q in quotes.data or []:
-                if q["change_pct"] is not None:
-                    moves.append((q["symbol"], "$", q["price"], q["change_pct"], quotes))
+                if q.get("change_pct") is not None:
+                    moves.append((q["symbol"], "$", q["price"], q["change_pct"], quotes, "sur la séance", f":{session}"))
 
     messages = []
-    for symbol, unit, price, change, result in moves:
+    for symbol, unit, price, change, result, period, session in moves:
         level = int(abs(change) // step)
-        key = f"{day}:{symbol}:{'+' if change > 0 else '-'}"
-        if level >= 1 and level > sent.get(key, 0):
-            sent[key] = level
+        key = f"{symbol}:{'+' if change > 0 else '-'}{session}"
+        if level >= 1 and level > sent.get(key, {}).get("level", 0):
+            sent[key] = {"level": level, "at": now.isoformat(timespec="seconds")}
             arrow = "📈" if change > 0 else "📉"
-            messages.append(f"{arrow} **{symbol}** {_pct(change)} sur la journée, à {_money(price, unit)}\n{_footer(result)}")
+            messages.append(f"{arrow} **{symbol}** {_pct(change)} {period}, à {_money(price, unit)}\n{_footer(result)}")
     return messages
 
 
+QUAKE_SAME_MINUTES = 10    # même séisme vu par deux agences : heures d'origine à quelques minutes près,
+QUAKE_SAME_MAGNITUDE = 0.5  # magnitudes un peu différentes (méthodes de calcul propres à chaque agence)
+QUAKE_SAME_KM = 100        # et épicentres à moins de 100 km
+
+
+def _quake_fingerprint(q: dict) -> dict | None:
+    """Empreinte indépendante de la source (USGS ou EMSC n'ont pas les mêmes identifiants)."""
+    try:
+        moment = datetime.fromisoformat(str(q["time"]).replace("Z", "+00:00"))
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        return {"t": moment.timestamp(), "m": float(q["magnitude"]),
+                "lat": float(q["lat"]) if q.get("lat") is not None else None,
+                "lon": float(q["lon"]) if q.get("lon") is not None else None}
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _km(a: dict, b: dict) -> float:
+    lat1, lon1, lat2, lon2 = map(math.radians, (a["lat"], a["lon"], b["lat"], b["lon"]))
+    h = math.sin((lat2 - lat1) / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2
+    return 6371 * 2 * math.asin(min(1.0, math.sqrt(h)))
+
+
+def _same_quake(a: dict, b: dict) -> bool:
+    if abs(a["t"] - b["t"]) > QUAKE_SAME_MINUTES * 60 or abs(a["m"] - b["m"]) > QUAKE_SAME_MAGNITUDE + 1e-9:
+        return False
+    if None in (a["lat"], a["lon"], b["lat"], b["lon"]):
+        return True  # sans coordonnées, l'heure et la magnitude suffisent
+    return _km(a, b) <= QUAKE_SAME_KM
+
+
+def _quake_message(q: dict, result: Result) -> str:
+    try:
+        magnitude = f"M{float(q['magnitude']):.1f}"
+    except (KeyError, TypeError, ValueError):
+        magnitude = "de magnitude inconnue"
+    try:
+        depth = f"profondeur {float(q['depth_km']):.0f} km"
+    except (KeyError, TypeError, ValueError):
+        depth = "profondeur n/d"
+    try:
+        when = _time_fr(q.get("time"))
+    except (TypeError, ValueError):
+        when = "heure inconnue"
+    return (f"🌍 **Séisme {magnitude}** — {q.get('place') or 'lieu inconnu'} ({when}, {depth})"
+            f"{' · ⚠️ alerte tsunami' if q.get('tsunami') else ''}\n{q.get('url') or ''}\n{_footer(result)}")
+
+
 async def check_earthquakes(state: State) -> list[str]:
-    """Nouveaux séismes forts (magnitude ≥ JARVIS_QUAKE_MIN_MAGNITUDE)."""
+    """Nouveaux séismes forts (magnitude ≥ JARVIS_QUAKE_MIN_MAGNITUDE).
+
+    Un séisme déjà annoncé n'est pas réannoncé quand on passe de l'USGS à l'EMSC (ou l'inverse) :
+    en plus des identifiants, on compare heure, magnitude et position.
+    """
     result = await needs.earthquakes(config.QUAKE_MIN_MAGNITUDE, 24)
     if result.data is None:
         return []
     first_run = "quakes" not in state.data
     seen = set(state.seen("quakes"))
-    new = [q for q in result.data if q["id"] not in seen]
-    state.remember("quakes", [q["id"] for q in new])
-    if first_run:
-        return []  # au premier lancement, on mémorise sans renvoyer l'historique
-    return [
-        f"🌍 **Séisme M{q['magnitude']}** — {q['place']} ({_time_fr(q['time'])}, profondeur {q['depth_km']:.0f} km)"
-        f"{' · ⚠️ alerte tsunami' if q['tsunami'] else ''}\n{q['url'] or ''}\n{_footer(result)}"
-        for q in reversed(new)
-    ]
+    known = [f for f in state.data.get("quake_events", []) if isinstance(f, dict)]
+    messages, new_ids, new_prints = [], [], []
+    for q in reversed(result.data):  # du plus ancien au plus récent
+        if q.get("id") in seen or q.get("id") in new_ids:
+            continue
+        fingerprint = _quake_fingerprint(q)
+        duplicate = fingerprint is not None and any(_same_quake(fingerprint, k) for k in known + new_prints)
+        if not first_run and not duplicate:
+            try:
+                messages.append(_quake_message(q, result))
+            except Exception:  # message impossible à écrire : on réessaiera au prochain passage
+                log.exception("Séisme %s : message impossible à construire", q.get("id"))
+                continue
+        # On ne retient le séisme qu'une fois son message construit.
+        new_ids.append(q.get("id"))
+        if fingerprint is not None:
+            new_prints.append(fingerprint)
+    state.remember("quakes", new_ids)
+    state.data["quake_events"] = (known + new_prints)[-MAX_SEEN:]
+    return messages  # au premier lancement, on mémorise sans renvoyer l'historique
+
+
+def _norm_title(title: str) -> str:
+    text = unicodedata.normalize("NFKD", title.lower())
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", text).split())
+
+
+def _similar_title(a: str, b: str) -> bool:
+    """Même titre aux détails près (ponctuation, casse, accents, mot ajouté par une autre source)."""
+    if a == b:
+        return True
+    if min(len(a), len(b)) < 25:  # titres courts : seule l'égalité compte
+        return False
+    matcher = difflib.SequenceMatcher(None, a, b)
+    return matcher.real_quick_ratio() >= 0.9 and matcher.quick_ratio() >= 0.9 and matcher.ratio() >= 0.9
 
 
 async def check_news(state: State) -> list[str]:
-    """Nouvelles actus : marché global, et actus des actions suivies si la clé Finnhub est là."""
+    """Nouvelles actus : marché global, et actus des actions suivies si la clé Finnhub est là.
+
+    Les doublons sont repérés par titre+lien, mais aussi par titre normalisé : quand la source
+    principale tombe et que le secours prend le relais, liens et titres diffèrent un peu.
+    """
     batches = [("Marché", await needs.market_news(20))]
     for symbol in config.WATCHLIST_STOCKS:
         batches.append((symbol, await needs.company_news(symbol, 5)))
     first_run = "news" not in state.data
+    if first_run and all(result.data is None for _, result in batches):
+        return []  # toutes les sources en panne : on garde le premier lancement pour plus tard
     seen = set(state.seen("news"))
-    messages, new_keys = [], []
+    seen_titles = list(state.data.get("news_titles", []))
+    messages, new_keys, new_titles = [], [], []
     for label, result in batches:
         for item in result.data or []:
+            if not item.get("title"):
+                continue
             # Le titre fait partie de la clé : certains flux réutilisent le même lien.
             key = f"{item['title']}|{item['url']}"
-            if not item["title"] or key in seen or key in new_keys:
+            title = _norm_title(item["title"])
+            if key in seen or key in new_keys or any(_similar_title(title, t) for t in seen_titles + new_titles):
                 continue
             new_keys.append(key)
+            new_titles.append(title)
             messages.append(f"📰 [{label}] **{item['title']}**\n<{item['url']}>\n{_footer(result)}")
     state.remember("news", new_keys)
+    state.data["news_titles"] = (seen_titles + new_titles)[-MAX_SEEN:]
     return [] if first_run else messages[:10]
