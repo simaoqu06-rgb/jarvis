@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from app import alerts, config
 from app.core.outbox import Outbox
+from app.lab import grade as lab_grade
 from app.lab import morning as lab_morning
 from app.notify import bot, discord
 from app.sources import alpaca
@@ -32,6 +33,7 @@ MINUTE = 60
 
 state = alerts.State(config.ALERTS_STATE_PATH)
 book = trading.Book()
+trading.taken_trades = lambda: book.trades  # le grade tient compte du risque déjà ouvert et du jour
 paper_book = paper.PaperBook()
 outbox = Outbox(config.OUTBOX_PATH, discord.split_message)
 _background: set[asyncio.Task] = set()
@@ -242,6 +244,13 @@ async def tick_lab(now: datetime | None = None) -> dict | None:
             bot.offer_lab_text(ev["texte"])
         elif enabled():
             outbox.add(ev["texte"], "labo", key=f"labo:{ev['id']}")
+            _kick_outbox()
+    # Grade : une hausse de lettre attend l'accord de Simão (en privé, boutons Approuver / Refuser).
+    for p in lab_grade.sync_proposals(proposals):
+        if bot.enabled():
+            bot.offer(p)
+        elif enabled():
+            outbox.add(f"🏅 {PR.text(p)}\n-# À approuver ou refuser dans le cockpit.", "labo", key=f"grade:{p['id']}")
             _kick_outbox()
     return digest
 

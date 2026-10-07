@@ -35,7 +35,7 @@ sont tous validés ; **attendre** si le déclencheur est incomplet ; **contre la
 
 | Règle du manuel | Ce que fait JARVIS | Code |
 |---|---|---|
-| Risquer 3 % du capital par trade (5 % = agressif) | `JARVIS_RISK_PCT=3` par défaut | `service.sizing` |
+| Risquer 3 % du capital par trade (5 % = agressif) | plafond du grade de JARVIS : A 3 %, S 5 % (moins en dessous, 0 % en F/E) ; `JARVIS_RISK_PCT=3` reste le défaut du labo | `lab.grade.risk_now`, `service.sizing` |
 | La taille découle du stop, le levier découle de la taille | Taille = risque ÷ distance au stop, levier = taille ÷ capital | `service.sizing` |
 | « Ne soyez pas pressé de passer votre SL au seuil de rentabilité » | Stop inchangé après le TP1, remonté à l'entrée après le TP2 | `service.apply_bars` |
 

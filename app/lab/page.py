@@ -1,6 +1,6 @@
 """Page « Labo » du cockpit (/cockpit/labo) : rendue côté serveur, en lecture seule, sans script.
 
-Avancement du rejeu, chiffres clés, méthode en place et challenger, dernières propositions du labo et
+Grade de JARVIS (F- à S+, risque permis), avancement du rejeu, chiffres clés, méthode en place et challenger, dernières propositions du labo et
 leur état, dernières règles testées, dernier message du matin. Les décisions se prennent dans le
 cockpit principal (propositions en attente), sur Discord (boutons, `!oui N` / `!non N`).
 """
@@ -45,9 +45,39 @@ def _r(x, digits: int = 3) -> str:
     return f'<span class="num {cls}">{_e(M.fr(x, digits))}</span>'
 
 
-def render(st: dict, proposals: list[dict], rules: list[dict], morning: dict | None, dm: bool) -> str:
+def _proposal_name(p: dict) -> str:
+    return p.get("nom") or f"{p.get('key')} → {p.get('value')}"
+
+
+def _grade_card(grade: dict | None) -> str:
+    from app.lab import grade as GR
+
+    marches = (grade or {}).get("marches") or {}
+    if not marches:
+        return '<div class="card"><h2>🏅 Grade de JARVIS</h2><div class="small muted">Pas encore calculé.</div></div>'
+    cells = []
+    for market in GR.MARKETS:
+        g = marches.get(market)
+        if not g:
+            continue
+        m = g.get("mesure") or {}
+        detail = (f'{_r(m.get("esperance_r"))} par trade sur {m.get("trades")} trades · réussite '
+                  f'{round(100 * (m.get("reussite") or 0))} % · TP1 {round(100 * (m.get("tp1") or 0))} %'
+                  if not g.get("non_note") else _e(m.get("raison")))
+        flags = (" · ☠️ méthode morte" if g.get("morte") else " · 🆘 mode survie" if g.get("mode_survie") else "")
+        wait = (f'<div class="small">⏳ hausse vers {_e(GR.name(g["hausse"]["vers"]))} en attente de ton accord</div>'
+                if g.get("hausse") else "")
+        cells.append(f'<div><b>{_e(GR.MARKET_FR[market].capitalize())} : <span class="num">{_e(g["grade"])}</span></b>'
+                     f' <span class="small muted">mesuré {_e(m.get("grade"))}</span><div class="small">risque permis '
+                     f'{g["risque_grade"]:g} % (plafond {g["risque_max"]:g} %){flags}</div>'
+                     f'<div class="small muted">{detail}</div>{wait}</div>')
+    return f'<div class="card"><h2>🏅 Grade de JARVIS</h2><div class="grid">{"".join(cells)}</div></div>'
+
+
+def render(st: dict, proposals: list[dict], rules: list[dict], morning: dict | None, dm: bool,
+           grade: dict | None = None) -> str:
     """HTML complet de la page. `st` : lab_status.status() ; `proposals` : propositions du labo ;
-    `rules` : validator.list_rules ; `morning` : dernier point du matin."""
+    `rules` : validator.list_rules ; `morning` : dernier point du matin ; `grade` : lab_grade.json."""
     parts = []
     head = (f'<h1>🧪 Labo de performance</h1><div class="muted small">Lecture seule · '
             f'<a href="/cockpit">← cockpit</a> · message privé du matin : '
@@ -56,6 +86,7 @@ def render(st: dict, proposals: list[dict], rules: list[dict], morning: dict | N
     if not st.get("exists"):
         parts.append('<div class="card">Le labo n\'a pas encore démarré (aucune base).</div>')
         return _page(parts)
+    parts.append(_grade_card(grade))
     # Avancement
     cells = []
     for market, label in (("stock", "Actions"), ("crypto", "Crypto")):
@@ -103,7 +134,8 @@ def render(st: dict, proposals: list[dict], rules: list[dict], morning: dict | N
     parts.append(f'<div class="card"><h2>Méthode</h2><div class="grid">{block}</div></div>')
     # Propositions
     if proposals:
-        trs = "".join(f'<tr><td class="num">{p["id"]}</td><td>{_e(p.get("nom"))}<div class="small muted">{_e(p.get("why"))}</div>'
+        trs = "".join(f'<tr><td class="num">{p["id"]}</td><td>{_e(_proposal_name(p))}'
+                      f'<div class="small muted">{_e(p.get("why"))}</div>'
                       f'</td><td>{_e(STATUS_FR.get(p["status"], p["status"]))}</td><td class="small muted">'
                       f'{_e((p.get("created_at") or "")[:10])}</td></tr>' for p in proposals[:15])
         parts.append(f'<div class="card"><h2>Dernières propositions</h2><table><tr><th>N°</th><th>Règle</th><th>État</th>'

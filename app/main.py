@@ -23,6 +23,7 @@ from app import alerts, config, needs, scheduler
 from app.lab import brief as lab_brief
 from app.lab import catalysts as lab_catalysts
 from app.lab import db as lab_db
+from app.lab import grade as lab_grade
 from app.lab import lessons as lab_lessons
 from app.lab import method as lab_method
 from app.lab import morning as lab_morning
@@ -271,7 +272,7 @@ class TradeRequest(BaseModel):
     stop: float | None = None       # vide = niveau d'invalidation (dernier creux de swing, 1 à 3 ATR)
     targets: list[float] | None = None  # vide = prochaines résistances (supports pour un short)
     capital: float | None = None    # vide = JARVIS_CAPITAL ; sert à la taille de position
-    risk_pct: float | None = None   # vide = JARVIS_RISK_PCT (3 %)
+    risk_pct: float | None = None   # vide = risque proposé par le grade de JARVIS
     note: str | None = None
 
 
@@ -677,6 +678,30 @@ async def lab_lessons_submit(request: Request):
         raise HTTPException(429 if "file pleine" in str(exc) else 422, str(exc))
 
 
+@app.get("/api/lab/grade", dependencies=[Depends(lab_key)])
+def lab_grade_get(limit: int = Query(20, ge=1, le=200)):
+    """Grade de JARVIS par marché (officiel, mesuré, critères, risque permis, hausse en attente) et
+    historique des changements."""
+    conn = _lab_conn()
+    try:
+        return lab_grade.payload(conn) | {"historique": lab_grade.history(conn, limit=limit)}
+    finally:
+        conn.close()
+
+
+@app.post("/api/lab/grade/avis", dependencies=[Depends(lab_key)])
+async def lab_grade_avis(request: Request):
+    """Avis du council du soir sur le grade : {"marche", "ajustement": -1|0|1, "motifs", "voix"}.
+    Mis en file, appliqué par le worker : une baisse tout de suite, une hausse de lettre seulement avec
+    l'accord de Simão ; un avis par marché et par soirée."""
+    raw = await _lab_rule_body(request)
+    try:
+        return await asyncio.to_thread(lab_grade.enqueue_avis, lab_db.db_path(), raw,
+                                       lab_brief.soiree(datetime.now(timezone.utc)))
+    except lab_grade.AvisError as exc:
+        raise HTTPException(422, str(exc))
+
+
 @app.get("/api/lab/brief", dependencies=[Depends(lab_key)])
 def lab_brief_get():
     """Tout ce qu'il faut à la routine du soir en un appel (< ~20 Ko)."""
@@ -719,8 +744,9 @@ def cockpit_lab(request: Request):
             rules = []
         finally:
             conn.close()
-    proposals = [p for p in reversed(PR.proposals.items) if p.get("kind") == "labo"]
-    return HTMLResponse(lab_page.render(st, proposals, rules, lab_morning.shared_state().latest(), lab_morning.dm_on()))
+    proposals = [p for p in reversed(PR.proposals.items) if p.get("kind") in ("labo", "grade")]
+    return HTMLResponse(lab_page.render(st, proposals, rules, lab_morning.shared_state().latest(), lab_morning.dm_on(),
+                                        lab_grade.current()))
 
 
 @app.get("/cockpit", response_class=HTMLResponse, include_in_schema=False)

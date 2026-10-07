@@ -287,8 +287,29 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
   (`app/lab/live.py` : note sans la part catalyseur, volume relatif et variation de la veille, régime
   de SPY) ; champs absents traités comme « non vérifiés ». Fichier absent ou illisible : aucun filtre,
   une ligne de journal, le direct continue. `!plan` et le cockpit ne sont pas filtrés (demandes à toi).
-- **Cockpit** : page `/cockpit/labo` (lecture seule) : avancement, chiffres clés, méthode en place et
-  challenger, dernières propositions, règles testées, dernier message du matin.
+- **Cockpit** : page `/cockpit/labo` (lecture seule) : grade, avancement, chiffres clés, méthode en
+  place et challenger, dernières propositions, règles testées, dernier message du matin.
+- **Grade de JARVIS** (`app/lab/grade.py`, barème validé par Simão le 2026-10-07) : de F- à S+, la
+  preuve mesurée par le worker (sans jeton) que la méthode en place gagne, par marché.
+  - Lettre = espérance nette en R sur les 60 derniers jours de bourse de la méthode en place (hors
+    échantillon) : S ≥ +0,40 R, A ≥ +0,25, B ≥ +0,15, C ≥ +0,05 (borne basse de l'IC95 > 0 dès C),
+    D positive mais pas prouvée, E entre −0,10 et 0, F < −0,10. Moins de 100 trades sur 10 jours :
+    « non noté ».
+  - − / + : stabilité (pire série de pertes ≤ 1,25 × celle attendue, écart ≤ 0,15 R entre les deux
+    moitiés de la fenêtre) et délais calibrés (40 à 65 % tenus). Réussite et % de TP sont affichés,
+    sans effet sur le grade (un taux de réussite se gonfle en rapprochant le TP1).
+  - Risque proposé par plan (`!plan`, cockpit) : F, E, non noté 0 % (plan en observation), D 0,25 %,
+    puis ¼ de Kelly (borne basse de l'espérance / variance des R) plafonné à C 1 %, B 1,5 %, A 3 %,
+    S 5 %. Plus un budget : risque ouvert sur les trades pris ≤ 4 %, arrêt de la journée à −3 R. Un
+    risque demandé explicitement (`risk_pct`) est gardé.
+  - Changements : baisse immédiate ; hausse après au moins 150 nouveaux trades sur 5 nouveaux jours,
+    et une hausse de **lettre** attend ton accord (proposition Approuver / Refuser en privé, `!oui N`) ;
+    à partir de C, une baisse de 20 R depuis le sommet ramène tout de suite en D (coupe-circuit) ; une
+    nouvelle méthode repart de « non noté ». IC95 entièrement sous zéro sur 150 trades : méthode
+    déclarée morte (message). E, F ou morte : mode survie de la routine du soir.
+  - Le council du soir contrôle le grade (`POST /api/lab/grade/avis`, un avis par marché et par soir,
+    un cran au plus : une baisse s'applique, une hausse de lettre passe par ton accord).
+  - `!grade`, `GET /api/lab/grade` (historique), page `/cockpit/labo`, ligne 🏅 sous chaque plan.
 
 ## Commandes Discord
 
@@ -304,6 +325,7 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
 | `!regle` | réglages actuels |
 | `!labo` | état du labo (rejeu, espérance, règles, méthode en place, challenger, propositions du labo) |
 | `!lecons` | carnet des leçons du labo : confirmées, à confirmer, démenties, avec leur preuve chiffrée |
+| `!grade` | grade de JARVIS (F- à S+) par marché, de quoi il est fait, risque permis, derniers changements |
 | `!aide` | liste des commandes |
 
 Le bot ne répond qu'aux comptes de `JARVIS_DISCORD_OWNER_ID`. Mise en place : [DEPLOY.md](DEPLOY.md).
