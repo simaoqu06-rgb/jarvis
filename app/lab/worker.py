@@ -42,6 +42,10 @@ log = logging.getLogger("app.lab.worker")
 PARIS = ZoneInfo("Europe/Paris")
 TICK_SECONDS = 600
 CHUNK_DAYS = {"nuit": 20, "jour": 4, "seance": 1}
+# Durée maximale du rejeu par marché et par passage (secondes) : un jour d'actions coûte 2 à 5 min ;
+# sans borne, 20 jours la nuit retenaient la crypto et le Labo 2 plus d'une heure, et une mise à
+# jour du serveur coupait le passage avant qu'ils ne tournent.
+REPLAY_SECONDS = {"nuit": 900, "jour": 300, "seance": 120}
 MAX_LIVE_DAYS_PER_TICK = 5
 KEY_WARNING_SECONDS = 3600
 # Labo 2 : jours de mouvements calculés, appels Finnhub, règles validées et âge maximal des
@@ -83,6 +87,18 @@ def period(now: datetime) -> str:
     if CO.CAL.session_open(now):
         return "seance"
     return "jour"
+
+
+def replay_seconds(now: datetime, summary_last_day: str | None) -> float:
+    """Durée permise au rejeu d'un marché à ce passage : REPLAY_SECONDS de la période, sans déborder
+    sur l'heure du résumé du soir (22 h 30 à Paris) tant qu'il n'est pas fait, pour qu'il soit prêt
+    avant la routine du soir (22 h 52)."""
+    box = float(REPLAY_SECONDS[period(now)])
+    local = now.astimezone(PARIS)
+    target = datetime.combine(local.date(), SUM.SUMMARY_AT, PARIS)
+    if summary_last_day != local.date().isoformat() and local < target:
+        box = min(box, (target - local).total_seconds())
+    return box
 
 
 def replay_budget(now: datetime) -> int:
@@ -179,13 +195,20 @@ async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, tra
             log.warning("Labo : direct %s en échec : %s: %s", market, type(exc).__name__, exc)
     start, end = replay_bounds(live_start, replay_sessions())
     budget = replay_budget(now)
+    started = clock.monotonic()
+
+    def current() -> datetime:  # `now` avancé du temps déjà passé dans ce passage
+        return now + timedelta(seconds=clock.monotonic() - started)
+
     for market in markets:
         try:
-            report["replay"][market] = await R.replay(start, end, market, db, collect, budget, now, transport)
+            report["replay"][market] = await R.replay(
+                start, end, market, db, collect, budget, now, transport,
+                max_seconds=replay_seconds(current(), db.get("summary", "last_day")))
         except Exception as exc:
             log.warning("Labo : rejeu %s en échec : %s: %s", market, type(exc).__name__, exc)
         heartbeat.beat()
-    report["labo2"] = await lab2(db, now, collect)
+    report["labo2"] = await lab2(db, current(), collect)
     return report
 
 

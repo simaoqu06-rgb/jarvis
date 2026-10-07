@@ -8,6 +8,7 @@ La collecte des données (réseau) est séparée du calcul : `collect=False` tra
 """
 import asyncio
 import logging
+import time
 from datetime import date, datetime, timedelta, timezone
 
 from app.lab import collector as CO
@@ -127,8 +128,11 @@ def day_failed(db: LabDB, job: str, day: date, exc: Exception) -> bool:
 
 
 async def replay(start_day: date, end_day: date, market: str, db: LabDB | None = None, collect: bool = True,
-                 max_days: int | None = None, now: datetime | None = None, transport=None) -> int:
+                 max_days: int | None = None, now: datetime | None = None, transport=None,
+                 max_seconds: float | None = None) -> int:
     """Rejoue les jours de start_day à end_day, en reprenant après le dernier jour validé.
+    `max_days` et `max_seconds` bornent l'appel (au moins un jour est tenté) : le reste du passage
+    du worker (crypto, Labo 2, leçons) ne doit pas attendre des heures derrière le rejeu.
     Renvoie le nombre de jours traités pendant cet appel."""
     db = db or LabDB()
     now = now or datetime.now(timezone.utc)
@@ -143,8 +147,11 @@ async def replay(start_day: date, end_day: date, market: str, db: LabDB | None =
         # Journalier de tout l'univers en une passe pour toute la plage (pas une passe par jour).
         await ensure_daily_range(db, market, days[0], days[-1], now, transport)
     done = 0
+    started = time.monotonic()
     for day in days:
         if max_days is not None and done >= max_days:
+            break
+        if max_seconds is not None and done and time.monotonic() - started >= max_seconds:
             break
         try:
             universe = await prepare_day(db, market, day, now, transport) if collect else None

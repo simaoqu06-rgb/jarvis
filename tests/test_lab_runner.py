@@ -53,6 +53,35 @@ async def test_rejeu_par_morceaux_et_jour_pas_encore_pret(db):
     assert await R.replay(START, END, "stock", db, collect=False, now=early) == 0  # clôture + 10 min : trop tôt
 
 
+async def test_rejeu_borne_en_temps_au_moins_un_jour(db, monkeypatch):
+    clock = iter(range(0, 10_000, 400))  # chaque lecture de l'horloge du rejeu avance de 400 s
+
+    class FakeTime:
+        @staticmethod
+        def monotonic():
+            return next(clock)
+    monkeypatch.setattr(R, "time", FakeTime)
+    # Départ à 0 ; après le 1er jour, 400 s < 600 : on continue ; après le 2e, 800 s : on s'arrête.
+    assert await R.replay(START, END, "stock", db, collect=False, now=NOW, max_seconds=600) == 2
+    assert await R.replay(START, END, "stock", db, collect=False, now=NOW, max_seconds=0) == 1  # au moins un jour
+
+
+def test_rejeu_s_arrete_avant_le_resume_du_soir():
+    from zoneinfo import ZoneInfo
+
+    paris = ZoneInfo("Europe/Paris")
+    at = datetime(2026, 10, 7, 22, 25, tzinfo=paris)
+    assert W.replay_seconds(at, None) == 300  # 5 min avant 22 h 30 : le résumé passe avant la routine
+    assert W.replay_seconds(at, "2026-10-07") == W.REPLAY_SECONDS["nuit"]  # résumé déjà fait
+    assert W.replay_seconds(datetime(2026, 10, 7, 22, 40, tzinfo=paris), None) == W.REPLAY_SECONDS["nuit"]
+    assert W.replay_seconds(datetime(2026, 10, 7, 11, 0, tzinfo=paris), None) == W.REPLAY_SECONDS["jour"]
+
+
+def test_rejeu_borne_par_periode():
+    assert W.REPLAY_SECONDS["nuit"] > W.REPLAY_SECONDS["jour"] > W.REPLAY_SECONDS["seance"] > 0
+    assert set(W.REPLAY_SECONDS) == set(W.CHUNK_DAYS)
+
+
 async def test_journee_en_direct_idempotente(db):
     out = await R.run_live_day(END, db, markets=("stock",), collect=False, now=NOW)
     assert out == {"stock": 3}
