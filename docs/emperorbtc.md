@@ -58,3 +58,12 @@ Chaque signal n'est envoyé qu'une fois par trade, et seulement quand le trade e
 - Lignes de tendance, tête-épaules, cup and handle, triangles : à juger sur le graphique.
 - Journal de trading avec statistiques (taux de réussite réel de Simão) : le journal existe dans le
   cockpit, les statistiques viendront ensuite.
+
+## Mesuré au labo v2 (déclaration n° 2, 7 octobre 2026)
+
+Les entrées du chapitre « Support et résistance » sont rejouées sur deux ans et comparées à un témoin
+aléatoire avant de servir en direct (`app/lab/strategies.py`, déclaration dans
+[labo-strategies.md](labo-strategies.md)) : zones S/R tracées sur les creux et sommets de réaction
+(au moins 2 contacts, résistance cassée = support, pivots, veille), cassure d'une zone puis retest
+(solution 1), rebond confirmé par la cassure de la résistance au-dessus (solution 2), et une sortie
+EmperorBTC (prochaines résistances, sortie sur signe de retournement). `!strategies` sur Discord.

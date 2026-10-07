@@ -110,9 +110,9 @@ def run_day(db: LabDB, market: str, day: date, origin: str, universe: list[dict]
         # calculé ici borne le rattrapage des jours traités avant le labo v2 (rattrapage.py).
         if market == "stock" or ST.crypto_complete(day, now_ts):
             db.replace_strat(origin, market, day.isoformat(), strat)
-            key = f"inline_from:{origin}"
-            if not db.get(f"strats:{market}", key):
-                db.set(f"strats:{market}", key, day.isoformat())
+            key, job_v2 = f"inline_from:{origin}", ST.progress_job(market)
+            if not db.get(job_v2, key):
+                db.set(job_v2, key, day.isoformat())
         db.set(job, f"day:{day.isoformat()}", {"trades": len(rows), "errors": len(errors),
                                                "error_symbols": [e["symbol"] for e in errors[:10]]})
         if progress:

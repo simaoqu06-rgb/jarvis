@@ -42,7 +42,7 @@ TRADES_DDL = """CREATE TABLE IF NOT EXISTS {name} (
 STRAT_COLUMNS = ("origin", "market", "symbol", "day", "strategy", "slot", "signal_at", "entry", "stop", "risk_pct",
                  "triggered", "filled_at", "entry_mode", "minutes_to_fill", "exit_reason", "r_net", "r_gross",
                  "tp1_hit", "mfe_r", "mae_r", "r_sans_be", "r_2r", "r_suiveur", "r_glisse_x2", "r_glisse_x3",
-                 "r_retard", "r_manque", "temoin_r", "temoin_triggered", "gap_open_pct", "rank")
+                 "r_retard", "r_manque", "temoin_r", "temoin_triggered", "gap_open_pct", "rank", "r_emperor")
 STRAT_DDL = """CREATE TABLE IF NOT EXISTS {name} (
     id INTEGER PRIMARY KEY,
     origin TEXT NOT NULL CHECK (origin IN ('replay', 'live')),
@@ -51,7 +51,7 @@ STRAT_DDL = """CREATE TABLE IF NOT EXISTS {name} (
     triggered INTEGER, filled_at INTEGER, entry_mode TEXT, minutes_to_fill REAL, exit_reason TEXT,
     r_net REAL, r_gross REAL, tp1_hit INTEGER, mfe_r REAL, mae_r REAL,
     r_sans_be REAL, r_2r REAL, r_suiveur REAL, r_glisse_x2 REAL, r_glisse_x3 REAL, r_retard REAL, r_manque REAL,
-    temoin_r REAL, temoin_triggered INTEGER, gap_open_pct REAL, rank INTEGER,
+    temoin_r REAL, temoin_triggered INTEGER, gap_open_pct REAL, rank INTEGER, r_emperor REAL,
     UNIQUE (origin, market, symbol, day, strategy, slot)
 );
 CREATE INDEX IF NOT EXISTS {name}_day ON {name} (market, day);"""
@@ -141,6 +141,9 @@ MIGRATIONS = {
     "lessons": (("base_trade_id", "INTEGER"),),
     "method_versions": (("base", "TEXT"), ("rules", "TEXT"), ("role", "TEXT"), ("started_ts", "INTEGER"),
                         ("decided_at", "TEXT"), ("note", "TEXT")),
+    # Labo v2, déclaration n° 2 : sortie EmperorBTC.
+    "strat_trades": (("r_emperor", "REAL"),),
+    "strat_trades_sealed": (("r_emperor", "REAL"),),
 }
 GENERATION_SQL = "SELECT version FROM method_versions WHERE base IS NULL ORDER BY created_at DESC, version DESC LIMIT 1"
 LEGACY_VERSION_SQL = "SELECT version FROM method_versions ORDER BY created_at DESC, version DESC LIMIT 1"

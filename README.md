@@ -317,7 +317,10 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
 
 v1 achète tout l'univers à heure fixe sans attendre de signal. Le labo v2 mesure, à côté d'elle et sur
 les mêmes jours, des stratégies qui attendent leur déclencheur : pullback en tendance + bougie de
-confirmation, cassure du range d'ouverture (15 et 30 min), cassure du plus haut de la veille puis retest.
+confirmation, cassure du range d'ouverture (15 et 30 min), cassure du plus haut de la veille puis retest,
+et, depuis la déclaration n° 2, les supports et résistances de la formation EmperorBTC (zones tracées sur
+les creux et sommets, pivots, veille) : cassure d'une zone puis retest, rebond confirmé par la cassure de
+la résistance au-dessus, et une sortie EmperorBTC (prochaines résistances, signes de retournement).
 Liste, seuils et sorties sont déclarés d'avance : [docs/labo-strategies.md](docs/labo-strategies.md).
 
 - Chaque trade est mesuré avec quatre sorties (gestion v1, sans break-even, 2 R, stop suiveur), trois
