@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS lessons (
 MIGRATIONS = {
     "rules": (("pourquoi", "TEXT"), ("council", "TEXT"), ("soiree", "TEXT"), ("decision", "TEXT"),
               ("decided_at", "TEXT")),
+    "lessons": (("base_trade_id", "INTEGER"),),
     "method_versions": (("base", "TEXT"), ("rules", "TEXT"), ("role", "TEXT"), ("started_ts", "INTEGER"),
                         ("decided_at", "TEXT"), ("note", "TEXT")),
 }

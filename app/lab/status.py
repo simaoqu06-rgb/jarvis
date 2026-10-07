@@ -77,8 +77,13 @@ def headline(conn: sqlite3.Connection) -> dict:
         out["stats"] = {"declenches": g.get("declenches"), "esperance_r": g.get("esperance_r"), "ic95": g.get("ic95"),
                         "version": (cached.get("filtres") or {}).get("version"), "calcule_le": cached.get("calcule_le")}
     try:
-        row = conn.execute("SELECT COUNT(*), SUM(news_status = 'ok'), SUM(catalyst_type IS NULL) FROM catalysts").fetchone()
-        out["fiches"] = {"total": row[0], "avec_actus": row[1] or 0, "a_classer": row[2] or 0}
+        # À classer : fiches qui ont leurs actus et pas de type. Les autres attendent leurs actus
+        # (a_chercher) ou n'en auront pas (au-delà des ~12 mois de Finnhub, aucune trouvée, erreur).
+        row = conn.execute("SELECT COUNT(*), SUM(news_status = 'ok'), SUM(news_status = 'ok' AND catalyst_type IS NULL), "
+                           "SUM(news_status = 'a_chercher'), SUM(news_status NOT IN ('ok', 'a_chercher')) "
+                           "FROM catalysts").fetchone()
+        out["fiches"] = {"total": row[0], "avec_actus": row[1] or 0, "a_classer": row[2] or 0,
+                         "actus_a_chercher": row[3] or 0, "sans_actus": row[4] or 0}
     except sqlite3.Error:
         pass
     out["regles"] = V.counts(conn)
@@ -109,7 +114,10 @@ def text(st: dict) -> str:
                      + f" sur {stt.get('declenches') or 0} trades déclenchés (méthode {stt.get('version') or 'n/d'})")
     fiches, regles = l2.get("fiches"), l2.get("regles") or {}
     if fiches is not None or regles:
-        lines.append(f"Fiches catalyseurs : {(fiches or {}).get('total', 0)} · règles : {regles.get('en_attente', 0)} "
+        f = fiches or {}
+        detail = (f" ({f.get('a_classer', 0)} à classer, {f.get('actus_a_chercher', 0)} en attente d'actus, "
+                  f"{f.get('sans_actus', 0)} sans actus)") if f.get("total") else ""
+        lines.append(f"Fiches catalyseurs : {f.get('total', 0)}{detail} · règles : {regles.get('en_attente', 0)} "
                      f"en attente, {regles.get('validee', 0) + regles.get('rejetee', 0)} testées")
     if st.get("methode"):
         from app.lab import method as M

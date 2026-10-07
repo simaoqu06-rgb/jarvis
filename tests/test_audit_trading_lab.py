@@ -221,3 +221,19 @@ async def test_retour_dans_l_univers_ne_comble_pas_le_trou(tmp_path, monkeypatch
     assert min(asked).timestamp() >= start and len(asked) == 2
     assert db.get("cov5:stock", "AAA") == [start, end]
     assert db.conn.execute("SELECT COUNT(*) FROM bars WHERE tf = 5").fetchone()[0] == 0
+
+
+# --- Forward-test : remplissage partiel puis annulation signalé une fois -------------------------
+
+def test_remplissage_partiel_signale_une_seule_fois():
+    leg = {"name": "TP1", "qty": 10, "filled_at": None, "fill_price": None, "exit": None}
+    PA.apply_order(leg, {"status": "canceled", "filled_qty": "4", "legs": []})
+    assert leg["cancelled"] and leg["partial_qty"] == 4.0
+    book = PA.PaperBook(None)
+    book.entries.append({"symbol": "ABC", "legs": [leg]})
+    warnings = PA.partial_warnings(book)
+    assert len(warnings) == 1 and "4 sur 10" in warnings[0]
+    assert PA.partial_warnings(book) == []
+    other = {"name": "TP2", "qty": 10, "filled_at": None, "fill_price": None, "exit": None}
+    PA.apply_order(other, {"status": "canceled", "filled_qty": "0", "legs": []})
+    assert "partial_qty" not in other

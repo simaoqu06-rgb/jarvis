@@ -142,6 +142,10 @@ def apply_order(leg: dict, order: dict) -> None:
         leg["fill_price"] = float(order["filled_avg_price"])
     if order.get("status") in ("canceled", "expired", "rejected") and not leg["filled_at"]:
         leg["cancelled"] = True
+        # Rempli en partie puis annulé : une position fictive reste ouverte sans être suivie ici.
+        filled = float(order.get("filled_qty") or 0)
+        if filled > 0:
+            leg["partial_qty"] = filled
     leg["child_ids"] = [c["id"] for c in order.get("legs") or []]
     for child in order.get("legs") or []:
         if child.get("status") == "filled" and not leg["exit"]:
@@ -172,8 +176,22 @@ def finish(entry: dict) -> None:
     entry["status"] = "done"
 
 
-async def check(book: PaperBook, now: datetime | None = None, s=settings) -> None:
-    """Relit les ordres fictifs, annule les entrées pas déclenchées dans la séance, solde à l'horizon."""
+def partial_warnings(book: PaperBook) -> list[str]:
+    """Une alerte par jambe remplie en partie puis annulée (position fictive orpheline, à surveiller)."""
+    out = []
+    for entry in book.entries:
+        for leg in entry["legs"]:
+            if leg.get("partial_qty") and not leg.get("partial_warned"):
+                leg["partial_warned"] = True
+                out.append(f"⚠️ Forward-test : {entry['symbol']} ({leg.get('name', 'jambe')}) rempli en partie "
+                           f"({leg['partial_qty']:g} sur {leg['qty']}) puis annulé. Cette position fictive n'est pas "
+                           f"suivie par JARVIS : à solder sur le compte Alpaca fictif si elle reste ouverte.")
+    return out
+
+
+async def check(book: PaperBook, now: datetime | None = None, s=settings) -> list[str]:
+    """Relit les ordres fictifs, annule les entrées pas déclenchées dans la séance, solde à l'horizon.
+    Renvoie les alertes à envoyer (remplissages partiels)."""
     now = now or datetime.now(timezone.utc)
     for entry in book.active():
         try:
@@ -222,7 +240,9 @@ async def check(book: PaperBook, now: datetime | None = None, s=settings) -> Non
             still_open = [leg for leg in entry["legs"] if leg["fill_price"] is not None and not leg["exit"]]
         if not still_open and (entry.get("entry_cancelled") or not unfilled):
             finish(entry)
+    warnings = partial_warnings(book)
     book.save()
+    return warnings
 
 
 # --- Bilan et propositions de réglages ----------------------------------------------------

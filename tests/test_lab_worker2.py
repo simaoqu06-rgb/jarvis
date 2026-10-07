@@ -149,7 +149,7 @@ def test_chiffres_de_labo_dans_l_etat(db, monkeypatch):
     st = ST.status()
     l2 = st["labo2"]
     assert l2["stats"]["declenches"] > 0 and l2["stats"]["ic95"] and l2["stats"]["version"] == "v1"
-    assert l2["fiches"] == {"total": 1, "avec_actus": 1, "a_classer": 1} and l2["regles"]["en_attente"] == 1
+    assert l2["fiches"] == {"total": 1, "avec_actus": 1, "a_classer": 1, "actus_a_chercher": 0, "sans_actus": 0} and l2["regles"]["en_attente"] == 1
     txt = ST.text(st)
     assert "Espérance" in txt and "R [" in txt and "Fiches catalyseurs : 1" in txt and "1 en attente" in txt
     assert len(txt) < 600  # message Discord court

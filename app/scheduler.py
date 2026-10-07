@@ -205,7 +205,10 @@ async def tick_paper() -> None:
         return
     now = datetime.now(timezone.utc)
     if paper_book.active():
-        await paper.check(paper_book, now)
+        warnings = await paper.check(paper_book, now)
+        if warnings:
+            _queue(warnings, "forward-test")
+            _kick_outbox()
     if report_due(now) and paper_book.entries:
         week = now.astimezone(NEW_YORK).strftime("%G-W%V")
         _count_attempt("report", week)

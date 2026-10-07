@@ -118,24 +118,33 @@ def test_carnet_court_la_plus_faible_laisse_sa_place(db, monkeypatch):
 # --- Mesure ------------------------------------------------------------------------------------
 
 def test_effet_reel_confirme_et_sens_contraire_dementi(db):
-    synthetic_trades(db, n_days=120, per_day=20, effect=pivot_effect)
     good = add(db, lesson())
     bad = add(db, lesson(texte="Cassure de pivot : moins bonne que le reste", sens="defavorable"))
+    synthetic_trades(db, n_days=120, per_day=20, effect=pivot_effect)  # trades arrivés après les leçons
     assert L.measure_all(db) == 2
     good, bad = L.get(db.conn, good["id"]), L.get(db.conn, bad["id"])
     m = good["mesures"]
     assert good["etat"] == "confirmee" and bad["etat"] == "dementie"
     assert m["n"] > 300 and m["ecart_r"] > 0.2 and m["z"] > L.CONFIRM_Z and all(h > 0 for h in m["moities"])
-    assert m["tp1"] > m["tp1_ensemble"] and "trades :" in L.proof(good)
+    assert m["tp1"] > m["tp1_ensemble"] and "trades depuis la leçon :" in L.proof(good)
+
+
+def test_trades_d_avant_la_lecon_ne_la_confirment_pas(db):
+    synthetic_trades(db, n_days=120, per_day=20, effect=pivot_effect)  # ceux qui ont inspiré la leçon
+    seen = add(db, lesson())
+    L.measure_all(db)
+    seen = L.get(db.conn, seen["id"])
+    assert seen["etat"] == "a_confirmer" and seen["mesures"]["n"] == 0
+    assert seen["apres_trade"] == db.conn.execute("SELECT MAX(id) FROM trades").fetchone()[0]
 
 
 def test_sans_effet_dementie_apres_assez_de_trades_et_petit_echantillon_a_confirmer(db):
-    synthetic_trades(db, n_days=120, per_day=20, effect=pivot_effect)
     null = add(db, lesson(texte="Signal fort : meilleure espérance", quand=SIGNAL))
     rare = add(db, lesson(texte="Un seul symbole : meilleure espérance", quand={"field": "symbol", "op": "==", "value": "S001"},
                           markets=["stock"]))
     rare_day = add(db, lesson(texte="Signal extrême : meilleure espérance",
                               quand={"field": "context.signal", "op": ">", "value": 0.995}))
+    synthetic_trades(db, n_days=120, per_day=20, effect=pivot_effect)
     L.measure_all(db)
     assert L.get(db.conn, null["id"])["etat"] == "dementie"
     assert L.get(db.conn, rare_day["id"])["etat"] == "a_confirmer"
@@ -151,14 +160,17 @@ def test_champ_absent_invalide(db):
 
 
 def test_passage_du_worker_et_fichier_du_direct(db):
-    synthetic_trades(db, n_days=120, per_day=20, effect=pivot_effect)
+    synthetic_trades(db, n_days=1, per_day=1, first=date(2023, 6, 1))
     L.enqueue(db.path, lesson(markets=["stock"]))
     now = datetime(2026, 10, 7, 22, tzinfo=timezone.utc)
     out = L.step(db, now, 3600)
-    assert out["file"] == 1 and out["nouvelles"] == 1 and out["fichier"] is True
+    assert out["file"] == 1 and out["nouvelles"] == 1
+    synthetic_trades(db, n_days=120, per_day=20, effect=pivot_effect)  # les trades des nuits suivantes
+    out = L.step(db, datetime(2026, 10, 8, 22, tzinfo=timezone.utc), 3600)
+    assert out["mesurees"] == 1 and out["fichier"] is True
     data = json.loads(L.live_path(db.path).read_text())
     assert [x["texte"] for x in data["lecons"]] == ["Cassure de pivot : meilleure espérance"]
-    assert L.step(db, now, 3600)["fichier"] is False  # rien de changé : pas réécrit
+    assert L.step(db, datetime(2026, 10, 8, 22, tzinfo=timezone.utc), 3600)["fichier"] is False  # pas réécrit
 
 
 # --- Direct ------------------------------------------------------------------------------------
@@ -244,9 +256,9 @@ def test_routes_de_la_routine_et_brief(db, monkeypatch):
 
 
 async def test_commande_lecons(db):
-    synthetic_trades(db, n_days=120, per_day=20, effect=pivot_effect)
     add(db, lesson())
     add(db, lesson(texte="Cassure de pivot : moins bonne", sens="defavorable"))
+    synthetic_trades(db, n_days=120, per_day=20, effect=pivot_effect)
     L.measure_all(db)
     text = await bot.handle("!lecons")
     assert "1 confirmées" in text and "1 démenties" in text and "✅ 👍 **#1**" in text and "❌ 👎 **#2**" in text
