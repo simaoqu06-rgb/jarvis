@@ -347,6 +347,12 @@ class Grader:
         self.history(market, st, rank, measured, source, reason, metrics, soiree)
         if old == rank:
             return
+        if old is not None and letter_of(old) == letter_of(rank):
+            # − / + dans la même lettre : le risque proposé ne change pas. Gardé dans l'historique
+            # (!grade) sans message privé, sinon le rejeu (des milliers de trades par passage) fait
+            # osciller F / F+ et envoie un message toutes les 40 minutes.
+            log.info("Labo : grade %s %s → %s (%s)", market, name(old), name(rank), reason)
+            return
         arrow = "⬆️" if old is not None and rank > old else "⬇️" if old is not None else "🏅"
         risk = grade_risk(rank, (metrics or {}).get("kelly_pct"))
         text = (f"{arrow} Grade JARVIS {MARKET_FR[market]} : {name(old) + ' → ' if old is not None else ''}"
