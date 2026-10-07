@@ -330,13 +330,15 @@ const hitAt = (t, tp) => (t.events || []).find((e) => e.kind === tp.name.toLower
 
 /* --- Carte d'un trade ouvert --------------------------------------------------------- */
 function signature(t) {
-  return JSON.stringify([t.targets_hit, t.stop_current, t.exit_signals, (t.events || []).length, t.note, t.status]);
+  return JSON.stringify([t.targets_hit, t.stop_current, t.exit_signals, (t.events || []).length, t.note, t.status, t.conseils]);
 }
 
 function cardHtml(t) {
   const hit = t.targets_hit || 0;
   const signals = (t.exit_signals || []).length
     ? `<div class="alert">⚠️ <div><b>Signes de sortie anticipée</b><br>${t.exit_signals.map(esc).join(" · ")}</div></div>` : "";
+  const c = (t.conseils || []).at(-1);
+  const conseil = c ? `<div class="alert">🧭 <div><b>Conseil ${hm(c.at)} : ${esc(c.decision)}</b><br>${esc(c.why)}</div></div>` : "";
   return `
     <div class="t-head">
       <div>
@@ -364,9 +366,10 @@ function cardHtml(t) {
       </div>`;
     }).join("")}</div>
     ${signals}
+    ${conseil}
     <div class="t-foot">
       <div class="small muted">Stop suivi <b class="num down">${fmt(t.stop_current)}</b>${t.stop_current === t.entry ? " (à l'entrée)" : ""} · ${hit}/${t.targets.length} TP${t.against_jarvis ? " · ⛔ contre l'avis de JARVIS" : ""}${t.note ? ` · 📝 ${esc(t.note)}` : ""}</div>
-      <div class="row"><button class="ghost" data-close="${t.id}">Clôturer</button><button class="ghost danger" data-delete="${t.id}">Supprimer</button></div>
+      <div class="row"><button class="ghost" data-advice="${t.id}">Que faire ?</button><button class="ghost" data-close="${t.id}">Clôturer</button><button class="ghost danger" data-delete="${t.id}">Supprimer</button></div>
     </div>`;
 }
 
@@ -712,6 +715,13 @@ document.addEventListener("click", async (ev) => {
       await api(`/api/trading/proposals/${id}/${el.dataset.approve ? "approve" : "refuse"}`, { method: "POST" });
       toast(el.dataset.approve ? "✅ Réglage appliqué" : "❌ Proposition refusée");
       await loadProposals();
+    }
+    if (el.dataset.advice) {
+      el.disabled = true;
+      const res = await api("/api/trading/advice");
+      const a = res.advices.find((x) => x.id === el.dataset.advice);
+      toast(a ? (a.error ? `Conseil impossible : ${a.error}` : `🧭 ${a.symbol} : ${a.decision}`) : "Trade introuvable");
+      await loadTrades();
     }
     if (el.dataset.close) {
       const t = trades.find((x) => x.id === el.dataset.close);

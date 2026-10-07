@@ -17,7 +17,7 @@ from app.lab import morning as lab_morning
 from app.notify import bot, discord
 from app.sources import alpaca
 from app.trading import calendar as CAL
-from app.trading import paper, scanner
+from app.trading import advice, paper, scanner
 from app.trading import proposals as PR
 from app.trading.proposals import proposals
 from app.trading import service as trading
@@ -147,6 +147,31 @@ async def tick_trades() -> None:
             log.warning("Cockpit Discord pas mis à jour : %s", exc)
 
 
+async def tick_closing(now: datetime | None = None) -> None:
+    """Avant la clôture US (30 min par défaut) : sortir, alléger ou garder chaque action suivie encore
+    ouverte. Une fois par séance ; les conseils sont gardés sur les trades pour être mesurés.
+    Calculé hors du verrou global (bougies, catalyseur), qui n'est pris que pour écrire."""
+    now = now or datetime.now(timezone.utc)
+    trades = [t for t in book.open_trades() if t["market"] == "stock"]
+    if not trades or not advice.closing_due(now, state.data.get("closing_advice_date")):
+        return
+    today = now.astimezone(NEW_YORK).date().isoformat()
+    async with _lock:
+        state.data["closing_advice_date"] = today  # une seule tentative : un échec ne doit pas répéter le message
+        state.save()
+    advices = await advice.advise_book(trades, now)
+    _, close = CAL.session_bounds(now.astimezone(NEW_YORK).date())
+    async with _lock:
+        by_id = {t["id"]: t for t in book.trades}
+        for a in advices:
+            if "error" not in a and a["id"] in by_id and by_id[a["id"]]["status"] == "open":
+                advice.record(by_id[a["id"]], a, now)
+        book.save()
+        text = advice.closing_text(advices, advice.advice_stats(book.trades), (close - now).total_seconds() / 60)
+        _queue(text, "conseil de clôture", expires_at=close)
+        _kick_outbox()
+
+
 def scan_due(now: datetime) -> bool:
     """À l'heure prévue, une fois par jour de séance ; pas de rattrapage plus de 30 min après (serveur
     redémarré en pleine séance : les entrées de pré-ouverture n'auraient plus de sens)."""
@@ -260,6 +285,7 @@ async def tick_lab(now: datetime | None = None) -> dict | None:
 CORE_JOBS = [
     ("suivi des trades et cockpit Discord", tick_trades, MINUTE, True),
     ("scanner pré-ouverture", tick_scan, MINUTE, False),  # prend le verrou lui-même, seulement pour l'état
+    ("conseil avant la clôture", tick_closing, MINUTE, False),  # idem
     ("forward-test sur le compte fictif", tick_paper, 2 * MINUTE, True),
 ]
 # Seulement avec les notifications actives.

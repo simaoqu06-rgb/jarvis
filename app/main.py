@@ -33,8 +33,8 @@ from app.lab import strat_stats as lab_strategies
 from app.lab import status as lab_status
 from app.lab import summary as lab_summary
 from app.lab import validator as lab_validator
-from app.notify import discord
-from app.trading import paper, scanner
+from app.notify import bot, discord
+from app.trading import advice, paper, scanner
 from app.trading import proposals as PR
 from app.trading import service as trading
 from app.core import fallback
@@ -319,6 +319,31 @@ async def trading_list(status: str | None = Query(None, description="open ou clo
 async def trading_disagreements():
     """Trades pris avec et contre l'avis de JARVIS (plans NO GO) : qui avait raison."""
     return trading.disagreements(scheduler.book)
+
+
+@app.get("/api/trading/opinion")
+async def trading_opinion(symbol: str, market: str | None = Query(None, description="stock ou crypto (deviné sinon)")):
+    """Avis de JARVIS sur un actif : long, short ou attendre, pourquoi, et ce que le labo a mesuré."""
+    market = market or bot.parse_trade([symbol])["market"]
+    try:
+        o = await advice.opinion(symbol, market)
+    except trading.PlanError as exc:
+        raise HTTPException(422, str(exc))
+    return {k: v for k, v in o.items() if k != "plan"} | {"text": advice.opinion_text(o)}
+
+
+@app.get("/api/trading/advice")
+async def trading_advice():
+    """Sortir, alléger ou garder chaque trade ouvert (conseils gardés sur les trades pour être mesurés)."""
+    advices = await advice.advise_book(scheduler.book.open_trades())
+    now = datetime.now(timezone.utc)
+    async with scheduler._lock:
+        by_id = {t["id"]: t for t in scheduler.book.trades}
+        for a in advices:
+            if "error" not in a and a["id"] in by_id:
+                advice.record(by_id[a["id"]], a, now)
+        scheduler.book.save()
+    return {"advices": advices, "stats": advice.advice_stats(scheduler.book.trades)}
 
 
 @app.get("/api/trading/live")
