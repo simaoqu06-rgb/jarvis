@@ -307,7 +307,8 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
     et une hausse de **lettre** attend ton accord (proposition Approuver / Refuser en privé, `!oui N`) ;
     à partir de C, une baisse de 20 R depuis le sommet ramène tout de suite en D (coupe-circuit) ; une
     nouvelle méthode repart de « non noté ». IC95 entièrement sous zéro sur 150 trades : méthode
-    déclarée morte (message). E, F ou morte : mode survie de la routine du soir.
+    déclarée morte (message). E, F ou morte : mode survie de la routine du soir. Message privé à
+    chaque changement de lettre ; un − / + dans la même lettre (risque inchangé) reste dans `!grade`.
   - Le council du soir contrôle le grade (`POST /api/lab/grade/avis`, un avis par marché et par soir,
     un cran au plus : une baisse s'applique, une hausse de lettre passe par ton accord).
   - `!grade`, `GET /api/lab/grade` (historique), page `/cockpit/labo`, ligne 🏅 sous chaque plan.

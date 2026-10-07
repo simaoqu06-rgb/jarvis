@@ -161,6 +161,7 @@ def test_hausse_lente_approuvee_puis_baisse_immediate(db, tmp_path):
     synthetic_trades(db, n_days=60, per_day=20, base=-0.4, noise=0.8, first=date(2024, 6, 3), seed=3)
     GR.step(db, NOW)
     assert GR.letter_of(state(db)["rang"]) == "F"
+    assert any("⬇️" in t and "→ **F" in t for t in events(db))  # changement de lettre : message privé
 
 
 def test_hausse_refusee_pas_reproposee_sans_nouvelles_preuves(db):
@@ -189,6 +190,9 @@ def test_hausse_dans_la_meme_lettre_sans_accord(db):
     GR.step(db, NOW)
     st = state(db)
     assert GR.letter_of(st["rang"]) == "F" and st["hausse"] is None
+    # Le cran change (F- → F ou F+) : gardé dans l'historique, sans message privé (risque inchangé).
+    assert st["rang"] != GR.rank_of("F", 0) and GR.history(db.conn)[0]["grade"] == GR.name(st["rang"])
+    assert not any("Grade JARVIS" in t for t in events(db))
 
 
 def test_coupe_circuit(db):
