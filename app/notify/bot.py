@@ -11,16 +11,21 @@ qu'aux comptes listés dans JARVIS_DISCORD_OWNER_ID et ignore tout le reste sans
   !propositions         réglages que JARVIS propose et qui attendent ta réponse
   !oui 3 / !non 3       approuver ou refuser la proposition 3 (ou les boutons sous le message)
   !regle                réglages actuels
-  !labo                 état du labo de performance (rejeu, trades, espérance, règles)
+  !labo                 état du labo (rejeu, espérance, méthode en place, challenger, propositions)
   !aide                 cette liste
 
 Les propositions de réglages arrivent en message privé, avec des boutons Approuver / Refuser.
+Les règles validées par le labo arrivent groupées dans un seul message privé entre 8 h et 9 h
+(app/lab/morning.py ; JARVIS_LAB_DM=on, sinon rodage : gardées sans envoi), avec un bouton Approuver
+et un bouton Refuser par règle ; les mêmes `!oui N` / `!non N` marchent.
 """
 import asyncio
 import logging
 import os
+from datetime import datetime, timezone
 
 from app import config
+from app.lab import morning as lab_morning
 from app.lab import status as lab_status
 from app.notify.discord import split_message
 from app.trading import paper, scanner
@@ -38,6 +43,13 @@ outbox: asyncio.Queue = asyncio.Queue()  # propositions à envoyer en privé ave
 delivered: set[tuple[int, int]] = set()  # (proposition, propriétaire) déjà reçues en privé
 RETRY_FIRST, RETRY_MAX = 5.0, 600.0  # attente entre deux essais d'envoi en privé (secondes)
 MAX_ATTEMPTS = 12  # ensuite on abandonne l'envoi privé : la proposition reste dans !propositions et le cockpit
+LAB_TICK = 30.0  # secondes entre deux passages de l'envoi du labo (message du matin, annonces)
+lab_texts: asyncio.Queue = asyncio.Queue()  # annonces du labo (méthode en place, challenger retiré)
+
+
+def offer_lab_text(text: str) -> None:
+    """Annonce du labo à envoyer en privé au propriétaire (au plus une fois)."""
+    lab_texts.put_nowait(text)
 
 
 def offer(proposal: dict) -> None:
@@ -51,7 +63,7 @@ def queue_pending() -> int:
     Appelé à chaque connexion du bot : rien n'est perdu si le serveur a redémarré ou si un envoi
     a échoué. Celles déjà reçues par tous les propriétaires sont ignorées à l'envoi.
     """
-    pending = PR.proposals.pending()
+    pending = [p for p in PR.proposals.pending() if p.get("kind") != "labo"]  # labo : message du matin groupé
     for p in pending:
         outbox.put_nowait(p)
     return len(pending)
@@ -65,6 +77,8 @@ async def deliver_once(p: dict, owner_ids: set[int], fetch_user, view_for, users
     current = PR.proposals.get(p["id"])
     if current is not None and current["status"] != "pending":
         return True  # déjà décidée (cockpit, !oui/!non) : plus rien à envoyer
+    if p.get("kind") == "labo":
+        return True  # envoyée dans le message du matin groupé (app/lab/morning.py)
     users = {} if users is None else users
     ok = True
     for oid in sorted(owner_ids):
@@ -147,7 +161,8 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
         if cmd == "regle":
             return settings_text()
         if cmd == "labo":
-            return lab_status.text(await asyncio.to_thread(lab_status.status))
+            text = lab_status.text(await asyncio.to_thread(lab_status.status))
+            return text + "\n" + lab_morning.status_line(lab_morning.shared_state(), PR.proposals)
         if cmd == "propositions":
             pending = PR.proposals.pending()
             if not pending:
@@ -180,6 +195,43 @@ async def run(lock: asyncio.Lock | None = None) -> None:
         view.add_item(discord.ui.Button(label="Refuser", style=discord.ButtonStyle.danger,
                                         custom_id=f"{PROPOSAL_PREFIX}{pid}:non"))
         return view
+
+    def lab_buttons(pids: list[int]):
+        """Message du matin : un bouton Approuver et un bouton Refuser par règle (une ligne par règle)."""
+        view = discord.ui.View(timeout=None)
+        for row, pid in enumerate(pids[:5]):
+            view.add_item(discord.ui.Button(label=f"Approuver {pid}", style=discord.ButtonStyle.success,
+                                            custom_id=f"{PROPOSAL_PREFIX}{pid}:oui", row=row))
+            view.add_item(discord.ui.Button(label=f"Refuser {pid}", style=discord.ButtonStyle.danger,
+                                            custom_id=f"{PROPOSAL_PREFIX}{pid}:non", row=row))
+        return view
+
+    async def deliver_lab():
+        """Message du matin du labo (fenêtre 8 h - 9 h, au plus un par jour) et annonces du worker."""
+        await client.wait_until_ready()
+        users: dict = {}
+
+        async def fetch(oid):
+            users[oid] = users.get(oid) or await client.fetch_user(oid)
+            return users[oid]
+
+        while True:
+            try:
+                await lab_morning.send_due(lab_morning.shared_state(), PR.proposals, datetime.now(timezone.utc),
+                                           allowed, fetch, lab_buttons)
+                while not lab_texts.empty():
+                    text = lab_texts.get_nowait()
+                    for oid in sorted(allowed):
+                        try:
+                            await (await fetch(oid)).send(text)
+                        except Exception as exc:  # au plus une fois : l'annonce reste dans les journaux
+                            log.warning("Annonce du labo non envoyée au compte %s : %s (%s)", oid, exc, text)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Envoi du labo en échec")
+                users.clear()
+            await asyncio.sleep(LAB_TICK)
 
     async def deliver():
         await client.wait_until_ready()
@@ -221,11 +273,30 @@ async def run(lock: asyncio.Lock | None = None) -> None:
             await interaction.response.send_message("Réservé au propriétaire.", ephemeral=True)
             return
         pid, choice = custom_id.removeprefix(PROPOSAL_PREFIX).split(":")
+        current = PR.proposals.get(int(pid)) if pid.isdigit() else None
+        if current is not None and current.get("kind") == "labo":
+            await on_lab_choice(interaction, int(pid), choice == "oui")
+            return
         try:
             p = PR.proposals.decide(int(pid), choice == "oui")
             await interaction.response.edit_message(content=f"{PR.text(p)}\n{PR.decision_text(p)}", view=None)
         except (KeyError, ValueError) as exc:
             await interaction.response.edit_message(content=f"⚠️ {exc}", view=None)
+
+    async def on_lab_choice(interaction, pid: int, approve: bool):
+        """Message groupé : la décision s'ajoute sous le texte, les boutons des autres règles restent."""
+        content = (interaction.message.content if interaction.message else "") or ""
+        try:
+            p = PR.proposals.decide(pid, approve)
+            line = PR.decision_text(p)
+        except (KeyError, ValueError) as exc:
+            p, line = PR.proposals.get(pid), f"⚠️ {exc}"
+        group = (p or {}).get("groupe")
+        digest = lab_morning.shared_state().day(group) if group else None
+        others = [i for i in (digest or {}).get("propositions", [])
+                  if (q := PR.proposals.get(i)) and q["status"] == "pending"]
+        await interaction.response.edit_message(content=f"{content}\n{line}"[-2000:],
+                                                view=lab_buttons(others) if others else None)
 
     @client.event
     async def on_message(message):
@@ -247,9 +318,14 @@ async def run(lock: asyncio.Lock | None = None) -> None:
     sender.add_done_callback(
         lambda t: t.cancelled() or not t.exception() or log.error("Envoi des propositions arrêté", exc_info=t.exception())
     )
+    lab_sender = asyncio.create_task(deliver_lab())
+    lab_sender.add_done_callback(
+        lambda t: t.cancelled() or not t.exception() or log.error("Envoi du labo arrêté", exc_info=t.exception())
+    )
     try:
         await client.start(config.secret(TOKEN_NAME))
     finally:
         sender.cancel()
+        lab_sender.cancel()
         if not client.is_closed():
             await client.close()

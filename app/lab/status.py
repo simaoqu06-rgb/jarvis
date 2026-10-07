@@ -51,8 +51,10 @@ def status(path: str | None = None) -> dict:
             out["live"][market] = {"last_day": _progress(conn, f"live:{market}").get("last_day")}
         for market, origin, n in conn.execute("SELECT market, origin, COUNT(*) FROM trades GROUP BY market, origin"):
             out["trades"].setdefault(market, {})[origin] = n
-        row = conn.execute("SELECT version FROM method_versions ORDER BY created_at DESC, version DESC LIMIT 1").fetchone()
-        out["method_version"] = row[0] if row else None
+        from app.lab import method as M  # import tardif, comme runner
+
+        out["methode"] = M.state(conn)
+        out["method_version"] = out["methode"]["champion"]["version"]
         live_start = conn.execute("SELECT value FROM progress WHERE job = 'lab' AND key = 'live_start'").fetchone()
         out["live_start"] = json.loads(live_start[0]) if live_start else None
         out["labo2"] = headline(conn)
@@ -109,6 +111,10 @@ def text(st: dict) -> str:
     if fiches is not None or regles:
         lines.append(f"Fiches catalyseurs : {(fiches or {}).get('total', 0)} · règles : {regles.get('en_attente', 0)} "
                      f"en attente, {regles.get('validee', 0) + regles.get('rejetee', 0)} testées")
+    if st.get("methode"):
+        from app.lab import method as M
+
+        lines.append(M.state_line(st["methode"]))
     if st.get("error"):
         lines.append(f"⚠️ {st['error']}")
     return "\n".join(lines)

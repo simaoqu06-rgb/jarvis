@@ -227,11 +227,52 @@ Tout tourne dans le worker, sans jeton d'IA ; rien ici ne change la méthode en 
   premières minutes, le secteur, le mouvement du BTC pour la crypto ; et les actus Finnhub (~12 mois
   de profondeur) avec leur heure exacte et leur position : avant l'ouverture, avant le départ,
   pendant, après. Quelques contre-exemples (valeurs qui n'ont pas bougé) pour ne pas biaiser les
-  statistiques. Le type de catalyseur reste « à classer » (Labo 3). Crypto : pas encore de source
+  statistiques. Le type de catalyseur est classé par la routine du soir (Labo 3). Crypto : pas encore de source
   d'actus.
 - **Accès pour la routine du soir** : `GET /api/lab/summary`, `/api/lab/stats`, `/api/lab/catalysts`,
   `/api/lab/rules` et `POST /api/lab/rules` (soumission seulement, le worker valide), protégés par
   `JARVIS_LAB_API_KEY` (en-tête `X-Lab-Key`). Lecture seule sur la base.
+
+### Labo 3 : le soir, le matin, et la méthode qui s'améliore
+
+Le serveur n'écrit jamais dans `data/lab.db` : ce qu'il reçoit (règles, décisions, types de
+catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque passage.
+
+- **Le soir (23 h)** : une routine Claude planifiée (hors de ce dépôt) lit `GET /api/lab/brief` (tout
+  en un appel, < 20 Ko : résumé, statistiques, fiches à classer des 2 derniers jours, règles récentes,
+  méthode en place et challenger), fait débattre ses analystes, puis envoie au plus **3 règles par
+  soirée** (`POST /api/lab/rules`, avec `"pourquoi"` et `"council"` gardés avec la règle ; au-delà :
+  429) et classe les fiches (`POST /api/lab/catalysts/types`, types de `catalysts.TYPES`). Accès par
+  Tailscale Funnel sur `/api/lab` seulement, clé `JARVIS_LAB_API_KEY` (voir [DEPLOY.md](DEPLOY.md#ouvrir-laccès-à-la-tâche-du-soir)).
+- **La nuit** : le worker valide les règles (Labo 2).
+- **Le matin (8 h - 9 h, heure de Paris)** : un seul message privé groupé (`app/lab/morning.py`) avec
+  chaque règle validée, sa preuve chiffrée (« Les trades où rvol > 5 font −0,40 R en moyenne sur 212
+  trades ; les exclure donne +0,15 R par trade sur 3 périodes de test ») et son « pourquoi », plus le
+  nombre d'idées écartées depuis la veille. Boutons Approuver / Refuser par règle, ou `!oui N` /
+  `!non N` (mêmes propositions que les réglages, même cockpit). Rien de validé : pas de message.
+  Jamais hors de 8 h - 9 h ; manqué, il repart le lendemain ; jamais deux le même jour, même après un
+  redémarrage (état dans `data/lab_morning.json`, marqué avant l'envoi). **Rodage** :
+  `JARVIS_LAB_DM=off` (défaut) garde le message sans l'envoyer (`!labo`, `/cockpit/labo`,
+  `GET /api/lab/matin`) ; à passer à `on` après ~5 séances.
+- **Approuvée** : la règle crée la version suivante (v2 = v1 + ses filtres), d'abord **challenger**.
+  Les trades restent journalisés une seule fois (version de génération v1) ; champion et challenger
+  en sont des sous-ensembles calculés avec le même SQL que le validateur. Quand le challenger a au moins
+  100 trades déclenchés **en direct** depuis sa création et un R net moyen par trade meilleur que le
+  champion sur la même période, sans perdre de capture du potentiel +10 (même tolérance que le
+  validateur), il devient la méthode en place et tu reçois « Méthode v2 en place : … ». Après 300
+  trades sans faire mieux, il est retiré (message aussi). Seuils `challenger_min_trades` et
+  `challenger_max_trades` dans `lab_config`. Des règles approuvées pendant un essai attendent sa fin
+  (sauf le même matin : elles rejoignent le challenger tant qu'il n'a aucun trade).
+- **Refusée** : rangée dans la mémoire des échecs (« refusée par Simão »), jamais reproposée.
+- **En direct** : le worker écrit la méthode en place dans `data/lab_champion.json`. Le scanner
+  pré-ouverture applique ses filtres avec le même code que le labo (`method.evaluate_rows`) : un plan
+  écarté n'est ni proposé ni passé sur le compte fictif, il reste listé (« Écartées par la méthode v2
+  du labo : … ») et dans `data/scans.jsonl`. Contexte du direct reconstruit comme au labo
+  (`app/lab/live.py` : note sans la part catalyseur, volume relatif et variation de la veille, régime
+  de SPY) ; champs absents traités comme « non vérifiés ». Fichier absent ou illisible : aucun filtre,
+  une ligne de journal, le direct continue. `!plan` et le cockpit ne sont pas filtrés (demandes à toi).
+- **Cockpit** : page `/cockpit/labo` (lecture seule) : avancement, chiffres clés, méthode en place et
+  challenger, dernières propositions, règles testées, dernier message du matin.
 
 ## Commandes Discord
 
@@ -244,7 +285,7 @@ Tout tourne dans le worker, sans jeton d'IA ; rien ici ne change la méthode en 
 | `!propositions` | réglages proposés qui attendent ta réponse |
 | `!oui 3` / `!non 3` | approuver ou refuser la proposition 3 (ou les boutons) |
 | `!regle` | réglages actuels |
-| `!labo` | état du labo de performance (rejeu, trades simulés, espérance, fiches, règles) |
+| `!labo` | état du labo (rejeu, espérance, règles, méthode en place, challenger, propositions du labo) |
 | `!aide` | liste des commandes |
 
 Le bot ne répond qu'aux comptes de `JARVIS_DISCORD_OWNER_ID`. Mise en place : [DEPLOY.md](DEPLOY.md).

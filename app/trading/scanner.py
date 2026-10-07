@@ -11,6 +11,9 @@ Repris de l'agent scanner d'OpenClaw, mais calculé au lieu d'être deviné, et 
 Tous ces seuils sont dans app/trading/settings.py et se changent sans toucher au code.
 Chaque passage est gardé dans data/scans.jsonl avec les mesures de chaque valeur retenue :
 le forward-test (paper.py) s'en sert pour dire quels critères ont vraiment payé.
+Labo 3 : les filtres de la méthode championne du labo (app/lab/live.py) s'appliquent aux plans ; un
+plan écarté n'est pas proposé (ni passé sur le compte fictif) mais reste listé dans le message et
+dans data/scans.jsonl (« ecartees_methode »).
 """
 import asyncio
 import json
@@ -23,6 +26,7 @@ from zoneinfo import ZoneInfo
 
 from app import config
 from app.core.http import SourceError
+from app.lab import live as LAB
 from app.sources import alpaca
 from app.trading import catalyst as C
 from app.trading import indicators as I
@@ -59,6 +63,7 @@ def features(daily: list[dict], price: float, prev_close: float | None, today: s
         "ma20": round(I.sma(closes, 20), 4),
         "ma50": round(I.sma(closes, 50), 4),
         "change_5d_pct": round((closes[-1] / closes[-6] - 1) * 100, 2),
+        "day_change_pct": round((closes[-1] / closes[-2] - 1) * 100, 3) if closes[-2] > 0 else None,
     }
 
 
@@ -127,7 +132,9 @@ async def scan(now: datetime | None = None, s=settings, save: bool = True) -> di
     # Catalyseur (3 appels Finnhub par valeur) sur les mieux classées seulement.
     shortlist = passed[: s["scan_max_results"] * 3]
     cats = await asyncio.gather(*(C.safe_check(sym, now) for sym, _ in shortlist))
-    picks, skipped = [], []
+    picks, skipped, filtered = [], [], []
+    champ = LAB.current()
+    index_daily = await _index_daily(now) if champ["regles"] else None
     for (symbol, f), cat in zip(shortlist, cats):
         # ETF seulement si Finnhub a bien répondu sans profil de société ; un profil en échec (quota,
         # délai) n'exclut rien, et la capitalisation n'entre jamais en compte (choix de Simão).
@@ -147,15 +154,35 @@ async def scan(now: datetime | None = None, s=settings, save: bool = True) -> di
         except T.PlanError as exc:
             skipped.append(f"{symbol} (plan impossible : {exc})")
             continue
+        if champ["regles"]:
+            try:  # bougies déjà en cache (lues par build_plan) : celles de la note du plan
+                daily_score = await T._optional_candles(symbol, "stock", 1440, "alpaca")
+            except Exception:
+                daily_score = daily.get(symbol)
+            verdict = LAB.verdict_for(plan, daily_score, daily.get(symbol), index_daily, now, s, champ)
+            if not verdict["garde"]:
+                filtered.append({"symbol": symbol, "version": verdict["version"], "regles": verdict["regles"],
+                                 "composite": plan["score"]["composite"]})
+                continue
         picks.append({"symbol": symbol, "features": f, "plan": plan})
         if len(picks) == s["scan_max_results"]:
             break
     picks.sort(key=lambda p: p["plan"]["score"]["composite"], reverse=True)
     result = {"at": now.isoformat(timespec="seconds"), "examined": len(symbols), "passed": len(passed),
-              "rejected": rejected, "skipped": skipped, "picks": picks}
+              "rejected": rejected, "skipped": skipped, "picks": picks, "ecartees_methode": filtered,
+              "methode": champ.get("version")}
     if save:
         _save(result)
     return result
+
+
+async def _index_daily(now: datetime) -> list[dict] | None:
+    """~500 jours de SPY pour le régime de marché des filtres du labo ; None si Alpaca ne répond pas."""
+    try:
+        return (await alpaca.bars(["SPY"], 1440, days=500, now=now)).get("SPY")
+    except Exception as exc:  # le scanner continue : les règles sur le régime ne seront pas vérifiées
+        log.warning("Régime de marché (SPY) indisponible pour les filtres du labo : %s", exc)
+        return None
 
 
 def _save(result: dict) -> None:
@@ -201,6 +228,9 @@ def text(result: dict) -> str:
             lines.append(f"📰 [{news[0]['title'][:100]}](<{news[0]['url']}>)")
     if result["skipped"]:
         lines.append("\n-# Écartées : " + ", ".join(result["skipped"]))
+    if result.get("ecartees_methode"):
+        lines.append(f"-# Écartées par la méthode {result.get('methode') or ''} du labo : " + ", ".join(
+            f"{e['symbol']} ({', '.join(f'« {n} »' for n in e['regles'])})" for e in result["ecartees_methode"]))
     if result["rejected"]:
         lines.append("-# Filtres : " + ", ".join(f"{k} {v}" for k, v in sorted(result["rejected"].items(), key=lambda x: -x[1])))
     lines.append("-# Données Alpaca (pré-ouverture, bougies avec 16 min de retard) et Finnhub. "

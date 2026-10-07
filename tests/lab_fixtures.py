@@ -70,7 +70,8 @@ def synthetic_trades(db: LabDB, n_days: int = 120, per_day: int = 20, seed: int 
     médians de 60, 120 et 240 min. `effect(ctx, rnd)` renvoie le décalage de r_net d'un trade."""
     rnd = random.Random(seed)
     if not db.conn.execute("SELECT 1 FROM method_versions WHERE version = ?", (version,)).fetchone():
-        db.conn.execute("INSERT INTO method_versions VALUES (?, '2024-01-01T00:00:00+00:00', '{}')", (version,))
+        db.conn.execute("INSERT INTO method_versions (version, created_at, settings) VALUES (?, '2024-01-01T00:00:00+00:00', '{}')",
+                        (version,))
     rows, out = [], []
     for day in calendar_days(first, n_days, weekdays_only=market == "stock"):
         moment = (CO.ny_midnight(day) + 9 * 3600 + 600) if market == "stock" else CO.utc_midnight(day)
@@ -104,3 +105,28 @@ def synthetic_trades(db: LabDB, n_days: int = 120, per_day: int = 20, seed: int 
         "minutes_to_tp3, mfe_r, mae_r, day_range_pct, decision, composite) VALUES "
         "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
     return out
+
+
+# --- Labo 3 : règles validées toutes faites (sans passer par le walk-forward) ----------------
+
+def validated_metrics(touched: int = 212, gain: float = 84.8, improvement: float = 0.15, windows: int = 3,
+                      seuil=None) -> dict:
+    return {"touches_test": touched, "gain_total_r": gain, "amelioration_moyenne_r": improvement,
+            "fenetres_meilleures": windows, "p": 1e-6, "essai": 1,
+            "fenetres": [{"seuil": seuil, "touches": touched // windows} for _ in range(windows)]}
+
+
+def insert_validated(db: LabDB, name: str, cond: dict, kind: str = "exclude", markets=None, pourquoi: str | None = None,
+                     tested_at: str = "2026-10-06T22:00:00+00:00", metrics: dict | None = None,
+                     status: str = "validee") -> str:
+    """Règle déjà jugée (état `status`), comme si le worker l'avait testée ; renvoie son empreinte."""
+    from app.lab import validator as V
+
+    raw = {"nom": name, kind: cond} | ({"markets": markets} if markets else {})
+    canon = V.parse(raw)
+    h = V.rule_hash(canon)
+    db.conn.execute("INSERT INTO rules (hash, name, rule, status, reason, metrics, trial, submitted_at, tested_at, "
+                    "pourquoi) VALUES (?, ?, ?, ?, '[]', ?, 1, ?, ?, ?)",
+                    (h, name, json.dumps(canon), status, json.dumps(metrics or validated_metrics()), tested_at,
+                     tested_at, pourquoi))
+    return h
