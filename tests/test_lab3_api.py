@@ -156,15 +156,19 @@ def test_brief_en_un_appel(env):
     assert client.get("/api/lab/brief").status_code == 401
 
 
-def test_brief_propose_aussi_les_fiches_du_rejeu_qui_ont_leurs_actus(env):
+def test_brief_ne_propose_que_des_fiches_classables(env):
     db, client, _ = env
     today = datetime.now(timezone.utc).date().isoformat()
-    rows = [(today, "NEW", "a_chercher"), ("2025-03-03", "OLD", "ok"), ("2024-11-04", "DEEP", "hors_profondeur")]
+    rows = [(today, "NEW", "a_chercher"), ("2025-03-03", "OLD", "ok"), ("2024-11-04", "DEEP", "hors_profondeur"),
+            (today, "NONE", "aucune"), (today, "FRESH", "ok")]
     for day, symbol, status in rows:
         db.conn.execute("INSERT INTO catalysts (market, day, symbol, kind, amplitude_pct, news, news_status, created_at) "
                         "VALUES ('stock', ?, ?, 'mouvement', 12, '[]', ?, 'x')", (day, symbol, status))
     body = client.get("/api/lab/brief", headers=H).json()
-    assert [f["symbole"] for f in body["fiches_a_classer"]] == ["NEW", "OLD"]  # jamais celle sans actus possibles
+    # Actus d'abord (récentes puis rejeu), puis « aucune actu trouvée » ; jamais une fiche sans actus encore.
+    assert [f["symbole"] for f in body["fiches_a_classer"]] == ["FRESH", "OLD", "NONE"]
+    page = client.get("/api/lab/catalysts", headers=H, params={"a_classer": "true", "limit": 200}).json()
+    assert [f["symbole"] for f in page] == ["FRESH", "OLD"]  # la suite pour la routine : classables seulement
 
 
 def test_message_du_matin_visible_par_l_api(env, monkeypatch):
