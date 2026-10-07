@@ -13,6 +13,7 @@ qu'aux comptes listés dans JARVIS_DISCORD_OWNER_ID et ignore tout le reste sans
   !oui 3 / !non 3       approuver ou refuser la proposition 3 (ou les boutons sous le message)
   !regle                réglages actuels
   !labo                 état du labo (rejeu, espérance, méthode en place, challenger, propositions)
+  !lecons               carnet des leçons du labo (confirmées, à confirmer, démenties)
   !aide                 cette liste
 
 Les propositions de réglages arrivent en message privé, avec des boutons Approuver / Refuser.
@@ -26,6 +27,8 @@ import os
 from datetime import datetime, timezone
 
 from app import config
+from app.lab import db as lab_db
+from app.lab import lessons as lab_lessons
 from app.lab import morning as lab_morning
 from app.lab import status as lab_status
 from app.notify.discord import split_message
@@ -133,6 +136,16 @@ def settings_text() -> str:
     return "\n".join(lines)
 
 
+def lessons_text() -> str:
+    conn = lab_db.open_readonly()
+    if conn is None:
+        return "📒 Base du labo absente : le service jarvis-lab n'a pas encore démarré."
+    try:
+        return lab_lessons.text(conn)
+    finally:
+        conn.close()
+
+
 async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
     """Réponse à une commande (None si ce n'est pas une commande JARVIS)."""
     if not content.startswith("!"):
@@ -168,6 +181,8 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
         if cmd == "labo":
             text = lab_status.text(await asyncio.to_thread(lab_status.status))
             return text + "\n" + lab_morning.status_line(lab_morning.shared_state(), PR.proposals)
+        if cmd in ("lecons", "leçons"):
+            return await asyncio.to_thread(lessons_text)
         if cmd == "propositions":
             pending = PR.proposals.pending()
             if not pending:

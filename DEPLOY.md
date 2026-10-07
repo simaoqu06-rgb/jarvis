@@ -226,6 +226,8 @@ Le cockpit reste privé (`tailscale serve`, port 4443, réseau Tailscale seuleme
      (≤ 2 000) ; au plus 3 nouvelles règles par soirée (au-delà : 429) ;
    - `POST /api/lab/catalysts/types` : `[{"id": 12, "type": "resultats"}, …]` (types : `types_permis`
      du brief) ;
+   - `POST /api/lab/lessons` : une leçon (`texte`, `quand`, `sens`, `markets`, `pourquoi`) ou un
+     retrait (`{"retirer": 12, "raison": …}`), et `GET /api/lab/lessons` (carnet des leçons) ;
    - au besoin `GET /api/lab/summary`, `/stats`, `/catalysts`, `/rules`.
 
 **Ne remets jamais** le cockpit (`tailscale serve`) sur le port 443, et ne lance jamais
