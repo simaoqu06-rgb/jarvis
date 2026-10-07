@@ -15,6 +15,7 @@ qu'aux comptes listés dans JARVIS_DISCORD_OWNER_ID et ignore tout le reste sans
   !labo                 état du labo (rejeu, espérance, méthode en place, challenger, propositions)
   !lecons               carnet des leçons du labo (confirmées, à confirmer, démenties)
   !grade                grade de JARVIS (F- à S+), de quoi il est fait et le risque qu'il permet
+  !strategies           labo v2 : stratégies à déclencheur contre v1 et leur témoin aléatoire
   !aide                 cette liste
 
 Les propositions de réglages arrivent en message privé, avec des boutons Approuver / Refuser.
@@ -33,6 +34,7 @@ from app.lab import grade as lab_grade
 from app.lab import lessons as lab_lessons
 from app.lab import morning as lab_morning
 from app.lab import status as lab_status
+from app.lab import strat_stats as lab_strategies
 from app.notify.discord import split_message
 from app.trading import paper, scanner
 from app.trading import proposals as PR
@@ -149,6 +151,16 @@ def grade_text() -> str:
     return lab_grade.text(lab_grade.current(), hist)
 
 
+def strategies_text() -> str:
+    conn = lab_db.open_readonly()
+    if conn is None:
+        return "🧪 Base du labo absente : le service jarvis-lab n'a pas encore démarré."
+    try:
+        return lab_strategies.text(lab_strategies.cached(conn))
+    finally:
+        conn.close()
+
+
 def lessons_text() -> str:
     conn = lab_db.open_readonly()
     if conn is None:
@@ -198,6 +210,8 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
             return await asyncio.to_thread(lessons_text)
         if cmd == "grade":
             return await asyncio.to_thread(grade_text)
+        if cmd in ("strategies", "stratégies", "strats"):
+            return await asyncio.to_thread(strategies_text)
         if cmd == "propositions":
             pending = PR.proposals.pending()
             if not pending:

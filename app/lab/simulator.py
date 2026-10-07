@@ -38,7 +38,9 @@ STOCK_COMMISSION = 0.0
 CRYPTO_SLIPPAGE_BPS = {"top10": 3.0, "other": 8.0}
 OKX_MAKER_FEE = 0.0008
 OKX_TAKER_FEE = 0.0010
-EXIT_REASONS = ("stop", "stop_be", "tp3", "cloture", "horizon", "non_declenche")
+EXIT_REASONS = ("stop", "stop_be", "stop_suiveur", "tp1", "tp2", "tp3", "cloture", "horizon", "non_declenche")
+ENTRY_ORDERS = ("limit", "stop", "market")
+EXIT_MODES = ("v1", "sans_be", "suiveur")
 
 
 def stock_slippage_bps(price: float) -> float:
@@ -77,12 +79,23 @@ def _minutes(market: str, start: int, end: int) -> float:
 
 
 def simulate(plan: dict, bars: list[dict], *, market: str, decided_at: int, entry_until: int, exit_at: int,
-             last_price: float, cost: dict, exit_reason_end: str | None = None) -> dict:
+             last_price: float, cost: dict, exit_reason_end: str | None = None, entry_order: str = "limit",
+             exit_mode: str = "v1", trail_r: float = 1.0) -> dict:
     """Rejoue le plan sur `bars` (5 min, toutes commencées à `decided_at` ou après).
 
     `entry_until` : fin de la fenêtre d'entrée ; `exit_at` : tout est soldé à la clôture de la
     dernière bougie finissant au plus tard à cet instant ; `last_price` : prix à la décision.
+
+    Labo v2 (strategies.py), les valeurs par défaut gardent exactement le comportement de v1 :
+    - `entry_order` : « limit » (v1) ; « stop » = ordre stop d'achat posé au prix d'entrée, exécuté dès
+      qu'une bougie l'atteint, au prix d'entrée ou à l'ouverture si elle ouvre au-delà (prise de
+      liquidité, frais « taker ») ; « market » = au marché, à l'ouverture de la première bougie.
+    - `exit_mode` : « v1 » (tiers aux TP, stop à l'entrée après le TP1) ; « sans_be » (même chose sans
+      remonter le stop) ; « suiveur » (aucun objectif : le stop suit le plus haut atteint à `trail_r`
+      fois le risque, recalculé à la clôture de chaque bougie, solde à la clôture ou à l'horizon).
     """
+    if entry_order not in ENTRY_ORDERS or exit_mode not in EXIT_MODES:
+        raise ValueError(f"ordre {entry_order} ou sortie {exit_mode} inconnus")
     if any(b["t"] < decided_at for b in bars):
         raise ValueError("bougie antérieure à la décision : le simulateur ne voit que la suite")
     side = plan["side"]
@@ -113,6 +126,16 @@ def simulate(plan: dict, bars: list[dict], *, market: str, decided_at: int, entr
     for i, b in enumerate(window):
         if b["t"] >= entry_until:
             break
+        if entry_order == "market":
+            fill_i, fill_price, mode, liquidity = i, b["o"], "ouverture", "taker"
+            break
+        if entry_order == "stop":
+            if (b["h"] >= entry) if sign == 1 else (b["l"] <= entry):
+                opened_beyond = (b["o"] - entry) * sign >= 0
+                fill_i, fill_price, mode, liquidity = i, (b["o"] if opened_beyond else entry), \
+                    ("ouverture" if opened_beyond else "stop"), "taker"
+                break
+            continue
         if marketable and i == 0 and (b["o"] - entry) * sign <= 0:
             fill_i, fill_price, mode, liquidity = i, b["o"], "ouverture", "taker"
             break
@@ -129,6 +152,8 @@ def simulate(plan: dict, bars: list[dict], *, market: str, decided_at: int, entr
                   minutes_to_fill=_minutes(market, decided_at, window[fill_i]["t"]))
 
     # --- Sorties ---
+    if exit_mode == "suiveur":
+        targets = []
     remaining = 1.0
     part = 1.0 / len(targets) if targets else 1.0
     exits: list[dict] = []
@@ -156,7 +181,8 @@ def simulate(plan: dict, bars: list[dict], *, market: str, decided_at: int, entr
         b = window[i]
         last = b
         at_open = i > fill_i or mode == "ouverture"
-        stop_label = "stop_be" if hit else "stop"
+        stop_label = ("stop_be" if hit and exit_mode == "v1"
+                      else "stop_suiveur" if (stop_now - stop) * sign > 0 else "stop")
         # Stop d'abord : gap à l'ouverture, puis contact dans la bougie.
         if i > fill_i and (b["o"] - stop_now) * sign <= 0:
             excursion(b["o"])
@@ -185,15 +211,20 @@ def simulate(plan: dict, bars: list[dict], *, market: str, decided_at: int, entr
             result["tp_hits"][hit - 1] = True
             result["minutes_to_tp"][hit - 1] = _minutes(market, decided_at, b["t"] + BAR_SECONDS // 2)
             leave(price, b["t"], f"tp{hit}", part if hit < len(targets) else remaining)
-            stop_now = entry  # break-even dès le TP1 (choix de Simão)
-        if hit == len(targets):
+            if exit_mode == "v1":
+                stop_now = entry  # break-even dès le TP1 (choix de Simão)
+        if targets and hit == len(targets):
             reason = f"tp{hit}"
             break
-        if hit_now and ((b["l"] <= stop_now) if sign == 1 else (b["h"] >= stop_now)):
+        if hit_now and exit_mode == "v1" and ((b["l"] <= stop_now) if sign == 1 else (b["h"] >= stop_now)):
             # TP et retour à l'entrée dans la même bougie : ordre inconnu, on suppose le pire.
             leave(stop_now, b["t"], "stop_be", remaining)
             reason = "stop_be"
             break
+        if exit_mode == "suiveur":
+            trail = best - sign * trail_r * risk  # vaut pour la bougie suivante
+            if (trail - stop_now) * sign > 0:
+                stop_now = trail
     if reason is None:
         leave(last["c"], last["t"], end_reason, remaining)
         excursion(last["c"])
@@ -207,6 +238,22 @@ def simulate(plan: dict, bars: list[dict], *, market: str, decided_at: int, entr
                   mfe_r=round((best - fill_price) * sign / risk, 4), mae_r=round((worst - fill_price) * sign / risk, 4),
                   closed_at=exits[-1]["at"] + BAR_SECONDS)
     return result
+
+
+def net_r(result: dict, cost: dict, side: str = "long", slip_factor: float = 1.0) -> float | None:
+    """R net d'un résultat de simulate avec un glissement multiplié par `slip_factor` (test de
+    robustesse : ×2, ×3) ; même formule que simulate, None si l'ordre n'a pas été exécuté."""
+    if not result["triggered"] or not result["exits"]:
+        return None
+    sign = 1 if side == "long" else -1
+    o = result["order_prices"]
+    risk = abs(o["entry"] - o["stop"])
+    if not risk:
+        return None
+    slip = cost["slippage"] * slip_factor
+    fill_eff = result["fill_price"] * (1 + sign * (slip + cost[result["entry_liquidity"]]))
+    return round(sum(e["part"] * (e["price"] * (1 - sign * (slip + e["fee"])) - fill_eff) * sign
+                     for e in result["exits"]) / risk, 4)
 
 
 def day_range_pct(bars: list[dict]) -> float | None:

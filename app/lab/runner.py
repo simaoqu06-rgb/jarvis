@@ -14,6 +14,7 @@ from datetime import date, datetime, timedelta, timezone
 from app.lab import collector as CO
 from app.lab import generator as G
 from app.lab import heartbeat
+from app.lab import strategies as ST
 from app.lab import universe as U
 from app.lab.db import LabDB
 from app.trading import service as T
@@ -95,14 +96,23 @@ def run_day(db: LabDB, market: str, day: date, origin: str, universe: list[dict]
     if universe is None:
         universe = U.build(db, market, day, save=False)
     errors: list[dict] = []
+    strat: list[dict] = []
+    now_ts = int(now.timestamp()) if now else None
     if market == "stock":
-        moments, rows = G.stock_day(db, day, s, universe, errors)
+        moments, rows = G.stock_day(db, day, s, universe, errors, strat)
     else:
-        moments, rows = G.crypto_day(db, day, s, universe, int(now.timestamp()) if now else None, errors)
+        moments, rows = G.crypto_day(db, day, s, universe, now_ts, errors, strat)
     job = progress[0] if progress else f"{origin}:{market}"
     with db.transaction():
         db.replace_universe(market, day.isoformat(), universe)
         db.replace_trades(origin, version, market, moments, rows)
+        # Labo v2 : lignes des stratégies, une fois toutes les sorties du jour connues. Le premier jour
+        # calculé ici borne le rattrapage des jours traités avant le labo v2 (rattrapage.py).
+        if market == "stock" or ST.crypto_complete(day, now_ts):
+            db.replace_strat(origin, market, day.isoformat(), strat)
+            key = f"inline_from:{origin}"
+            if not db.get(f"strats:{market}", key):
+                db.set(f"strats:{market}", key, day.isoformat())
         db.set(job, f"day:{day.isoformat()}", {"trades": len(rows), "errors": len(errors),
                                                "error_symbols": [e["symbol"] for e in errors[:10]]})
         if progress:

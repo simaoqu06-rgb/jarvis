@@ -30,6 +30,7 @@ import sqlite3
 from datetime import date, datetime, timezone
 
 from app.lab import collector as CO
+from app.lab import seal as SEAL
 
 MIN_TRADES = 30
 Z95 = 1.959964
@@ -367,7 +368,8 @@ def capture(conn: sqlite3.Connection, threshold: float = MOVE_PCT, **filters) ->
     mêmes jours, quelle part a fait ce mouvement (taux de base).
 
     Ouverture plutôt que clôture de la veille : un plan pris avant l'ouverture n'est jamais exécuté
-    au-dessus de son prix limite, le gap n'est pas capturable ; ce qui l'est part de l'ouverture."""
+    au-dessus de son prix limite, le gap n'est pas capturable ; ce qui l'est part de l'ouverture.
+    Les jours du bloc scellé (seal.py) sont exclus : leurs trades n'apparaissent pas ici."""
     tsql, params = where(filters)
     join = tsql.replace(" WHERE ", " AND ") if tsql else ""
     msql, mparams = where({k: v for k, v in filters.items() if k in ("market", "since", "until")}, "m")
@@ -378,8 +380,8 @@ def capture(conn: sqlite3.Connection, threshold: float = MOVE_PCT, **filters) ->
                      COALESCE(MAX(t.triggered), 0) AS trig, COALESCE(MAX(t.tp1_hit), 0) AS tp1
               FROM day_moves m LEFT JOIN trades t
                 ON t.market = m.market AND t.day = m.day AND t.symbol = m.symbol{join}
-              WHERE m.up_pct >= ?{mcond}
-              GROUP BY m.market, m.day, m.symbol)""", (*params, threshold, *mparams)).fetchone()
+              WHERE m.up_pct >= ? AND m.day NOT BETWEEN ? AND ?{mcond}
+              GROUP BY m.market, m.day, m.symbol)""", (*params, threshold, *SEAL.bounds(), *mparams)).fetchone()
     movers, with_plan, trig, tp1 = (row[0] or 0), (row[1] or 0), (row[2] or 0), (row[3] or 0)
     planned = conn.execute(
         f"""SELECT COUNT(*) FROM (SELECT DISTINCT t.market, t.day, t.symbol FROM trades t{tsql}
