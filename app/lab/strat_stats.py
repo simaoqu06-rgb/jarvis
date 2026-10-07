@@ -11,7 +11,11 @@ Pour chaque marché et chaque stratégie (v1 comprise, en référence) :
   avec son z en grappes : sans écart positif net, la stratégie n'a pas d'avantage d'entrée ;
 - espérance par régime de marché (table regimes).
 Le classement se fait sur l'espérance de la sortie de référence, et une stratégie n'est « candidate »
-que si la borne basse de son intervalle est au-dessus de zéro ET si elle bat son témoin (z ≥ 2).
+que si la borne basse de son intervalle est au-dessus de zéro ET si elle bat son témoin avec un z corrigé
+du nombre d'essais déclarés (Bonferroni, candidate_z() : ≈ 3,1 pour 60 essais ; déclaration n° 2,
+council du 7 octobre : avec z ≥ 2 et 60 essais, on attendrait une fausse candidate par hasard).
+Frais (brut − net) et espérance par tranche de rang de volume, sans rien filtrer : les ordres stop sur
+cassure des petites valeurs glissent plus.
 Rien de tout ça ne promeut quoi que ce soit : ni le scellé, ni la quantité de rejeu (au moins un an,
 deux régimes) ne sont encore là.
 
@@ -21,14 +25,29 @@ et brut contre net de frais, pour vérifier « v1 achète la faiblesse » et « 
 import json
 import sqlite3
 from collections import defaultdict
+from statistics import NormalDist
 
 from app.lab import seal as SEAL
 from app.lab import stats as STATS
 from app.lab import strategies as ST
 
 MIN_N = 30
-CANDIDATE_Z = 2.0
-COLUMNS = ("r_net", "r_sans_be", "r_2r", "r_suiveur", "r_glisse_x2", "r_glisse_x3", "r_retard", "r_manque")
+ALPHA = 0.05
+COLUMNS = ("r_net", "r_sans_be", "r_2r", "r_suiveur", "r_emperor", "r_glisse_x2", "r_glisse_x3", "r_retard",
+           "r_manque", "r_gross")
+RANK_BUCKETS = ((1, 50, "rang 1-50"), (51, 150, "rang 51-150"), (151, 10**9, "rang 151+"))
+
+
+def candidate_z(trials: int | None = None) -> float:
+    """Seuil de z contre le témoin, corrigé du nombre d'essais déclarés (Bonferroni, unilatéral)."""
+    n = trials or len(ST.trials())
+    return round(NormalDist().inv_cdf(1 - ALPHA / n), 2)
+
+
+def _rank_bucket(rank) -> str:
+    if rank is None:
+        return "rang inconnu"
+    return next(label for lo, hi, label in RANK_BUCKETS if lo <= rank <= hi)
 GAP_BUCKETS = ((-1e9, -2.0, "gap ≤ −2 %"), (-2.0, -0.5, "gap −2 à −0,5 %"), (-0.5, 0.5, "gap ±0,5 %"),
                (0.5, 2.0, "gap +0,5 à +2 %"), (2.0, 1e9, "gap ≥ +2 %"))
 
@@ -59,17 +78,18 @@ class Mean:
 
 def _strategies(conn: sqlite3.Connection) -> dict:
     out: dict = {}
-    sql = (f"SELECT s.market, s.strategy, s.day, s.triggered, s.tp1_hit, s.temoin_r, s.temoin_triggered, "
+    sql = (f"SELECT s.market, s.strategy, s.day, s.triggered, s.tp1_hit, s.temoin_r, s.temoin_triggered, s.rank, "
            f"{', '.join('s.' + c for c in COLUMNS)}, r.label FROM strat_trades s "
            "LEFT JOIN regimes r ON r.market = s.market AND r.day = s.day")
     acc: dict = {}
+    z_min = candidate_z()
     for row in conn.execute(sql):
-        market, name, day, trig, tp1, wit, wit_trig = row[:7]
-        values = dict(zip(COLUMNS, row[7:7 + len(COLUMNS)]))
+        market, name, day, trig, tp1, wit, wit_trig, rank = row[:8]
+        values = dict(zip(COLUMNS, row[8:8 + len(COLUMNS)]))
         label = row[-1] or "inconnu"
         a = acc.setdefault((market, name), {"signaux": 0, "declenches": 0, "gagnants": 0, "tp1": 0,
                                             "sorties": defaultdict(Mean), "temoin": Mean(), "ecart": Mean(),
-                                            "regimes": defaultdict(Mean), "manques": 0})
+                                            "regimes": defaultdict(Mean), "rangs": defaultdict(Mean), "manques": 0})
         a["signaux"] += 1
         if not trig:
             continue
@@ -80,19 +100,26 @@ def _strategies(conn: sqlite3.Connection) -> dict:
             a["sorties"][c].add(day, values[c])
         a["manques"] += values["r_manque"] is None
         a["regimes"][label].add(day, values["r_net"])
+        a["rangs"][_rank_bucket(rank)].add(day, values["r_net"])
         if wit_trig and wit is not None and values["r_net"] is not None:
             a["temoin"].add(day, wit)
             a["ecart"].add(day, values["r_net"] - wit)
     for (market, name), a in acc.items():
         n = a["declenches"]
         main = a["sorties"]["r_net"].result()
+        brut = a["sorties"]["r_gross"].result()["esperance_r"]
         ecart = a["ecart"].result()
         item = {
             "nom": ST.LABELS.get(name, name), "signaux": a["signaux"], "declenches": n,
             "taux_declenchement": round(n / a["signaux"], 4) if a["signaux"] else None,
             "jours": main["jours"], **{k: main[k] for k in ("esperance_r", "ic95")},
             "reussite": round(a["gagnants"] / n, 4) if n else None, "tp1": round(a["tp1"] / n, 4) if n else None,
-            "sorties": {c: a["sorties"][c].result() for c in ("r_net", "r_sans_be", "r_2r", "r_suiveur")},
+            "sorties": {c: a["sorties"][c].result() for c in ST.EXITS},
+            "brut_r": brut,
+            "frais_r": round(brut - main["esperance_r"], 4) if brut is not None and main["esperance_r"] is not None
+            else None,
+            "par_rang": {k: a["rangs"][k].result() for _, _, k in (*RANK_BUCKETS, (0, 0, "rang inconnu"))
+                         if k in a["rangs"]},
             "robustesse": {c: a["sorties"][c].result() for c in ("r_glisse_x2", "r_glisse_x3", "r_retard", "r_manque")},
             "ordres_limites_retires": a["manques"],
             "temoin": {"esperance_r": a["temoin"].result()["esperance_r"], "ecart_r": ecart["esperance_r"],
@@ -101,7 +128,7 @@ def _strategies(conn: sqlite3.Connection) -> dict:
             "echantillon_faible": n < MIN_N,
         }
         ci = item["ic95"]
-        item["candidate"] = bool(ci and ci[0] > 0 and (ecart["z"] or 0) >= CANDIDATE_Z and n >= MIN_N)
+        item["candidate"] = bool(ci and ci[0] > 0 and (ecart["z"] or 0) >= z_min and n >= MIN_N)
         out.setdefault(market, {})[name] = item
     for market, items in out.items():
         out[market] = dict(sorted(items.items(), key=lambda kv: -(kv[1]["esperance_r"] if kv[1]["esperance_r"]
@@ -144,8 +171,9 @@ def diagnostic_v1(conn: sqlite3.Connection) -> dict:
 
 
 def report(conn: sqlite3.Connection) -> dict:
-    out = {"declaration": {"le": ST.REGISTERED_ON, "essais": len(ST.trials()), "sorties": ST.EXITS,
-                           "robustesse": ST.STRESS, "doc": "docs/labo-strategies.md"},
+    out = {"declaration": {"numero": ST.DECLARATION, "le": ST.REGISTERED_ON, "essais": len(ST.trials()),
+                           "z_candidate": candidate_z(), "sorties": ST.EXITS, "robustesse": ST.STRESS,
+                           "doc": "docs/labo-strategies.md"},
            "scelle": SEAL.describe(), "strategies": {}, "diagnostic_v1": {}}
     try:  # base pas encore migrée par le worker (lecture seule) : tableau vide plutôt qu'une erreur
         out["strategies"] = _strategies(conn)
@@ -180,8 +208,10 @@ def _r(x) -> str:
 def text(rep: dict | None) -> str:
     if not rep:
         return "🧪 **Stratégies du labo v2** : pas encore de mesure (le rejeu n'a pas encore traité de jour avec elles)."
-    lines = [f"🧪 **Stratégies du labo v2** · {rep['declaration']['essais']} essais déclarés le "
-             f"{rep['declaration']['le']} · espérance nette en R par trade [IC 95 %]"]
+    decl = rep["declaration"]
+    lines = [f"🧪 **Stratégies du labo v2** · {decl['essais']} essais déclarés (déclaration n° "
+             f"{decl.get('numero', 1)}) · espérance nette en R par trade [IC 95 %] · ✅ = IC au-dessus de 0 "
+             f"et témoin battu à z ≥ {str(decl.get('z_candidate', 2)).replace('.', ',')}"]
     for market, items in (rep.get("strategies") or {}).items():
         lines.append(f"**{MARKET_FR.get(market, market)}**")
         for name, it in items.items():
@@ -190,7 +220,8 @@ def text(rep: dict | None) -> str:
             wit = it.get("temoin") or {}
             flag = "✅ " if it.get("candidate") else ""
             lines.append(f"{flag}{it['nom']} : {_r(it['esperance_r'])} R{ci_txt} · {it['declenches']} trades, "
-                         f"{it['jours']} j · réussite {round(100 * (it['reussite'] or 0))} % · "
+                         f"{it['jours']} j · réussite {round(100 * (it['reussite'] or 0))} % · frais "
+                         f"{_r(-(it.get('frais_r') or 0)) if it.get('frais_r') is not None else 'n/d'} R · "
                          f"vs témoin {_r(wit.get('ecart_r'))} R (z {wit.get('z') if wit.get('z') is not None else 'n/d'})"
                          + (" · échantillon faible" if it.get("echantillon_faible") else ""))
     diag = (rep.get("diagnostic_v1") or {}).get("stock")

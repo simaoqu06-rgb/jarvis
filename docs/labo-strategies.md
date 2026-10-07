@@ -66,9 +66,77 @@ pas d'avantage d'entrée, quelle que soit son espérance.
 - Classement par **espérance nette en R** avec son intervalle de confiance à 95 % en grappes par jour.
   Le taux de réussite est affiché, jamais utilisé pour classer.
 - « Candidate » (✅) = borne basse de l'intervalle au-dessus de zéro, au moins 30 trades, et écart au
-  témoin avec z ≥ 2. Ce n'est pas une promotion.
+  témoin avec z ≥ 2 (relevé au seuil corrigé du nombre d'essais par la déclaration n° 2). Ce n'est pas
+  une promotion.
 - Aucune promotion avant : au moins un an de rejeu couvrant au moins deux régimes de marché, puis une
   seule ouverture du bloc scellé, puis le forward-test.
+
+## Déclaration n° 2 (7 octobre 2026, 19 h UTC) : supports et résistances de la formation EmperorBTC
+
+À ce moment, la déclaration n° 1 avait mesuré un seul jour crypto ; le choix vient de la demande de
+Simão, pas de ce résultat. Sa demande : que JARVIS établisse ses supports et résistances comme dans la
+formation EmperorBTC et s'en serve pour l'entrée, la sortie et les confirmations. v1 calcule déjà des
+niveaux (stop sous le dernier creux, objectifs sur les résistances), mais elle entre à heure fixe, sans
+attendre la confirmation. Le challenger du labo ne fait que filtrer v1 : entrer sur les niveaux demande
+donc de nouvelles stratégies, mesurées comme les autres.
+
+**Ce que dit le chapitre S/R du manuel** (et que le code suit) : les supports et résistances sont des
+zones, pas des lignes, tracées sur les creux et sommets de réaction en touchant le plus de points
+possible ; une résistance cassée devient support ; entrer directement au contact se fait chasser
+(« chasse aux stops ») ; d'où deux entrées : **solution 1** cassure, retest, confirmation ;
+**solution 2** rebond sur le support, puis cassure d'une résistance au-dessus. Les chiffres de v1
+vont dans son sens : le « rebond sur pivot » (entrée sans confirmation) perd −0,10 R en crypto
+(6 447 trades), et toutes les étiquettes perdent en actions.
+
+**Zones S/R** (`strategies.zones`), calculées une fois au début de la fenêtre des signaux, avec ce qui
+est connu alors :
+
+- creux et sommets de réaction (plus bas ou plus haut que les 3 bougies de chaque côté, comme v1) en
+  5 min, confirmés avant la fenêtre (150 bougies pour les actions, soit deux séances ; 288 pour la
+  crypto, soit 24 h), et en journalier sur les 40 dernières séances ;
+- points pivots de la veille (P, S1-S3, R1-R3), plus haut et plus bas de la veille ;
+- niveaux regroupés quand ils sont à moins de 0,5 ATR (5 min, dernière bougie avant la fenêtre) du
+  premier niveau de la zone ; une zone n'est valide qu'avec **au moins 2 contacts** ;
+- une zone n'a pas de rôle fixe : sous le prix elle est support, au-dessus résistance.
+
+| Nom | Marchés | Déclencheur | Stop |
+|---|---|---|---|
+| `cassure_zone_retest` | actions, crypto | Solution 1. Clôture au-dessus d'une zone alors que la précédente était dessous ; dans les 12 bougies, retour sur la zone (plus bas entre bas de zone − 0,5 ATR et haut de zone + 0,1 ATR) avec clôture au-dessus. Stop d'achat 1 pas au-dessus de la bougie du retest, valable 3 bougies. | min(plus bas du retest, bas de zone) − 0,1 ATR |
+| `rebond_confirme` | actions, crypto | Solution 2. Le prix, qui clôturait au-dessus d'une zone, la touche (même bande) et clôture sans la perdre (au-dessus du bas de zone) ; la plus haute zone touchée compte. Pas d'entrée au contact : stop d'achat 1 pas au-dessus du plus haut des 6 dernières bougies (la résistance la plus proche), valable 12 bougies, **annulé si le stop est touché avant**. | min(plus bas du contact, bas de zone) − 0,1 ATR |
+
+**Sortie EmperorBTC** (`r_emperor`, sur toutes les stratégies et sur v1) : objectifs sur les prochaines
+résistances (bas des zones au-dessus de l'entrée, 0,1 ATR avant, à au moins 0,5 R ; complétés jusqu'à
+trois par les multiples de R suivants ; v1 garde ses propres objectifs), gestion v1 (un tiers par
+objectif, stop à l'entrée après TP1), et sortie anticipée sur les signes de retournement du manuel
+(`signals.exit_signals`, le code des alertes en direct : divergence RSI, anomalie de Weis, avance sous
+le volume moyen, bougie de retournement avec volume) quand le trade est en gain. Soldée à la clôture de
+la bougie qui suit le signal : c'est une alerte, Simão passe l'ordre à la main.
+
+Pas repris : le trident du jour (Stoch RSI + VWAP + pivot), déjà mesuré par v1 (−0,07 R en crypto,
+négatif en actions) ; l'entrée directe au contact d'un support (déconseillée par le manuel).
+
+**Essais déclarés : 60** (actions : v1 + 6 stratégies × 5 sorties ; crypto : v1 + 4 stratégies × 5
+sorties).
+
+**Règle de lecture renforcée** (s'applique aussi à la déclaration n° 1, avant tout résultat) :
+« candidate » exige désormais un écart au témoin avec **z ≥ seuil corrigé du nombre d'essais**
+(Bonferroni unilatéral à 5 % : 2,96 pour 32 essais, 3,14 pour 60), en plus de la borne basse de
+l'intervalle au-dessus de zéro et de 30 trades. Avec z ≥ 2 et 60 essais, on attendrait environ une
+fausse candidate par hasard. Le tableau montre aussi les frais (brut − net) et l'espérance par tranche
+de rang de volume, sans rien filtrer.
+
+Les jours déjà traités sous la déclaration n° 1 sont recalculés avec toutes les stratégies par le
+rattrapage (`strategies.progress_job` change avec le numéro de déclaration), pour que chaque stratégie
+soit mesurée sur les mêmes jours.
+
+**Council** (Sceptique, Pragmatique, Critique : GO modifié à l'unanimité). Retenu : pas de trident,
+paramètres figés ici avant le premier rejeu, sortie codée une seule fois et exécutée une bougie plus
+tard, seuil corrigé, zones calculées seulement avec ce qui est connu avant la fenêtre. Désaccord le plus
+fort : le Sceptique jugeait la cassure de zone trop proche de `cassure_retest` (plus haut de la veille)
+et voulait rester vers 40 essais ; gardée parce que c'est la solution 1 du manuel sur ses vraies zones,
+le seuil corrigé payant le prix des essais en plus. Point à suivre : les frais pèsent lourd (v1
+actions : brut −0,07 R, net −0,23 R ; crypto : brut +0,00 R, net −0,13 R) ; un stop serré en 5 min
+les grossit en R.
 
 ## Bloc scellé
 

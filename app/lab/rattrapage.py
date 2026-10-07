@@ -8,9 +8,11 @@ n'est stocké, le disque ne bouge pas), et on calcule les mêmes lignes qu'en di
   trades_sealed) : entrée, stop, objectifs, heure de décision. Le prix « dernier cours » de v1 est
   son prix d'entrée (v1 entre toujours au dernier cours connu).
 
-Un curseur par marché et par origine (progress strats:<marché>, clé rattrapage:<origine>) avance jour
-par jour jusqu'au premier jour calculé par le rejeu lui-même (inline_from:<origine>, posé par
-runner.run_day). Reprenable, idempotent (replace_strat), borné en temps par passage du worker.
+Un curseur par marché et par origine (progress strategies.progress_job(marché), clé
+rattrapage:<origine>) avance jour par jour jusqu'au premier jour calculé par le rejeu lui-même
+(inline_from:<origine>, posé par runner.run_day). Reprenable, idempotent (replace_strat), borné en temps
+par passage du worker. La clé dépend de la déclaration en vigueur : une nouvelle déclaration (stratégie
+ajoutée) repart du début, et chaque jour est recalculé avec toutes les stratégies.
 """
 import json
 import logging
@@ -27,7 +29,7 @@ from app.lab.db import LabDB
 log = logging.getLogger(__name__)
 ORIGINS = ("replay", "live")
 STOCK_BATCH = 100
-DAILY_LOOKBACK_DAYS = 60
+DAILY_LOOKBACK_DAYS = 90  # ≥ strategies.ZONE_DAILY_BARS séances et la MM 20 jours
 
 
 def _start(db: LabDB, market: str, origin: str) -> date | None:
@@ -40,7 +42,7 @@ def _start(db: LabDB, market: str, origin: str) -> date | None:
 
 def due_days(db: LabDB, market: str, origin: str) -> list[date]:
     """Jours à rattraper, dans l'ordre : du curseur (exclu) au premier jour calculé en ligne (exclu)."""
-    job = f"strats:{market}"
+    job = ST.progress_job(market)
     inline = db.get(job, f"inline_from:{origin}")
     start = _start(db, market, origin)
     if not inline or not start:
@@ -133,7 +135,7 @@ async def crypto_rows(db: LabDB, origin: str, day: date, transport=None) -> list
 async def step(db: LabDB, market: str, max_seconds: float, transport=None) -> int:
     """Rattrape des jours (rejeu puis direct) dans le temps donné ; renvoie le nombre de jours faits."""
     started, done = time.monotonic(), 0
-    job = f"strats:{market}"
+    job = ST.progress_job(market)
     for origin in ORIGINS:
         for day in due_days(db, market, origin):
             if done and time.monotonic() - started >= max_seconds:

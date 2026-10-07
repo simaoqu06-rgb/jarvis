@@ -178,6 +178,130 @@ def test_cassure_retest():
     assert cands[0]["entry"] == pytest.approx(111.11) and cands[0]["stop"] < level
 
 
+# --- Déclaration n° 2 : zones S/R EmperorBTC ---------------------------------------------
+
+def zigzag_hist():
+    """Deux séances qui oscillent entre 108 et 110 par pas de 0,25 : creux de réaction à 107,98 et
+    sommets à 110,02, sur les mêmes prix que le plus bas (108) et le plus haut (110) de la veille."""
+    rows, p, step = [], 110.0, -0.25
+    for _ in range(156):
+        c = p + step
+        rows.append((p, max(p, c) + 0.02, min(p, c) - 0.02, c))
+        p = c
+        if p <= 108.0 or p >= 110.0:
+            step = -step
+    return (bars_from(CO.session_ts(CO.sessions_back(DAY, 2))[0], rows[:78])
+            + bars_from(CO.session_ts(CO.sessions_back(DAY, 1))[0], rows[78:]))
+
+
+def zone_day(rows):
+    _, _, daily = stock_day_bars()  # veille : plus haut 110, plus bas 108, clôture 109,5
+    return make_day(zigzag_hist(), bars_from(OPEN, rows + [(r[3], r[3] + 0.1, r[3] - 0.05, r[3] + 0.05)
+                                                        for r in rows[-1:]] * 40), daily)
+
+
+REBOND = [(109.0, 109.1, 108.9, 109.0)] * 3 + [
+    (109.0, 109.02, 108.78, 108.8), (108.8, 108.82, 108.58, 108.6), (108.6, 108.62, 108.38, 108.4),
+    (108.4, 108.42, 108.18, 108.2),
+    (108.2, 108.25, 107.95, 108.1),    # contact de la zone 108, clôture au-dessus du bas de zone
+    (108.1, 108.5, 108.05, 108.45), (108.45, 108.85, 108.4, 108.8), (108.8, 109.2, 108.75, 109.15)]
+
+
+def test_zones_s_r_emperor():
+    d = zone_day(REBOND)
+    zs = d.zones()
+    lows = [z for z in zs if z[0] < 108.1]
+    highs = [z for z in zs if 109.9 < z[0] < 110.1]
+    assert len(lows) == 1 and lows[0][0] == pytest.approx(107.98) and lows[0][2] >= 3   # creux + veille
+    assert len(highs) == 1 and highs[0][0] == pytest.approx(110.0) and highs[0][2] >= 3
+    assert all(z[2] >= ST.ZONE_MIN_CONTACTS for z in zs)
+    # Un pivot seul (P à 109,17) n'est pas une zone : une ligne valide touche au moins deux points.
+    assert not any(z[0] <= 109.17 <= z[1] for z in zs)
+    # Rien de ce qui se passe dans la fenêtre ne change les zones.
+    crash = REBOND[:3] + [(100.0, 100.5, 99.5, 100.0)] * 10
+    assert zone_day(crash).zones() == zs
+
+
+def test_rebond_confirme_attend_la_cassure_de_la_resistance():
+    d = zone_day(REBOND)
+    first = ST.rebond_confirme(d)[0]
+    i = first["i"]
+    assert i - d.d0 == 7
+    assert first["entry"] == pytest.approx(max(d.h[i - 5:i + 1]) + 0.01)   # pas d'entrée au contact
+    assert first["stop"] == pytest.approx(107.95 - ST.STOP_BUFFER_ATR * d.atr[i])
+    assert first["entry_until"] == d.t[i] + 300 + ST.BOUNCE_VALID_BARS * 300
+    rows = {r["strategy"]: r for r in ST.strategy_rows(d, "AAA", 3, 0.0)}
+    assert rows["rebond_confirme"]["triggered"] == 1
+    assert rows["rebond_confirme"]["filled_at"] == d.t[i + 3]
+
+
+def test_rebond_confirme_annule_si_le_stop_casse_avant():
+    rows = REBOND[:8] + [(108.1, 108.2, 107.5, 107.6), (107.6, 109.5, 107.5, 109.4)]
+    d = zone_day(rows)
+    first = ST.rebond_confirme(d)[0]
+    assert first["i"] - d.d0 == 7 and first["entry_until"] == d.t[first["i"] + 1]
+    plan = ST._plan(first["entry"], first["stop"], ST._r_targets(first["entry"], first["stop"]))
+    res = ST._sim(d, plan, first["decided_at"], first["entry_until"], d.exit_at(first["decided_at"]),
+                  SIM.costs("stock", first["entry"], 3), "stop", d.c[first["i"]])
+    assert not res["triggered"]   # le prix repasse l'entrée à la bougie suivante, mais l'ordre est annulé
+
+
+def test_cassure_zone_retest():
+    rows = [(109.6, 109.7, 109.5, 109.6)] * 3 + [
+        (109.6, 109.9, 109.55, 109.85), (109.85, 110.4, 109.8, 110.3),   # cassure de la zone 110
+        (110.3, 110.6, 110.25, 110.5), (110.5, 110.55, 110.0, 110.2),    # retour sur la zone, clôture au-dessus
+        (110.2, 110.9, 110.15, 110.8)]
+    d = zone_day(rows)
+    first = ST.cassure_zone_retest(d)[0]
+    assert first["i"] - d.d0 == 6
+    assert first["entry"] == pytest.approx(110.56) and first["stop"] == pytest.approx(110.0 - 0.1 * d.atr[first["i"]])
+
+
+def test_sortie_emperor_objectifs_et_signal_de_retournement():
+    d = zone_day(REBOND)
+    c = ST.rebond_confirme(d)[0]
+    targets = ST.emperor_targets(d, c["entry"], c["stop"])
+    risk = c["entry"] - c["stop"]
+    assert targets[0] == pytest.approx(110.0 - ST.TARGET_BUFFER_ATR * d.zone_atr)   # prochaine résistance
+    assert targets == sorted(targets) and len(targets) == 3
+    assert targets[1] - targets[0] >= ST.MIN_TARGET_R * risk - 1e-9
+    plan = ST._plan(c["entry"], c["stop"], targets)
+    cost = SIM.costs("stock", c["entry"], 3)
+    args = (d, plan, c["decided_at"], c["entry_until"], d.exit_at(c["decided_at"]), cost, "stop", d.c[c["i"]])
+    d._exit_signal = {k: False for k in range(len(d.t))}
+    plain = ST._sim(*args)
+    assert ST._emperor(*args) == plain["r_net"]
+    d._exit_signal = {k: True for k in range(len(d.t))}
+    k0 = d.t.index(plain["filled_at"])
+    k = next(k for k in range(k0, len(d.t)) if d.c[k] > plain["fill_price"])
+    early = ST._sim(*args[:4], d.t[k + 1] + 300, *args[5:], exit_reason_end="signal_sortie")
+    assert early["exit_reason"] == "signal_sortie" and ST._emperor(*args) == early["r_net"]
+
+
+def test_nouvelle_declaration_relance_le_rattrapage(tmp_path, monkeypatch):
+    db = LabDB(str(tmp_path / "lab.db"))
+    db.set("replay:stock", "start", "2026-09-14")
+    db.set(ST.progress_job("stock"), "inline_from:replay", "2026-09-16")
+    db.set(ST.progress_job("stock"), "rattrapage:replay", "2026-09-15")
+    assert RAT.due_days(db, "stock", "replay") == []
+    monkeypatch.setattr(ST, "DECLARATION", ST.DECLARATION + 1)
+    assert RAT.due_days(db, "stock", "replay") == []          # pas encore de frontière pour la nouvelle
+    db.set(ST.progress_job("stock"), "inline_from:replay", "2026-09-17")
+    assert RAT.due_days(db, "stock", "replay") == [date(2026, 9, 14), date(2026, 9, 15), date(2026, 9, 16)]
+
+
+def test_seuil_candidate_corrige_du_nombre_d_essais():
+    assert SS.candidate_z(32) == pytest.approx(2.96, abs=0.01) and SS.candidate_z(60) == pytest.approx(3.14, abs=0.01)
+    db = LabDB(":memory:")
+    _rows(db, "pullback", 0.3, 0.2, days=40)   # bat son témoin (z ≈ 2,5), mais trop peu pour 60 essais
+    db.conn.execute("UPDATE strat_trades SET temoin_r = r_net - (0.1 + CASE WHEN CAST(substr(day, 9, 2) AS INTEGER) "
+                    "% 2 = 1 THEN 0.25 ELSE -0.25 END), r_gross = r_net + 0.15")
+    rep = SS.report(db.conn)
+    item = rep["strategies"]["stock"]["pullback"]
+    assert 2 <= item["temoin"]["z"] < SS.candidate_z() and not item["candidate"]
+    assert item["frais_r"] == pytest.approx(0.15) and "rang inconnu" in item["par_rang"]
+
+
 # --- Lignes, témoin, v1 -------------------------------------------------------------------
 
 def test_une_ligne_par_strategie_et_temoin_reproductible():
@@ -206,7 +330,8 @@ def test_v1_rejouee_avec_ses_objectifs():
 
 def test_essais_declares():
     t = ST.trials()
-    assert len(t) == 32 and {x["exit"] for x in t} == set(ST.EXITS)
+    # Déclaration n° 1 : 32 essais ; n° 2 : + 2 stratégies sur deux marchés et la sortie EmperorBTC partout.
+    assert len(t) == 60 and {x["exit"] for x in t} == set(ST.EXITS) and len(ST.EXITS) == 5
 
 
 # --- Bloc scellé --------------------------------------------------------------------------
@@ -257,7 +382,7 @@ async def test_rejeu_ecrit_les_strategies_et_la_frontiere_du_rattrapage(tmp_path
     await R.replay(START, END, "stock", db, collect=False, now=NOW)
     names = {r[0] for r in db.conn.execute("SELECT DISTINCT strategy FROM strat_trades")}
     assert "v1" in names and names <= {"v1", *ST.STRATEGIES}
-    assert db.get("strats:stock", "inline_from:replay") == START.isoformat()
+    assert db.get(ST.progress_job("stock"), "inline_from:replay") == START.isoformat()
     n = db.conn.execute("SELECT COUNT(*) FROM strat_trades").fetchone()[0]
     await R.replay(START, END, "stock", db, collect=False, now=NOW)  # rien à refaire, rien de doublé
     assert db.conn.execute("SELECT COUNT(*) FROM strat_trades").fetchone()[0] == n
@@ -284,7 +409,7 @@ async def test_rattrapage_relit_les_bougies_sans_les_stocker(tmp_path, monkeypat
     # Le labo v2 arrive après coup : on efface ses lignes et on fait comme si le 16 était son premier jour.
     stored = {s: db.get_bars("stock", s, 5, 0, 2**40) for s in ("AAA", "BBB")}
     db.conn.execute("DELETE FROM strat_trades WHERE day < '2026-09-16'")
-    db.set("strats:stock", "inline_from:replay", "2026-09-16")
+    db.set(ST.progress_job("stock"), "inline_from:replay", "2026-09-16")
     db.conn.execute("DELETE FROM bars WHERE tf = 5")  # le rejeu a fait le ménage
 
     async def fake_bars(symbols, tf, start, end, transport=None):
@@ -363,4 +488,4 @@ def test_route_api_des_strategies(tmp_path, monkeypatch):
     _rows(db, "pullback", 0.3, -0.2)
     r = TestClient(main.app).get("/api/lab/strategies", headers={"X-Lab-Key": "cle"})
     assert r.status_code == 200 and "pullback" in r.json()["strategies"]["stock"]
-    assert r.json()["declaration"]["essais"] == 32
+    assert r.json()["declaration"]["essais"] == 60 and r.json()["declaration"]["z_candidate"] == 3.14
