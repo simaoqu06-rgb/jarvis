@@ -28,6 +28,8 @@ NEW_YORK = ZoneInfo("America/New_York")
 PARIS = ZoneInfo("Europe/Paris")
 OPEN, CLOSE, EARLY_CLOSE = time(9, 30), time(16, 0), time(13, 0)
 TRADES_PATH = os.getenv("JARVIS_TRADES_PATH", "data/trades.json")
+# Risque par défaut de plan_from_bars (labo, tests). En direct, build_plan propose le risque permis
+# par le grade de JARVIS (app/lab/grade.py), sauf si un risque est demandé explicitement.
 RISK_PCT = env_float("JARVIS_RISK_PCT", 3.0)  # EmperorBTC : 3 % du capital par trade, 5 % = agressif
 
 # Bougies utilisées pour le plan et l'estimation des délais, par marché.
@@ -319,7 +321,30 @@ async def build_plan(
     from app.lab import lessons as LESSONS  # import tardif : le labo importe ce module
 
     await LESSONS.apply(plan, daily, cat, now)
+    apply_grade(plan, capital, risk_pct, now)
     return plan
+
+
+def taken_trades() -> list[dict]:
+    """Trades pris par Simão (remplacé par le scheduler au démarrage : son carnet)."""
+    return []
+
+
+def apply_grade(plan: dict, capital: float | None, risk_pct: float | None, now: datetime,
+                trades: list[dict] | None = None) -> None:
+    """Grade de JARVIS : risque proposé par trade (grade, risque déjà ouvert, arrêt de la journée).
+    Un risque demandé explicitement est gardé tel quel. Jamais d'exception : plan inchangé en cas de souci."""
+    from app.lab import grade as GRADE  # import tardif : le labo importe ce module
+
+    try:
+        g = GRADE.risk_now(plan["market"], taken_trades() if trades is None else trades, now)
+    except Exception as exc:
+        log.warning("Grade du labo non appliqué (%s: %s)", type(exc).__name__, exc)
+        return
+    plan["grade"] = g
+    if risk_pct is None:
+        cap = capital if capital is not None else (env_float("JARVIS_CAPITAL", 0.0) or None)
+        plan["sizing"] = sizing(plan["entry"], plan["stop"], cap, g["risque_propose"]) if g["risque_propose"] > 0 else None
 
 def _num(x: float) -> str:
     return f"{x:,.6g}".replace(",", " ")
@@ -369,6 +394,10 @@ def plan_text(p: dict) -> str:
         s = p["sizing"]
         lines.append(f"💰 Risque {s['risk_pct']:g} % = {s['risk_amount']:g} · taille {s['quantity']:g} "
                      f"({_num(s['notional'])}) · levier {s['leverage']:g}×")
+    if p.get("grade"):
+        from app.lab import grade as GRADE
+
+        lines.append(GRADE.plan_line(p["grade"]))
     lines.append(f"-# {p['method']}")
     return "\n".join(lines)
 

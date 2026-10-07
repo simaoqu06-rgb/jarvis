@@ -124,9 +124,11 @@ def test_plan_from_bars_identique_a_build_plan(full_db, monkeypatch):
     monkeypatch.setattr(T.C, "safe_check", fake_cat)
     monkeypatch.setenv("JARVIS_CAPITAL", "10000")
     import asyncio
-    live = asyncio.run(T.build_plan("AAA", "stock", now=now))
+    # Risque demandé explicitement : gardé tel quel ; le grade du direct s'ajoute au plan sans le changer.
+    live = asyncio.run(T.build_plan("AAA", "stock", now=now, risk_pct=T.RISK_PCT))
     core = T.plan_from_bars("AAA", "stock", "long", inp["bars"], inp["daily"], inp["h4"], now, cat)
-    assert live == core
+    assert live["grade"]["grade"] == "non noté"
+    assert {k: v for k, v in live.items() if k != "grade"} == core
     assert live["sizing"] and live["targets"][0]["eta_text"]
 
 

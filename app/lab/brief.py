@@ -4,7 +4,8 @@ de règles par soirée (au plus 3 acceptées par la route POST /api/lab/rules).
 Contenu : dernier résumé du soir, statistiques clés (cache du worker), fiches catalyseurs à classer
 des 2 derniers jours (plafonnées), règles soumises récemment et leur verdict, méthode en place et
 challenger, dernier message du matin, place restante pour ce soir, types de catalyseurs permis et
-carnet des leçons (actives et démenties récentes, à relire avant d'analyser).
+carnet des leçons (actives et démenties récentes, à relire avant d'analyser) et grade de JARVIS
+(mesure, critères, mode survie, historique) pour le council du grade.
 """
 import fcntl
 import json
@@ -14,6 +15,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from app.lab import catalysts as CAT
+from app.lab import grade as GRADE
 from app.lab import lessons as L
 from app.lab import method as M
 from app.lab import stats as STATS
@@ -147,6 +149,13 @@ def _lessons(conn) -> dict | None:
         return None
 
 
+def _grade(conn) -> dict | None:
+    try:
+        return GRADE.brief(conn)
+    except Exception:  # base d'avant le grade (worker pas encore redémarré)
+        return None
+
+
 def size(data: dict) -> int:
     return len(json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode())
 
@@ -159,6 +168,7 @@ def build(conn, now: datetime, db_file: str, morning: dict | None = None, dm: bo
             "methode": M.state(conn), "resume": (SUM.latest(conn) or {}).get("resume"), "stats": _stats(conn),
             "fiches_a_classer": _catalysts(conn, now), "types_permis": list(CAT.TYPES),
             "regles_recentes": _rules(conn, now), "compteurs": V.counts(conn), "lecons": _lessons(conn),
+            "grade": _grade(conn),
             "point_du_matin": {k: morning.get(k) for k in ("jour", "etat", "rejetees", "propositions", "texte")}
             if morning else None}
     cut = False

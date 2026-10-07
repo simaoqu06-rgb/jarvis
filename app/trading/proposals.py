@@ -10,6 +10,10 @@ Labo 3 : les règles validées par le labo arrivent ici aussi (kind « labo », 
 mêmes `!oui N` / `!non N`, mêmes boutons, même cockpit). Leur décision ne touche pas aux réglages :
 elle est déposée dans la file du labo (data/lab_queue/decisions/) ; approuvée, la règle part en essai
 comme challenger ; refusée, elle rejoint la mémoire des échecs et n'est jamais reproposée.
+
+Grade de JARVIS (app/lab/grade.py) : une hausse de lettre du grade (qui augmente le risque proposé)
+arrive ici aussi (kind « grade », envoyée tout de suite en privé avec ses boutons). La décision est
+déposée dans la file du labo (data/lab_queue/grade/) ; le worker l'applique si la hausse tient encore.
 """
 import json
 import logging
@@ -64,6 +68,35 @@ class Proposals:
         self.save()
         return item
 
+    def grade(self, hausse_id: str) -> dict | None:
+        return next((p for p in self.items if p.get("kind") == "grade" and p.get("hausse") == hausse_id), None)
+
+    def propose_grade(self, hausse: dict, market_fr: str, current: str, target: str) -> dict | None:
+        """Hausse de lettre du grade ; None si déjà proposée. Les hausses dépassées sont remplacées."""
+        if self.grade(hausse["id"]):
+            return None
+        for p in self.pending("grade"):
+            if p.get("marche") == hausse["id"].split("-")[0]:
+                p["status"] = "replaced"
+        item = {"id": max((p["id"] for p in self.items), default=0) + 1, "kind": "grade",
+                "key": f"grade JARVIS {market_fr}", "value": target, "current": current, "why": hausse["raison"],
+                "hausse": hausse["id"], "marche": hausse["id"].split("-")[0], "status": "pending",
+                "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "decided_at": None}
+        self.items.append(item)
+        self.save()
+        return item
+
+    def retire_grade(self, live_ids: set[str]) -> int:
+        """Hausses en attente qui ne tiennent plus (baisse, nouvelle méthode) : remplacées."""
+        n = 0
+        for p in self.pending("grade"):
+            if p.get("hausse") not in live_ids:
+                p["status"] = "replaced"
+                n += 1
+        if n:
+            self.save()
+        return n
+
     def propose(self, key: str, value, why: str) -> dict | None:
         """Ajoute une proposition ; None si elle ne changerait rien, attend déjà, ou a été refusée."""
         if self.settings.get(key) == value:
@@ -95,6 +128,14 @@ class Proposals:
                 lab_method.enqueue_decision(lab_db.db_path(), p["empreinte"], "approuvee" if approve else "refusee", pid)
             except OSError as exc:
                 raise ValueError(f"file du labo inaccessible ({exc}), proposition {pid} toujours en attente")
+        elif p.get("kind") == "grade":
+            from app.lab import db as lab_db
+            from app.lab import grade as lab_grade
+
+            try:
+                lab_grade.enqueue_decision(lab_db.db_path(), p["hausse"], approve, pid)
+            except OSError as exc:
+                raise ValueError(f"file du labo inaccessible ({exc}), proposition {pid} toujours en attente")
         elif approve:
             self.settings.update({p["key"]: p["value"]})
         p["status"] = "approved" if approve else "refused"
@@ -108,12 +149,20 @@ def label(status: str) -> str:
 
 
 def text(p: dict) -> str:
+    if p.get("kind") == "grade":
+        return (f"**Proposition {p['id']}** : {p['key']} {p['current']} → **{p['value']}** (le risque proposé "
+                f"par trade augmente) · {p['why']}")
     if p.get("kind") == "labo":
         return f"**Proposition {p['id']}** : méthode {p['current']} + « {p['nom']} » · {p['why']}"
     return f"**Proposition {p['id']}** : `{p['key']}` {p['current']} → {p['value']} · {p['why']}"
 
 
 def decision_text(p: dict) -> str:
+    if p.get("kind") == "grade":
+        if p["status"] == "approved":
+            return (f"✅ Proposition {p['id']} approuvée : {p['key']} passe à {p['value']} au prochain passage du "
+                    "labo (si la mesure tient toujours)")
+        return f"❌ Proposition {p['id']} refusée : {p['key']} reste à {p['current']}"
     if p.get("kind") == "labo":
         if p["status"] == "approved":
             return f"✅ Proposition {p['id']} approuvée : « {p['nom']} » part en essai au labo (challenger)"

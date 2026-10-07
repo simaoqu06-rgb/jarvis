@@ -103,6 +103,11 @@ CREATE TABLE IF NOT EXISTS lessons (
     sens TEXT NOT NULL, pourquoi TEXT, status TEXT NOT NULL, metrics TEXT, soiree TEXT,
     created_at TEXT NOT NULL, measured_at TEXT, retired_at TEXT, retired_reason TEXT
 );
+-- Grade de JARVIS (grade.py) : historique des changements, par marché.
+CREATE TABLE IF NOT EXISTS grades (
+    id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, market TEXT NOT NULL, version TEXT,
+    rank INTEGER, measured INTEGER, source TEXT NOT NULL, reason TEXT, metrics TEXT, soiree TEXT
+);
 """
 # Colonnes ajoutées après coup (ALTER TABLE à l'ouverture par le worker ; idempotent).
 MIGRATIONS = {

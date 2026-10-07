@@ -649,7 +649,7 @@ function scoreHtml(p) {
 
 function planHtml(p) {
   const mark = { true: "✅", false: "❌", null: "➖" }, c = p.checklist;
-  const s = p.sizing;
+  const s = p.sizing, g = p.grade;
   return `<div class="preview">
     <div class="row between">
       <div class="row"><span class="pill ${p.side}">${p.side}</span><span class="sym">${esc(p.symbol)}</span><span class="pill ${verdictClass(c.verdict)}">${esc(c.verdict)}</span></div>
@@ -657,6 +657,7 @@ function planHtml(p) {
     </div>
     ${scoreHtml(p)}
     <div class="small muted" style="margin-top:4px">Stop ${esc(p.stop_source)}${s ? ` · 💰 risque ${s.risk_pct} % = ${fmt(s.risk_amount)} · taille ${fmt(s.quantity)} (${fmt(s.notional)}) · levier ${s.leverage}×` : ""}</div>
+    ${g ? `<div class="small" style="margin-top:4px">🏅 Grade JARVIS <b>${esc(g.grade)}</b> · risque proposé <b>${g.risque_propose} %</b>${g.observation ? " · plan en observation" : ""} <span class="muted">(${esc(g.raison)})</span></div>` : ""}
     <div class="tps">${p.targets.map((x) => `<div class="tp">
       <div class="name">${x.name}</div>
       <div class="lvl-line"><b class="num">${fmt(x.price)}</b> <span class="muted small">${pct(x.pct)} · ${x.r_multiple} R</span></div>
