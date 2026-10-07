@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import unicodedata
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -319,3 +320,52 @@ async def check_news(state: State) -> list[str]:
     state.remember("news", new_keys)
     state.data["news_titles"] = (seen_titles + new_titles)[-MAX_SEEN:]
     return [] if first_run else messages[:10]
+
+
+DISK_CRITICAL_PCT = 90.0
+
+
+def _size(n: float) -> str:
+    """Taille lisible à la française : 52 Ko, 12 Mo, 1,8 Go."""
+    for unit in ("o", "Ko", "Mo"):
+        if n < 1024:
+            return f"{n:.0f} {unit}"
+        n /= 1024
+    return f"{n:.1f} Go".replace(".", ",")
+
+
+def _biggest_files(folder: Path, n: int = 4) -> list[tuple[str, int]]:
+    try:
+        files = [(p.name, p.stat().st_size) for p in folder.iterdir() if p.is_file()]
+    except OSError:
+        return []
+    return sorted(files, key=lambda f: f[1], reverse=True)[:n]
+
+
+def check_disk(state: State, now: datetime, folder: str | None = None, usage=shutil.disk_usage) -> list[str]:
+    """Disque du serveur presque plein : une alerte par jour (une de plus si ça passe en critique).
+
+    Le dossier data/ est monté depuis le serveur : son disque est celui de la machine entière
+    (labo, images Docker, journaux). Rien n'est effacé ici, JARVIS prévient seulement.
+    """
+    folder = folder or config.DATA_DIR
+    try:
+        total, used, _free = usage(folder)
+    except OSError:
+        log.warning("Occupation du disque illisible pour %s", folder)
+        return []
+    pct = used / total * 100 if total else 0.0
+    level = 2 if pct >= DISK_CRITICAL_PCT else 1 if pct >= config.DISK_ALERT_PCT else 0
+    day = now.astimezone(PARIS).date().isoformat()
+    last = state.data.get("disk_alert") or {}
+    if not level or (last.get("day") == day and last.get("level", 0) >= level):
+        return []
+    state.data["disk_alert"] = {"day": day, "level": level}
+    head = "🚨 **Disque du serveur critique**" if level == 2 else "💾 **Disque du serveur bien rempli**"
+    lines = [f"{head} : {pct:.0f} % occupé ({_size(used)} sur {_size(total)})."]
+    files = ", ".join(f"{name} {_size(size)}" for name, size in _biggest_files(Path(folder)))
+    if files:
+        lines.append(f"Plus gros fichiers de data/ : {files}.")
+    lines.append("Ménage sans risque : `docker image prune -a -f && docker builder prune -f`. "
+                 "Les données du labo ne s'effacent pas sans ta décision.")
+    return ["\n".join(lines)]

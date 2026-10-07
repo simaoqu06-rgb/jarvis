@@ -40,4 +40,7 @@ MOVE_ALERT_PCT = env_float("JARVIS_MOVE_ALERT_PCT", 5.0)
 if not MOVE_ALERT_PCT > 0:  # 0, négatif ou NaN : palier impossible (division par zéro)
     MOVE_ALERT_PCT = 5.0
 QUAKE_MIN_MAGNITUDE = env_float("JARVIS_QUAKE_MIN_MAGNITUDE", 6.0)
+# Disque du serveur : alerte au-dessus de ce taux d'occupation, « critique » au-dessus de 90 %
+DISK_ALERT_PCT = env_float("JARVIS_DISK_ALERT_PCT", 75.0)
+DATA_DIR = os.getenv("JARVIS_DATA_DIR", "data")
 HOME_CITY = os.getenv("JARVIS_CITY", "").strip()
