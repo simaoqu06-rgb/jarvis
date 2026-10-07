@@ -365,7 +365,7 @@ function cardHtml(t) {
     }).join("")}</div>
     ${signals}
     <div class="t-foot">
-      <div class="small muted">Stop suivi <b class="num down">${fmt(t.stop_current)}</b>${t.stop_current === t.entry ? " (à l'entrée)" : ""} · ${hit}/${t.targets.length} TP${t.note ? ` · 📝 ${esc(t.note)}` : ""}</div>
+      <div class="small muted">Stop suivi <b class="num down">${fmt(t.stop_current)}</b>${t.stop_current === t.entry ? " (à l'entrée)" : ""} · ${hit}/${t.targets.length} TP${t.against_jarvis ? " · ⛔ contre l'avis de JARVIS" : ""}${t.note ? ` · 📝 ${esc(t.note)}` : ""}</div>
       <div class="row"><button class="ghost" data-close="${t.id}">Clôturer</button><button class="ghost danger" data-delete="${t.id}">Supprimer</button></div>
     </div>`;
 }

@@ -298,7 +298,8 @@ async def trading_open(req: TradeRequest):
     async with scheduler._lock:
         trade = scheduler.book.add(plan, req.note)
     if scheduler.enabled():
-        await _send("📌 Nouveau trade suivi\n" + trading.plan_text(trade))
+        head = trading.disagreement_text(trade) + "\n" if trading.against_jarvis(trade) else ""
+        await _send(head + "📌 Nouveau trade suivi\n" + trading.plan_text(trade))
     return trading.summary(trade)
 
 
@@ -306,6 +307,12 @@ async def trading_open(req: TradeRequest):
 async def trading_list(status: str | None = Query(None, description="open ou closed")):
     trades = [t for t in scheduler.book.trades if status is None or t["status"] == status]
     return [trading.summary(t) for t in reversed(trades)]
+
+
+@app.get("/api/trading/disagreements")
+async def trading_disagreements():
+    """Trades pris avec et contre l'avis de JARVIS (plans NO GO) : qui avait raison."""
+    return trading.disagreements(scheduler.book)
 
 
 @app.get("/api/trading/live")

@@ -595,7 +595,79 @@ def summary(trade: dict) -> dict:
     move = sign * (trade["last_price"] - trade["entry"]) / trade["entry"] * 100
     risk = abs(trade["entry"] - trade["stop"])
     r_now = sign * (trade["last_price"] - trade["entry"]) / risk if risk else 0
-    return trade | {"move_pct": round(move, 2), "r_now": round(r_now, 2)}
+    return trade | {"move_pct": round(move, 2), "r_now": round(r_now, 2),
+                    "against_jarvis": against_jarvis(trade)}
+
+
+# --- Désaccords : Simão contre JARVIS, mesuré ----------------------------------------------
+# JARVIS ne dit pas oui parce que c'est Simão : un trade pris sur un plan NO GO est marqué
+# « contre l'avis de JARVIS » et !desaccords compare ces trades aux autres pour voir qui avait raison.
+
+def against_jarvis(p: dict) -> bool:
+    """Vrai si le plan était noté NO GO (un plan sans note n'est ni pour ni contre)."""
+    return bool(p.get("score")) and not p["score"]["go"]
+
+
+def disagreement_text(p: dict) -> str:
+    """Le désaccord dit franchement, avant le plan, quand Simão prend un trade noté NO GO."""
+    reasons = p["score"]["reasons"] or ["note composite trop basse"]
+    return (f"⛔ **Je ne suis pas d'accord** : ce plan est NO GO ({' ; '.join(reasons)}). "
+            "Je le suis quand même, marqué « contre l'avis de JARVIS » ; `!desaccords` dira qui avait raison.")
+
+
+def realized_r(trade: dict) -> float | None:
+    """Gain d'un trade terminé en R, avec un tiers de la position par objectif (sa gestion habituelle)."""
+    if trade["status"] != "closed" or not trade.get("targets"):
+        return None
+    sign = 1 if trade["side"] == "long" else -1
+    risk = abs(trade["entry"] - trade["stop"])
+    if not risk:
+        return None
+    r = lambda price: sign * (price - trade["entry"]) / risk  # noqa: E731
+    legs = len(trade["targets"])
+    hit = min(trade["targets_hit"], legs)
+    total = sum(r(t["price"]) for t in trade["targets"][:hit]) / legs
+    if hit < legs:
+        exits = [e for e in trade["events"] if e["kind"] in ("stop", "close")]
+        total += (legs - hit) / legs * r(exits[-1]["price"] if exits else trade["last_price"])
+    return round(total, 2)
+
+
+def disagreements(book: Book) -> dict:
+    """Trades pris avec et contre l'avis de JARVIS : nombre, réussite et gain moyen des trades terminés."""
+    groups = {"avec": [], "contre": []}
+    for t in book.trades:
+        if t.get("score"):
+            groups["contre" if against_jarvis(t) else "avec"].append(t)
+    out = {}
+    for name, trades in groups.items():
+        rs = [x for x in (realized_r(t) for t in trades) if x is not None]
+        out[name] = {"total": len(trades), "closed": len(rs), "open": sum(t["status"] == "open" for t in trades),
+                     "wins": sum(x > 0 for x in rs), "avg_r": round(sum(rs) / len(rs), 2) if rs else None,
+                     "sum_r": round(sum(rs), 2)}
+    return out
+
+
+def disagreements_text(st: dict) -> str:
+    """Qui avait raison, en clair. Pas de conclusion tant que l'échantillon est trop petit."""
+    lines = ["**Désaccords : toi contre JARVIS** (trades suivis, un tiers par objectif)"]
+    for name, label in (("avec", "Plans GO (JARVIS d'accord)"), ("contre", "Plans NO GO pris quand même")):
+        g = st[name]
+        if not g["closed"]:
+            lines.append(f"{label} : {g['total']} trade(s), aucun terminé.")
+            continue
+        lines.append(f"{label} : {g['closed']} terminé(s), {g['wins']} gagnant(s), "
+                     f"{g['avg_r']:+.2f} R en moyenne, {g['sum_r']:+.2f} R au total"
+                     + (f" ({g['open']} en cours)" if g["open"] else ""))
+    a, c = st["avec"], st["contre"]
+    if a["closed"] < 10 or c["closed"] < 10:
+        lines.append("-# Pas encore de verdict : il faut au moins 10 trades terminés de chaque côté.")
+    elif c["avg_r"] > a["avg_r"]:
+        lines.append("➡️ Pour l'instant **tu as raison contre JARVIS** : sa note NO GO est trop sévère, "
+                     "elle est à revoir.")
+    else:
+        lines.append("➡️ Pour l'instant **JARVIS a raison** : les plans NO GO pris quand même rapportent moins.")
+    return "\n".join(lines)
 
 
 async def live(book: Book) -> list[dict]:
