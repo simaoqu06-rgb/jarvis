@@ -9,7 +9,7 @@ carnet des leçons (actives et démenties récentes, à relire avant d'analyser)
 import fcntl
 import json
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -104,9 +104,16 @@ def _stats(conn) -> dict | None:
 
 
 def _catalysts(conn, now: datetime) -> list[dict]:
+    """Fiches à classer : celles des 2 derniers jours d'abord, puis les plus anciennes (rejeu) qui ont
+    leurs actus. Sans ce complément, les fiches du rejeu n'étaient jamais proposées à la routine.
+    Une fiche sans actus (au-delà des ~12 mois de Finnhub, ou aucune trouvée) ne se classe pas."""
     since = (now.astimezone(timezone.utc).date() - timedelta(days=2)).isoformat()
     out = []
-    for c in CAT.query(conn, since=since, unclassified=True, limit=MAX_CATALYSTS):
+    fiches = CAT.query(conn, since=since, unclassified=True, limit=MAX_CATALYSTS)
+    if len(fiches) < MAX_CATALYSTS:
+        until = (date.fromisoformat(since) - timedelta(days=1)).isoformat()
+        fiches += CAT.query(conn, until=until, unclassified=True, news_status="ok", limit=MAX_CATALYSTS - len(fiches))
+    for c in fiches:
         out.append({"id": c["id"], "marche": c["marche"], "jour": c["jour"], "symbole": c["symbole"],
                     "genre": c["genre"], "direction": c["direction"], "amplitude_pct": c["amplitude_pct"],
                     "gap_pct": c["gap_pct"], "depart": c["depart"],

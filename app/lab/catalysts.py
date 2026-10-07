@@ -423,8 +423,11 @@ COLUMNS = ("id, market, day, symbol, kind, direction, amplitude_pct, gap_pct, st
 
 def query(conn, day: str | None = None, symbol: str | None = None, market: str | None = None,
           kind: str | None = None, since: str | None = None, until: str | None = None,
-          unclassified: bool = False, limit: int = 100) -> list[dict]:
+          unclassified: bool = False, limit: int = 100, news_status: str | None = None) -> list[dict]:
     clauses, params = [], []
+    if news_status:
+        clauses.append("news_status = ?")
+        params.append(news_status)
     for col, value in (("day", day), ("symbol", symbol), ("market", market), ("kind", kind)):
         if value:
             clauses.append(f"{col} = ?")
