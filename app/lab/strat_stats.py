@@ -16,6 +16,13 @@ du nombre d'essais déclarés (Bonferroni, candidate_z() : ≈ 3,1 pour 60 essai
 council du 7 octobre : avec z ≥ 2 et 60 essais, on attendrait une fausse candidate par hasard).
 Frais (brut − net) et espérance par tranche de rang de volume, sans rien filtrer : les ordres stop sur
 cassure des petites valeurs glissent plus.
+Déclaration n° 3 (avis de GPT et Gemini) : le simulateur ne compte aucune commission en actions (Alpaca),
+alors que Simão passe ses ordres chez IBKR Pro (plan Fixe : 0,005 $ par action, plafonné à 1 % de l'ordre).
+Pour les actions, l'espérance de référence (classement et règle « candidate ») est donc l'espérance nette
+après cette commission estimée (commission_ibkr_r : deux fois 0,005 $ par action rapportés au risque par
+action ; le minimum de 1 $ par ordre, qui dépend de la taille de position, est ignoré : c'est un plancher).
+Espérance aussi par tranche de frais estimés avant l'entrée (glissement, frais et commission rapportés
+au risque), sans rien filtrer : c'est la mesure qui dira si un plafond de frais en R vaut un challenger.
 Rien de tout ça ne promeut quoi que ce soit : ni le scellé, ni la quantité de rejeu (au moins un an,
 deux régimes) ne sont encore là.
 
@@ -28,20 +35,49 @@ from collections import defaultdict
 from statistics import NormalDist
 
 from app.lab import seal as SEAL
+from app.lab import simulator as SIM
 from app.lab import stats as STATS
 from app.lab import strategies as ST
 
 MIN_N = 30
 ALPHA = 0.05
-COLUMNS = ("r_net", "r_sans_be", "r_2r", "r_suiveur", "r_emperor", "r_glisse_x2", "r_glisse_x3", "r_retard",
-           "r_manque", "r_gross")
+COLUMNS = ("r_net", "r_sans_be", "r_2r", "r_suiveur", "r_emperor", "r_emperor_alerte", "r_emperor_confirme",
+           "r_glisse_x2", "r_glisse_x3", "r_retard", "r_manque", "r_gross")
 RANK_BUCKETS = ((1, 50, "rang 1-50"), (51, 150, "rang 51-150"), (151, 10**9, "rang 151+"))
+IBKR_PER_SHARE = 0.005      # IBKR Pro, plan Fixe (/mnt/project-files/trading/plateforme-actions-us.md)
+IBKR_MAX_PCT = 0.01         # plafond : 1 % de la valeur de l'ordre
+COST_BUCKETS = ((0.0, 0.1, "frais < 0,1 R"), (0.1, 0.2, "frais 0,1-0,2 R"), (0.2, 0.4, "frais 0,2-0,4 R"),
+                (0.4, 1e9, "frais ≥ 0,4 R"))
 
 
 def candidate_z(trials: int | None = None) -> float:
     """Seuil de z contre le témoin, corrigé du nombre d'essais déclarés (Bonferroni, unilatéral)."""
     n = trials or len(ST.trials())
     return round(NormalDist().inv_cdf(1 - ALPHA / n), 2)
+
+
+def ibkr_commission_r(entry: float | None, stop: float | None) -> float | None:
+    """Commission IBKR Fixe d'un aller-retour, en R : 2 × 0,005 $ par action (plafonnée à 1 % du prix)
+    rapportés au risque par action. None si le plan est inconnu."""
+    if not entry or stop is None or entry <= stop:
+        return None
+    return 2 * min(IBKR_PER_SHARE, IBKR_MAX_PCT * entry) / (entry - stop)
+
+
+def expected_cost_r(market: str, entry: float | None, stop: float | None, rank) -> float | None:
+    """Frais estimés avant l'entrée, en R : glissement et frais du simulateur (prise de liquidité, entrée et
+    sortie), plus la commission IBKR en actions."""
+    if not entry or stop is None or entry <= stop:
+        return None
+    c = SIM.costs(market, entry, rank)
+    out = 2 * (c["slippage"] + c["taker"]) * entry / (entry - stop)
+    return out + (ibkr_commission_r(entry, stop) or 0) if market == "stock" else out
+
+
+def _cost_bucket(cost: float | None) -> str:
+    if cost is None:
+        return "frais inconnus"
+    return next(label for lo, hi, label in COST_BUCKETS if lo <= cost < hi)
 
 
 def _rank_bucket(rank) -> str:
@@ -79,17 +115,18 @@ class Mean:
 def _strategies(conn: sqlite3.Connection) -> dict:
     out: dict = {}
     sql = (f"SELECT s.market, s.strategy, s.day, s.triggered, s.tp1_hit, s.temoin_r, s.temoin_triggered, s.rank, "
-           f"{', '.join('s.' + c for c in COLUMNS)}, r.label FROM strat_trades s "
+           f"s.entry, s.stop, {', '.join('s.' + c for c in COLUMNS)}, r.label FROM strat_trades s "
            "LEFT JOIN regimes r ON r.market = s.market AND r.day = s.day")
     acc: dict = {}
     z_min = candidate_z()
     for row in conn.execute(sql):
-        market, name, day, trig, tp1, wit, wit_trig, rank = row[:8]
-        values = dict(zip(COLUMNS, row[8:8 + len(COLUMNS)]))
+        market, name, day, trig, tp1, wit, wit_trig, rank, entry, stop = row[:10]
+        values = dict(zip(COLUMNS, row[10:10 + len(COLUMNS)]))
         label = row[-1] or "inconnu"
         a = acc.setdefault((market, name), {"signaux": 0, "declenches": 0, "gagnants": 0, "tp1": 0,
                                             "sorties": defaultdict(Mean), "temoin": Mean(), "ecart": Mean(),
-                                            "regimes": defaultdict(Mean), "rangs": defaultdict(Mean), "manques": 0})
+                                            "regimes": defaultdict(Mean), "rangs": defaultdict(Mean), "manques": 0,
+                                            "ibkr": Mean(), "commission": Mean(), "frais": defaultdict(Mean)})
         a["signaux"] += 1
         if not trig:
             continue
@@ -101,6 +138,12 @@ def _strategies(conn: sqlite3.Connection) -> dict:
         a["manques"] += values["r_manque"] is None
         a["regimes"][label].add(day, values["r_net"])
         a["rangs"][_rank_bucket(rank)].add(day, values["r_net"])
+        comm = (ibkr_commission_r(entry, stop) or 0.0) if market == "stock" else 0.0
+        ref = values["r_net"] - comm if values["r_net"] is not None else None
+        a["ibkr"].add(day, ref)
+        if market == "stock":
+            a["commission"].add(day, comm)
+        a["frais"][_cost_bucket(expected_cost_r(market, entry, stop, rank))].add(day, ref)
         if wit_trig and wit is not None and values["r_net"] is not None:
             a["temoin"].add(day, wit)
             a["ecart"].add(day, values["r_net"] - wit)
@@ -109,6 +152,8 @@ def _strategies(conn: sqlite3.Connection) -> dict:
         main = a["sorties"]["r_net"].result()
         brut = a["sorties"]["r_gross"].result()["esperance_r"]
         ecart = a["ecart"].result()
+        ibkr = a["ibkr"].result() if market == "stock" else None
+        ref = ibkr or main
         item = {
             "nom": ST.LABELS.get(name, name), "signaux": a["signaux"], "declenches": n,
             "taux_declenchement": round(n / a["signaux"], 4) if a["signaux"] else None,
@@ -120,6 +165,12 @@ def _strategies(conn: sqlite3.Connection) -> dict:
             else None,
             "par_rang": {k: a["rangs"][k].result() for _, _, k in (*RANK_BUCKETS, (0, 0, "rang inconnu"))
                          if k in a["rangs"]},
+            "commission_ibkr_r": a["commission"].result()["esperance_r"] if market == "stock" else None,
+            "esperance_ibkr_r": ibkr["esperance_r"] if ibkr else None,
+            "ic95_ibkr": ibkr["ic95"] if ibkr else None,
+            "esperance_ref_r": ref["esperance_r"],
+            "par_frais": {k: a["frais"][k].result() for _, _, k in (*COST_BUCKETS, (0, 0, "frais inconnus"))
+                          if k in a["frais"]},
             "robustesse": {c: a["sorties"][c].result() for c in ("r_glisse_x2", "r_glisse_x3", "r_retard", "r_manque")},
             "ordres_limites_retires": a["manques"],
             "temoin": {"esperance_r": a["temoin"].result()["esperance_r"], "ecart_r": ecart["esperance_r"],
@@ -127,12 +178,12 @@ def _strategies(conn: sqlite3.Connection) -> dict:
             "regimes": {k: v.result() for k, v in sorted(a["regimes"].items())},
             "echantillon_faible": n < MIN_N,
         }
-        ci = item["ic95"]
+        ci = ref["ic95"]
         item["candidate"] = bool(ci and ci[0] > 0 and (ecart["z"] or 0) >= z_min and n >= MIN_N)
         out.setdefault(market, {})[name] = item
     for market, items in out.items():
-        out[market] = dict(sorted(items.items(), key=lambda kv: -(kv[1]["esperance_r"] if kv[1]["esperance_r"]
-                                                                   is not None else -99)))
+        out[market] = dict(sorted(items.items(), key=lambda kv: -(kv[1]["esperance_ref_r"]
+                                                                   if kv[1]["esperance_ref_r"] is not None else -99)))
     return out
 
 
@@ -210,18 +261,22 @@ def text(rep: dict | None) -> str:
         return "🧪 **Stratégies du labo v2** : pas encore de mesure (le rejeu n'a pas encore traité de jour avec elles)."
     decl = rep["declaration"]
     lines = [f"🧪 **Stratégies du labo v2** · {decl['essais']} essais déclarés (déclaration n° "
-             f"{decl.get('numero', 1)}) · espérance nette en R par trade [IC 95 %] · ✅ = IC au-dessus de 0 "
-             f"et témoin battu à z ≥ {str(decl.get('z_candidate', 2)).replace('.', ',')}"]
+             f"{decl.get('numero', 1)}) · espérance nette en R par trade [IC 95 %], actions après commission "
+             f"IBKR estimée · ✅ = IC au-dessus de 0 et témoin battu à z ≥ "
+             f"{str(decl.get('z_candidate', 2)).replace('.', ',')}"]
     for market, items in (rep.get("strategies") or {}).items():
         lines.append(f"**{MARKET_FR.get(market, market)}**")
         for name, it in items.items():
-            ci = it.get("ic95")
+            ibkr = it.get("esperance_ibkr_r") is not None
+            ci = it.get("ic95_ibkr") if ibkr else it.get("ic95")
             ci_txt = f" [{_r(ci[0])} ; {_r(ci[1])}]" if ci else ""
             wit = it.get("temoin") or {}
             flag = "✅ " if it.get("candidate") else ""
-            lines.append(f"{flag}{it['nom']} : {_r(it['esperance_r'])} R{ci_txt} · {it['declenches']} trades, "
+            comm = f" · commission {_r(-(it.get('commission_ibkr_r') or 0))} R" if ibkr else ""
+            lines.append(f"{flag}{it['nom']} : {_r(it['esperance_ibkr_r'] if ibkr else it['esperance_r'])} R{ci_txt}"
+                         f" · {it['declenches']} trades, "
                          f"{it['jours']} j · réussite {round(100 * (it['reussite'] or 0))} % · frais "
-                         f"{_r(-(it.get('frais_r') or 0)) if it.get('frais_r') is not None else 'n/d'} R · "
+                         f"{_r(-(it.get('frais_r') or 0)) if it.get('frais_r') is not None else 'n/d'} R{comm} · "
                          f"vs témoin {_r(wit.get('ecart_r'))} R (z {wit.get('z') if wit.get('z') is not None else 'n/d'})"
                          + (" · échantillon faible" if it.get("echantillon_faible") else ""))
     diag = (rep.get("diagnostic_v1") or {}).get("stock")

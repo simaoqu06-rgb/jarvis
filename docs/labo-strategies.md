@@ -116,7 +116,7 @@ Pas repris : le trident du jour (Stoch RSI + VWAP + pivot), déjà mesuré par v
 négatif en actions) ; l'entrée directe au contact d'un support (déconseillée par le manuel).
 
 **Essais déclarés : 60** (actions : v1 + 6 stratégies × 5 sorties ; crypto : v1 + 4 stratégies × 5
-sorties).
+sorties ; porté à 84 par la déclaration n° 3).
 
 **Règle de lecture renforcée** (s'applique aussi à la déclaration n° 1, avant tout résultat) :
 « candidate » exige désormais un écart au témoin avec **z ≥ seuil corrigé du nombre d'essais**
@@ -137,6 +137,86 @@ et voulait rester vers 40 essais ; gardée parce que c'est la solution 1 du manu
 le seuil corrigé payant le prix des essais en plus. Point à suivre : les frais pèsent lourd (v1
 actions : brut −0,07 R, net −0,23 R ; crypto : brut +0,00 R, net −0,13 R) ; un stop serré en 5 min
 les grossit en R.
+
+## Déclaration n° 3 (7 octobre 2026, soir) : avis de GPT et Gemini sur la n° 2
+
+La déclaration n° 2 était fusionnée mais pas encore déployée : **aucun de ses résultats n'existait**.
+Simão a soumis la n° 2 à GPT et Gemini ; chaque objection a été vérifiée dans le code avant d'être
+retenue ou écartée. Cette déclaration remplace la n° 2 là où elles diffèrent.
+
+**Ce qui vient du manuel, ce qui est une formalisation de JARVIS.** Viennent du chapitre S/R : zones
+plutôt que lignes, creux et sommets de réaction, résistance cassée devenue support, solution 1
+(cassure, retest, confirmation) et solution 2 (rebond, puis cassure d'une résistance au-dessus), sortie
+sur anomalie de Weis. Sont des choix de JARVIS pour rendre la méthode programmable, à juger comme des
+hypothèses : 3 bougies de chaque côté pour un creux, 5 min + journalier, au moins 2 contacts, largeur
+de 0,5 ATR, plus haut et plus bas de la veille, 12 bougies de retest, stop d'achat au-dessus de la
+bougie de retest comme « confirmation ».
+
+**Changements** (tous figés ici, avant le premier résultat) :
+
+- **Zones : contacts distincts et réaction minimale.** Le détecteur de creux compte des plus bas égaux :
+  six bougies collées au même plus bas faisaient six « contacts ». Désormais un contact est daté ; deux
+  contacts à moins d'une heure, ou un creux de 5 min le même jour qu'un niveau journalier, n'en font
+  qu'un. Un creux (sommet) de 5 min ne compte que si le prix s'en est éloigné d'au moins 1 ATR dans les
+  12 bougies suivantes, connues avant la fenêtre. Les points pivots sortent des zones : ils viennent du
+  trident, écarté par la n° 2.
+- **`cassure_zone_retest`** : une clôture sous le bas de zone avant le retest annule la cassure (fausse
+  cassure). La bougie suivante peut lancer une nouvelle cassure.
+- **`rebond_confirme` : cassure de structure.** La résistance à casser est le dernier sommet de réaction
+  confirmé à la clôture du contact (3 bougies de chaque côté, dans les mêmes 150 / 288 bougies), au lieu
+  du plus haut des 6 dernières bougies, nombre arbitraire relevé par GPT et Gemini. L'ordre reste posé
+  jusqu'à la fin de la fenêtre des signaux, annulé si le stop est touché avant.
+- **Sortie EmperorBTC en trois variantes**, au lieu d'une :
+  - `r_emperor` : objectifs sur les prochaines résistances et gestion v1, sans sortie sur signal
+    (cibles dures, exécution immédiate : la proposition de Gemini) ;
+  - `r_emperor_alerte` : plus une sortie à la clôture de la bougie qui suit le premier signe de
+    retournement vu en gain (le comportement des alertes en direct) ;
+  - `r_emperor_confirme` : le signe n'est qu'un avertissement (le manuel : un volume faible n'est « pas
+    haussier », pas « baissier » ; une divergence se lit avec d'autres signes) ; sortie seulement si une
+    clôture passe sous le plus bas de la bougie du signe dans les 6 bougies, exécutée à la bougie
+    suivante (la proposition de GPT).
+- **Témoin : moyenne de 5 tirages** par trade (même actif, jour, fenêtre, stop en %, objectifs en R),
+  au lieu d'un seul, pour qu'un tirage chanceux ne fasse pas la comparaison.
+- **Commission IBKR.** Le simulateur ne compte aucune commission en actions (modèle Alpaca), alors que
+  Simão passe ses ordres chez IBKR Pro, plan Fixe : 0,005 $ par action, plafonné à 1 % de l'ordre. Pour
+  les actions, le classement et la règle « candidate » se lisent donc sur l'espérance nette **après**
+  cette commission (deux fois 0,005 $ par action, rapportés au risque par action). Le minimum de 1 $ par
+  ordre dépend de la taille de position et n'est pas compté : l'estimation est un plancher. Exemple : un
+  stop de 5 cents coûte 0,2 R de commission à lui seul.
+- **Frais par tranche** : espérance par tranche de frais estimés avant l'entrée (glissement, frais et
+  commission rapportés au risque : < 0,1 R, 0,1-0,2, 0,2-0,4, ≥ 0,4 R), sans rien filtrer.
+
+**Essais déclarés : 84** (12 couples stratégie × marché × 7 sorties) ; seuil « candidate » contre le
+témoin : **z ≥ 3,24** (Bonferroni unilatéral à 5 % : l'hypothèse est « la stratégie bat le témoin »,
+pas « elle en diffère » ; en bilatéral ce serait 3,43).
+
+**Déjà en place, gardé tel quel** : comparaison appariée stratégie − témoin trade par trade, intervalle
+en grappes par jour (`strat_stats`) ; témoin qui recalcule son stop et ses objectifs depuis sa propre
+entrée (GPT supposait le contraire) ; délai d'une bougie sur les sorties sur signal (Simão passe l'ordre
+à la main, et sortir dans la bougie même du signal serait voir l'avenir) ; bloc scellé.
+
+**Écarté, avec la raison** :
+
+- filtre de contexte macro (CPI, tensions géopolitiques) : pas codable sans recul après coup, une
+  douzaine de jours de CPI par an, et le contrôle catalyseur existe déjà ; l'espérance par régime de
+  marché est déjà affichée ;
+- entrée en ordre limité sur la zone pour payer moins de frais : c'est l'entrée au contact que le
+  manuel déconseille, v1 entre déjà ainsi et fait pire en actions (ordres limités −0,28 R contre
+  −0,21 R à l'ouverture), et les frais « maker » d'OKX (0,08 %) restent un coût ; IBKR Fixe facture
+  pareil dans les deux cas ;
+- plusieurs largeurs de zone en variantes : chaque variante abaisse la puissance du test (plus
+  d'essais) ;
+- plafond de frais en R ou concentration sur les valeurs les plus volatiles : idée gardée, mais d'abord
+  mesurée par les tranches de frais ; si elle tient, ce sera un challenger « v1 + filtre » déclaré, à
+  faire valider par Simão (il écarterait surtout les petites valeurs à stop serré).
+
+Les jours déjà traités sont recalculés par le rattrapage (`progress_job` change avec le numéro).
+
+**Council** (Sceptique, Pragmatique, Critique : GO à l'unanimité). Sceptique : chaque règle ajoutée est
+un degré de liberté, acceptable parce qu'elles sont toutes figées avant le premier résultat et payées par
+le seuil à 3,24. Pragmatique : surcoût mesuré d'environ 5 % par jour rejoué ; une seule mise en service
+pour les n° 2 et 3. Critique : la commission IBKR rend la barre plus haute pour les actions, et c'est
+voulu : un avantage qui ne survit pas aux frais réels de Simão n'en est pas un.
 
 ## Bloc scellé
 
