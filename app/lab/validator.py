@@ -500,7 +500,7 @@ def missing_share(conn, canon: dict, version: str) -> dict[str, float]:
     kept, kparams = champion_filter(conn)
     msql, mparams = f" AND {kept}", list(kparams)
     if canon.get("markets"):
-        msql = f" AND t.market IN ({', '.join('?' * len(canon['markets']))})"
+        msql += f" AND t.market IN ({', '.join('?' * len(canon['markets']))})"
         mparams += list(canon["markets"])
     for leaf in leaves_of(canon["cond"]):
         field = leaf["field"]

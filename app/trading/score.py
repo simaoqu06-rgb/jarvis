@@ -76,6 +76,9 @@ def catalyst(cat: dict | None, side: str, s) -> tuple[float | None, list[str]]:
     if cat["dilution"]:
         score -= 3 * sign
         reasons.append("augmentation de capital annoncée")
+    if not cat.get("earnings_known", True):  # calendrier en échec : veto résultats impossible à vérifier
+        score = min(score, 5.0)
+        reasons.append("date des résultats non vérifiée (Finnhub sans réponse)")
     hours = cat.get("hours_to_earnings")
     if hours is not None and s["earnings_veto_hours"] and hours <= s["earnings_veto_hours"]:
         score = min(score, 2.0)

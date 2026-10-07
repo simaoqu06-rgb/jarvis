@@ -299,8 +299,11 @@ async def trading_open(req: TradeRequest):
     async with scheduler._lock:
         trade = scheduler.book.add(plan, req.note)
     if scheduler.enabled():
+        # Par la file d'envoi persistante : le trade est déjà enregistré, une panne Discord ne doit pas
+        # renvoyer une erreur (le client réessaierait et doublerait le trade).
         head = trading.disagreement_text(trade) + "\n" if trading.against_jarvis(trade) else ""
-        await _send(head + "📌 Nouveau trade suivi\n" + trading.plan_text(trade))
+        scheduler.outbox.add(head + "📌 Nouveau trade suivi\n" + trading.plan_text(trade), "trade")
+        scheduler._kick_outbox()
     return trading.summary(trade)
 
 

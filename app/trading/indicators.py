@@ -160,8 +160,11 @@ def engulfing(prev: dict, cur: dict) -> str | None:
     return None
 
 
-def rsi_divergence(candles: list[dict], lookback: int = 60) -> str | None:
+def rsi_divergence(candles: list[dict], lookback: int = 60, want: str | None = None) -> str | None:
     """Divergence RSI forte sur les deux derniers creux (ou sommets) de clôture.
+
+    `want` (« haussière » ou « baissière ») : ne cherche que ce sens ; sans lui, la haussière passe
+    avant et masquerait une baissière présente en même temps.
 
     Haussière : le prix fait un plus bas plus bas, le RSI un plus bas plus haut.
     Baissière : le prix fait un plus haut plus haut, le RSI un plus haut plus bas.
@@ -177,12 +180,12 @@ def rsi_divergence(candles: list[dict], lookback: int = 60) -> str | None:
             lows.append(i)
         if closes[i] == max(window):
             highs.append(i)
-    if len(lows) >= 2:
+    if len(lows) >= 2 and want != "baissière":
         a, b = lows[-2], lows[-1]
         if closes[b] < closes[a] and rsis[b] is not None and rsis[a] is not None and rsis[b] > rsis[a]:
             if b >= len(closes) - 10:
                 return "haussière"
-    if len(highs) >= 2:
+    if len(highs) >= 2 and want != "haussière":
         a, b = highs[-2], highs[-1]
         if closes[b] > closes[a] and rsis[b] is not None and rsis[a] is not None and rsis[b] < rsis[a]:
             if b >= len(closes) - 10:

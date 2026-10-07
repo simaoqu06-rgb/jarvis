@@ -37,5 +37,7 @@ OUTBOX_PATH = os.getenv("JARVIS_OUTBOX_PATH", "data/outbox.json")  # messages pa
 WATCHLIST_CRYPTO = env_list("JARVIS_WATCHLIST_CRYPTO", "BTC,ETH")
 WATCHLIST_STOCKS = env_list("JARVIS_WATCHLIST_STOCKS", "")
 MOVE_ALERT_PCT = env_float("JARVIS_MOVE_ALERT_PCT", 5.0)
+if not MOVE_ALERT_PCT > 0:  # 0, négatif ou NaN : palier impossible (division par zéro)
+    MOVE_ALERT_PCT = 5.0
 QUAKE_MIN_MAGNITUDE = env_float("JARVIS_QUAKE_MIN_MAGNITUDE", 6.0)
 HOME_CITY = os.getenv("JARVIS_CITY", "").strip()

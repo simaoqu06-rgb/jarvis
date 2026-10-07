@@ -346,4 +346,5 @@ Au premier lancement, les séismes et actus déjà publiés sont mémorisés san
 - `POST /api/notify/test` envoie un message de test.
 - `POST /api/notify/brief` envoie le point du matin tout de suite.
 - `GET /api/notify/brief/preview` montre le point du matin sans l'envoyer.
-- `JARVIS_NOTIFICATIONS=off` coupe tous les envois.
+- `JARVIS_NOTIFICATIONS=off` coupe tous les envois. Sans webhook ou avec `off`, le suivi des trades (TP/SL),
+  le compte fictif et le scanner tournent quand même, sans rien envoyer.

@@ -2,10 +2,13 @@
 
 Toutes les fonctions renvoient un Result (voir app/core/result.py) au même format.
 """
+import logging
 from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
 
+from app.config import secret
 from app.core.fallback import Source, resolve
+from app.core.http import SourceError
 from app.core.result import Result
 from app.sources import (
     caldays, coinlore, coinpaprika, currency_api, emsc, finnhub, frankfurter, helious,
@@ -14,6 +17,7 @@ from app.sources import (
     the_calendar, twelvedata, usgs, wikidata, wikipedia,
 )
 
+log = logging.getLogger(__name__)
 MINUTE = 60
 HOUR = 3600
 DAY = 86400
@@ -64,12 +68,28 @@ async def fx_rates(base: str = "EUR", symbols: list[str] | None = None) -> Resul
     )
 
 
+async def _twelvedata_quotes(symbols: list[str]) -> list[dict]:
+    """Twelve Data, puis Finnhub pour les cours restés vides (au-delà de 8 symboles, les paquets
+    suivants tombent sur la limite par minute et reviennent sans prix)."""
+    quotes = await twelvedata.stock_quotes(symbols)
+    missing = [q["symbol"] for q in quotes if q.get("price") is None]
+    if not missing or not secret("FINNHUB_API_KEY"):
+        return quotes
+    try:
+        backup = await finnhub.stock_quotes(missing)
+    except SourceError as exc:
+        log.warning("Finnhub en secours de Twelve Data indisponible : %s", exc)
+        return quotes
+    found = {b["symbol"]: b | {"source": "Finnhub"} for b in backup if b.get("price") is not None}
+    return [found.get(q["symbol"], q) if q.get("price") is None else q for q in quotes]
+
+
 async def stock_quotes(symbols: list[str]) -> Result:
     symbols = _symbols(symbols)
     return await resolve(
         "stock_quotes", f"stocks:{','.join(symbols)}",
         [
-            Source("Twelve Data", twelvedata.stock_quotes, "Données : Twelve Data", "TWELVEDATA_API_KEY"),
+            Source("Twelve Data", _twelvedata_quotes, "Données : Twelve Data (Finnhub en secours)", "TWELVEDATA_API_KEY"),
             Source("Finnhub", finnhub.stock_quotes, "Données : Finnhub", "FINNHUB_API_KEY"),
         ],
         ttl=MINUTE, symbols=symbols,

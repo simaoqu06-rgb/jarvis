@@ -68,6 +68,10 @@ def _pct(value: float | None) -> str:
     return "n/d" if value is None else f"{value:+.2f} %"
 
 
+def _nd(value) -> str:
+    return "n/d" if value is None else str(value)
+
+
 def _money(value: float | None, unit: str) -> str:
     return "n/d" if value is None else f"{value:,.2f} {unit}".replace(",", " ")
 
@@ -124,10 +128,12 @@ async def morning_brief(now: datetime | None = None) -> str:
             results += [weather, air]
             if weather.data:
                 w = weather.data
-                lines.append(f"**Météo à {config.HOME_CITY}** : {w['condition']}, {w['temperature_c']} °C, "
-                             f"vent {w['wind_speed_kmh']} km/h")
+                lines.append(f"**Météo à {config.HOME_CITY}** : {_nd(w.get('condition'))}, "
+                             f"{_nd(w.get('temperature_c'))} °C, vent {_nd(w.get('wind_speed_kmh'))} km/h")
             if air.data:
-                lines.append(f"**Air** : indice européen {air.data['aqi']:.0f} (PM2.5 {air.data['pm2_5']} µg/m³)")
+                aqi = air.data.get("aqi")
+                lines.append(f"**Air** : indice européen {'n/d' if aqi is None else f'{aqi:.0f}'} "
+                             f"(PM2.5 {_nd(air.data.get('pm2_5'))} µg/m³)")
 
     lines.append(_footer(*results))
     return "\n".join(line for line in lines if line)
@@ -144,7 +150,7 @@ async def check_price_moves(state: State, now: datetime | None = None) -> list[s
     Dans la fenêtre, on ne réalerte que si la variation franchit un palier de plus.
     """
     now = now or datetime.now(timezone.utc)
-    step = config.MOVE_ALERT_PCT
+    step = config.MOVE_ALERT_PCT if config.MOVE_ALERT_PCT > 0 else 5.0  # 0 : division par zéro
     sent = state.data.get("moves")
     sent = state.data["moves"] = {
         k: v for k, v in (sent if isinstance(sent, dict) else {}).items()
@@ -170,12 +176,15 @@ async def check_price_moves(state: State, now: datetime | None = None) -> list[s
 
     messages = []
     for symbol, unit, price, change, result, period, session in moves:
-        level = int(abs(change) // step)
-        key = f"{symbol}:{'+' if change > 0 else '-'}{session}"
-        if level >= 1 and level > sent.get(key, {}).get("level", 0):
-            sent[key] = {"level": level, "at": now.isoformat(timespec="seconds")}
-            arrow = "📈" if change > 0 else "📉"
-            messages.append(f"{arrow} **{symbol}** {_pct(change)} {period}, à {_money(price, unit)}\n{_footer(result)}")
+        try:  # une valeur mal formée ne bloque pas les autres
+            level = int(abs(change) // step)
+            key = f"{symbol}:{'+' if change > 0 else '-'}{session}"
+            if level >= 1 and level > sent.get(key, {}).get("level", 0):
+                arrow = "📈" if change > 0 else "📉"
+                messages.append(f"{arrow} **{symbol}** {_pct(change)} {period}, à {_money(price, unit)}\n{_footer(result)}")
+                sent[key] = {"level": level, "at": now.isoformat(timespec="seconds")}
+        except Exception:
+            log.exception("Mouvement de %s : alerte impossible à construire", symbol)
     return messages
 
 
@@ -285,7 +294,10 @@ async def check_news(state: State) -> list[str]:
     """
     batches = [("Marché", await needs.market_news(20))]
     for symbol in config.WATCHLIST_STOCKS:
-        batches.append((symbol, await needs.company_news(symbol, 5)))
+        try:  # une action en échec ne fait pas tomber les actus des autres
+            batches.append((symbol, await needs.company_news(symbol, 5)))
+        except Exception:
+            log.exception("Actus de %s indisponibles", symbol)
     first_run = "news" not in state.data
     if first_run and all(result.data is None for _, result in batches):
         return []  # toutes les sources en panne : on garde le premier lancement pour plus tard
@@ -294,16 +306,16 @@ async def check_news(state: State) -> list[str]:
     messages, new_keys, new_titles = [], [], []
     for label, result in batches:
         for item in result.data or []:
-            if not item.get("title"):
+            if not isinstance(item, dict) or not item.get("title"):
                 continue
             # Le titre fait partie de la clé : certains flux réutilisent le même lien.
-            key = f"{item['title']}|{item['url']}"
+            key = f"{item['title']}|{item.get('url')}"
             title = _norm_title(item["title"])
             if key in seen or key in new_keys or any(_similar_title(title, t) for t in seen_titles + new_titles):
                 continue
             new_keys.append(key)
             new_titles.append(title)
-            messages.append(f"📰 [{label}] **{item['title']}**\n<{item['url']}>\n{_footer(result)}")
+            messages.append(f"📰 [{label}] **{item['title']}**\n<{item.get('url') or ''}>\n{_footer(result)}")
     state.remember("news", new_keys)
     state.data["news_titles"] = (seen_titles + new_titles)[-MAX_SEEN:]
     return [] if first_run else messages[:10]

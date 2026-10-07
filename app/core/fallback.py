@@ -56,6 +56,10 @@ async def resolve(need: str, key: str, sources: list[Source], ttl: float, **kwar
                 errors.append(f"{source.name} : {exc}")
                 log.warning("%s indisponible pour %s : %s", source.name, key, exc)
                 continue
+            except Exception as exc:  # parseur cassé (KeyError, TypeError…) : la source est en échec, pas le serveur
+                errors.append(f"{source.name} : erreur inattendue ({type(exc).__name__})")
+                log.exception("%s : réponse inexploitable pour %s", source.name, key)
+                continue
             result = Result(
                 need=need,
                 data=data,
