@@ -61,7 +61,8 @@ DEFAULTS = {"windows": 3, "embargo_days": 1, "min_affected": 100, "min_improveme
             "min_windows_better": 2, "alpha": 0.05, "max_capture_drop": 0.10, "min_days": 60,
             "auto_min_affected": 30, "missing_max": 0.95,
             # Labo 3 : challenger en direct (trades déclenchés depuis sa création, gardés par lui).
-            "challenger_min_trades": 100, "challenger_max_trades": 300}
+            "challenger_min_trades": 100, "challenger_max_trades": 300,
+            "challenger_min_gain": 0.02, "challenger_max_days": 90}
 OPS = {">": ">", ">=": ">=", "<": "<", "<=": "<=", "==": "=", "!=": "<>"}
 SET_OPS = ("in", "not_in")
 ALL_OPS = (*OPS, *SET_OPS, "between", "is_null", "not_null")

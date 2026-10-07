@@ -102,9 +102,31 @@ def check(rows: list[dict], champ: dict | None = None) -> list[dict]:
     return [o | {"version": champ.get("version")} for o in out]
 
 
+INDEX_FIELDS = {"regime", "regime_trend", "regime_vol_tercile"}
+
+
+def needs_index(rule: dict) -> bool:
+    """La règle lit le régime de marché (bougies de SPY) : regime*, context.regime…"""
+    from app.lab import validator as V
+
+    return any(leaf.get("field") in INDEX_FIELDS or str(leaf.get("field", "")).startswith("context.regime")
+               for leaf in V.leaves_of(rule["cond"]))
+
+
 def verdict_for(plan: dict, daily_score, daily, index_daily, now: datetime | None, s, champ: dict | None = None) -> dict:
-    """Verdict d'un plan d'action du scanner ; jamais d'exception (plan gardé en cas de souci)."""
+    """Verdict d'un plan d'action du scanner ; jamais d'exception (plan gardé en cas de souci).
+    SPY indisponible (panne propre au direct) : les règles sur le régime ne s'appliquent pas, plutôt
+    que d'écarter tous les plans (une règle « ne garder que » sur un champ inconnu écarte tout)."""
     champ = champ or current()
+    if champ["regles"] and not index_daily:
+        try:
+            kept = [r for r in champ["regles"] if not needs_index(r)]
+        except Exception:
+            kept = []
+        if len(kept) != len(champ["regles"]):
+            _warn_once("indice", "Méthode du labo : régime de marché (SPY) indisponible, règles sur le régime "
+                                 "non appliquées")
+            champ = champ | {"regles": kept}
     if not champ["regles"]:
         return {"garde": True, "regles": [], "version": champ.get("version")}
     try:

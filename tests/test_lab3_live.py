@@ -189,3 +189,21 @@ async def test_scanner_continue_si_le_regime_manque(champ_file, scan_env, monkey
     monkeypatch.setattr(alpaca, "bars", broken)
     result = await scanner.scan(NOW, Settings(None), save=False)
     assert [e["symbol"] for e in result["ecartees_methode"]] == ["CCC"]
+
+
+def test_regle_garder_sur_le_regime_sans_spy_ne_vide_pas_le_scanner():
+    """Relecture : SPY indisponible en direct ne doit pas écarter tous les plans via une règle « keep »
+    sur le régime (champ inconnu = non vérifié = écarté) ; ces règles ne s'appliquent pas, les autres oui."""
+    daily = daily_bars(80, date(2026, 10, 6))
+    champ = {"version": "v2", "regles": [
+        rule({"field": "regime_trend", "op": "==", "value": "haussier"}, kind="keep", name="haussier seulement"),
+        rule({"field": "context.regime.above_ma50", "op": "==", "value": True}, kind="keep", name="au-dessus MM50")]}
+    for spy in (None, []):
+        assert LIVE.verdict_for(fake_plan("AAA"), None, daily, spy, NOW, Settings(None), champ)["garde"] is True
+    champ["regles"].append(rule({"field": "symbol", "op": "==", "value": "AAA"}, name="pas AAA"))
+    out = LIVE.verdict_for(fake_plan("AAA"), None, daily, None, NOW, Settings(None), champ)
+    assert out == {"garde": False, "regles": ["pas AAA"], "version": "v2"}
+    # Avec SPY, la règle sur le régime s'applique bien.
+    spy = daily_bars(400, date(2026, 10, 6), start=400, step=-0.05)
+    out = LIVE.verdict_for(fake_plan("BBB"), None, daily, spy, NOW, Settings(None), champ)
+    assert out["garde"] is False and "haussier seulement" in out["regles"]

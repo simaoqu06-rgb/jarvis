@@ -202,16 +202,22 @@ def compare(conn, champ: dict, chall: dict, cfg: dict | None = None) -> dict:
     out["capture_ok"] = before - after <= allowed + 1e-9
     out["baisse_capture_permise"] = allowed
     ec, eh = out["champion"]["esperance_r"], out["challenger"]["esperance_r"]
-    out["meilleur"] = ec is not None and eh is not None and eh > ec
+    # Marge minimale : la comparaison est refaite à chaque passage entre 100 et 300 trades, une
+    # simple avance d'un cheveu passerait trop souvent par hasard.
+    out["meilleur"] = ec is not None and eh is not None and eh - ec >= cfg["challenger_min_gain"]
     return out
 
 
-def verdict(cmp: dict, cfg: dict) -> str:
-    """« promouvoir », « retirer » ou « attendre »."""
+def verdict(cmp: dict, cfg: dict, now: datetime | None = None) -> str:
+    """« promouvoir », « retirer » ou « attendre ». Un challenger qui ne garde presque aucun trade
+    n'atteindrait jamais la limite : il est aussi retiré après `challenger_max_days` jours."""
     n = cmp["challenger"]["declenches"]
     if n >= cfg["challenger_min_trades"] and cmp["meilleur"] and cmp["capture_ok"]:
         return "promouvoir"
     if n >= cfg["challenger_max_trades"]:
+        return "retirer"
+    since = cmp.get("depuis_ts") or 0
+    if now is not None and since and now.timestamp() - since >= cfg["challenger_max_days"] * 86400:
         return "retirer"
     return "attendre"
 
@@ -453,7 +459,7 @@ def judge_challenger(db: LabDB, now: datetime | None = None, cfg: dict | None = 
         return None
     champ = champion(db.conn)
     cmp = compare(db.conn, champ, chall, cfg)
-    v = verdict(cmp, cfg)
+    v = verdict(cmp, cfg, now)
     if v == "attendre":
         return None
     new = [r for r in chall["regles"] if r["empreinte"] not in {x["empreinte"] for x in champ["regles"]}]

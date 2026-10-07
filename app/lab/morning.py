@@ -210,6 +210,15 @@ async def send_due(state: State, proposals, now: datetime, owner_ids: set[int], 
             state.save()
             log.warning("Labo : message du matin du %s manqué (hors de 8 h - 9 h), propositions reportées", day)
             continue
+        if not dm_on():  # rodage remis entre la préparation et l'envoi (redémarrage dans la fenêtre)
+            d["etat"] = "journalise"
+            for pid in d["propositions"]:
+                if p := proposals.get(pid):
+                    p["offerte"] = "journalisee"
+            proposals.save()
+            state.save()
+            log.info("Labo : message du matin du %s gardé sans envoi (JARVIS_LAB_DM=off)", day)
+            continue
         pending = [pid for pid in d["propositions"] if (p := proposals.get(pid)) and p["status"] == "pending"]
         if not pending:
             d["etat"] = "sans_objet"

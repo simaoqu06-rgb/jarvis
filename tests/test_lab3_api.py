@@ -293,3 +293,20 @@ async def test_parcours_refus(env, monkeypatch):
     assert again["deja_connue"] and again["etat"] == "rejetee"
     nxt = await scheduler.tick_lab(paris(2026, 10, 8, 8, 2))
     assert nxt["etat"] == "rien"  # jamais reproposée
+
+
+@pytest.mark.parametrize("headers", [{"X-Forwarded-For": "203.0.113.9"}, {"Tailscale-Funnel-Request": "?1"},
+                                     {"Host": "jarvis.tail1234.ts.net:8443"}])
+def test_depuis_internet_rien_hors_de_api_lab(env, headers):
+    """Relecture : si Funnel publiait plus que /api/lab, une requête d'Internet ne doit pouvoir ni
+    approuver une proposition du labo (route sans clé), ni voir le cockpit."""
+    db, client, props = env
+    h = insert_validated(db, "signal tendu", SIGNAL)
+    p = props.propose_lab(h, "signal tendu", "v1", "preuve", None, "2026-10-07")
+    assert client.post(f"/api/trading/proposals/{p['id']}/approve", headers=headers).status_code == 404
+    assert props.get(p["id"])["status"] == "pending"
+    for path in ("/cockpit", "/api/trading/proposals", "/docs", "/openapi.json"):
+        assert client.get(path, headers=headers).status_code == 404
+    assert client.get("/api/lab/brief", headers=headers | H).status_code == 200
+    # Depuis le réseau Tailscale, inchangé.
+    assert client.get("/api/trading/proposals", headers={"X-Forwarded-For": "100.101.102.103"}).status_code == 200

@@ -98,6 +98,16 @@ async def reject_cross_site(request: Request, call_next):
     return await call_next(request)
 
 
+@app.middleware("http")
+async def internet_only_lab(request: Request, call_next):
+    """Défense en profondeur derrière Tailscale Funnel (qui ne publie que /api/lab) : une requête venue
+    d'Internet n'atteint rien d'autre que /api/lab/… (ni le cockpit, ni les propositions, ni /docs)."""
+    path = request.url.path
+    if not (path == "/api/lab" or path.startswith("/api/lab/")) and public_request(request):
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
+    return await call_next(request)
+
+
 def _list(value: str) -> list[str]:
     items = [v for v in value.split(",") if v.strip()]
     if not items:

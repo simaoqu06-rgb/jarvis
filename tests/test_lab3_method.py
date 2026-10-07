@@ -333,3 +333,15 @@ def test_passage_du_worker_inclut_la_methode(db):
     report = asyncio.run(W.lab2(db, NOW, collect=False))
     assert report["methode"]["decisions"] == 1 and report["methode"]["challenger"] == "v2"
     assert json.loads(M.champion_path(db.path).read_text())["challenger"] == "v2"
+
+
+def test_bascule_exige_une_marge_et_retrait_apres_delai():
+    from datetime import datetime, timezone
+    cfg = dict(V.DEFAULTS)
+    base = {"depuis_ts": int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()), "capture_ok": True,
+            "champion": {"declenches": 150, "esperance_r": 0.10}}
+    juste = base | {"challenger": {"declenches": 150, "esperance_r": 0.105}, "meilleur": False}
+    assert M.verdict(juste, cfg, datetime(2026, 1, 20, tzinfo=timezone.utc)) == "attendre"
+    lent = base | {"challenger": {"declenches": 12, "esperance_r": 0.3}, "meilleur": True}
+    assert M.verdict(lent, cfg, datetime(2026, 2, 1, tzinfo=timezone.utc)) == "attendre"
+    assert M.verdict(lent, cfg, datetime(2026, 4, 2, tzinfo=timezone.utc)) == "retirer"

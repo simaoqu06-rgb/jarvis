@@ -316,3 +316,17 @@ async def test_annonce_sur_le_salon_sans_bot(env, monkeypatch, tmp_path):
     M.event(db, "retrait", "v2", "🧪 Méthode v2 retirée", now=AT_0805)
     await scheduler.tick_lab(paris(2026, 10, 7, 12, 0))
     assert scheduler.outbox.items[0]["parts"] == ["🧪 Méthode v2 retirée"]
+
+
+def test_rodage_remis_apres_preparation_rien_n_est_envoye(env, monkeypatch, tmp_path):
+    """Relecture : point préparé « à envoyer » (JARVIS_LAB_DM=on), puis JARVIS_LAB_DM=off et redémarrage
+    dans la fenêtre : rien ne doit partir."""
+    db, props, st, conn = env
+    insert_validated(db, "signal tendu", SIGNAL)
+    assert MO.tick(AT_0805, props, st, True, conn_factory=conn)["etat"] == "a_envoyer"
+    monkeypatch.setenv("JARVIS_LAB_DM", "off")
+    again = MO.State(str(tmp_path / "matin.json"))
+    user = FakeUser()
+    assert asyncio.run(MO.send_due(again, props, paris(2026, 10, 7, 8, 10), {1}, lambda o: _async(user),
+                                   lambda p: None)) == 0
+    assert user.sent == [] and again.day("2026-10-07")["etat"] == "journalise"
