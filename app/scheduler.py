@@ -126,6 +126,10 @@ async def tick_news() -> None:
     await _post_all(await alerts.check_news(state))
 
 
+async def tick_disk() -> None:
+    await _post_all(alerts.check_disk(state, datetime.now(timezone.utc)), "disque")
+
+
 async def tick_trades() -> None:
     messages = await trading.check_trades(book, save=False)
     _queue(messages, "trade")  # sur disque avant l'état des trades : un TP/SL ne se perd plus
@@ -256,6 +260,7 @@ JOBS = [
     ("mouvements de cours", tick_moves, 5 * MINUTE, True),
     ("séismes", tick_quakes, 5 * MINUTE, True),
     ("actus", tick_news, 15 * MINUTE, True),
+    ("disque du serveur", tick_disk, 30 * MINUTE, True),
 ]
 
 

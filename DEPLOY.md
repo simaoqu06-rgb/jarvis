@@ -249,6 +249,20 @@ cd jarvis && git pull && docker compose up -d --build && docker image prune -f
 `docker image prune -f` efface les anciennes versions de l'image que chaque mise à jour laisse derrière elle
 (images « sans nom », plus utilisées par aucun conteneur). Les données de `data/` ne sont pas touchées.
 
+## Ménage automatique
+
+JARVIS vérifie le disque toutes les 30 min et prévient sur Discord au-dessus de 75 %
+(`JARVIS_DISK_ALERT_PCT`), puis encore au-dessus de 90 %. Il n'efface rien lui-même.
+
+Le ménage Docker se programme une fois sur le serveur (chaque dimanche à 4 h : anciennes images
+et cache de build de plus d'une semaine ; `data/` n'est jamais touché) :
+
+```bash
+( crontab -l 2>/dev/null | grep -v jarvis-menage; echo '0 4 * * 0 docker image prune -f >/dev/null && docker builder prune -f --filter until=168h >/dev/null # jarvis-menage' ) | crontab -
+```
+
+`crontab -l` montre la ligne ; pour l'enlever : `crontab -l | grep -v jarvis-menage | crontab -`.
+
 ## Arrêter les notifications sans tout couper
 
 Mets `JARVIS_NOTIFICATIONS=off` dans `.env`, puis `docker compose up -d`.
