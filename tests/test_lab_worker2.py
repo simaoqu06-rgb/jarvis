@@ -182,3 +182,49 @@ async def test_mouvements_puis_resume_avec_fiches(tmp_path):
     assert db.conn.execute("SELECT COUNT(*) FROM day_moves").fetchone()[0] == 3
     summary = json.loads(db.conn.execute("SELECT data FROM summaries").fetchone()[0])
     assert summary["jour_chiffres"]["stock"]["jour"] == "2026-09-15" and summary["jour_chiffres"]["stock"]["plans"] == 3
+
+
+async def test_grade_en_tete_de_passage_sans_attendre_le_rejeu(tmp_path, monkeypatch):
+    """Le grade est calculé avant le direct et le rejeu : une collecte longue (journalier de tout
+    l'univers crypto au premier passage) ne le retarde plus."""
+    from app.lab import grade as GR
+
+    monkeypatch.setenv("JARVIS_LAB_DB", str(tmp_path / "g.db"))
+    monkeypatch.setattr(GR, "_cache", {"key": None, "data": None})
+    db = LabDB(str(tmp_path / "g.db"))
+    version, _ = R.method(db)  # version de génération réelle (réglages complets), comme en production
+    synthetic_trades(db, version=version, n_days=15, per_day=12, seed=4, first=date(2026, 8, 3), base=-0.3)
+    seen = {}
+
+    async def slow_replay(*a, **k):
+        seen["grade_pendant_le_rejeu"] = GR.payload(db.conn)["marches"].get("stock", {}).get("grade")
+        raise RuntimeError("collecte interrompue")
+
+    async def fake_lab2(*a, **k):
+        return {}
+
+    monkeypatch.setattr(R, "replay", slow_replay)
+    monkeypatch.setattr(W, "lab2", fake_lab2)
+    report = await W.tick(db, datetime(2026, 10, 7, 4, tzinfo=timezone.utc), collect=False)
+    assert seen["grade_pendant_le_rejeu"] is not None and seen["grade_pendant_le_rejeu"] != "non noté"
+    assert report["grade"]["stock"] == seen["grade_pendant_le_rejeu"]
+    assert (tmp_path / "lab_grade.json").exists()
+
+
+def test_etape_du_worker_dans_l_etat(tmp_path, monkeypatch):
+    from app.lab import heartbeat
+
+    monkeypatch.setenv("JARVIS_LAB_DB", str(tmp_path / "lab.db"))
+    monkeypatch.setattr(heartbeat, "enabled", True)
+    monkeypatch.setattr(heartbeat, "stage", None)
+    LabDB(str(tmp_path / "lab.db"))
+    assert ST.status(str(tmp_path / "lab.db"))["worker"] is None
+    heartbeat.beat("rejeu crypto : journalier de l'univers")
+    heartbeat.beat()  # un battement sans étape garde l'étape en cours
+    st = ST.status(str(tmp_path / "lab.db"))
+    assert st["worker"]["etape"] == "rejeu crypto : journalier de l'univers" and st["worker"]["il_y_a_s"] < 60
+    assert "Worker : rejeu crypto : journalier de l'univers · dernier signe de vie à l'instant" in ST.text(st)
+    silent = st | {"worker": st["worker"] | {"il_y_a_s": 2 * 3600}}
+    assert "⚠️ Worker muet" in ST.text(silent) and "il y a 2,0 h" in ST.text(silent)
+    heartbeat.path().write_text("2026-10-07T04:00:00+00:00", encoding="utf-8")  # ancien format
+    assert heartbeat.read()["le"] == "2026-10-07T04:00:00+00:00" and heartbeat.read()["etape"] is None

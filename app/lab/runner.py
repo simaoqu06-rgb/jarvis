@@ -145,6 +145,7 @@ async def replay(start_day: date, end_day: date, market: str, db: LabDB | None =
     days = [d for d in market_days(market, first, end_day) if day_ready(market, d, now)]
     if collect and days:
         # Journalier de tout l'univers en une passe pour toute la plage (pas une passe par jour).
+        heartbeat.beat(f"rejeu {market} : journalier de l'univers")
         await ensure_daily_range(db, market, days[0], days[-1], now, transport)
     done = 0
     started = time.monotonic()
@@ -153,6 +154,7 @@ async def replay(start_day: date, end_day: date, market: str, db: LabDB | None =
             break
         if max_seconds is not None and done and time.monotonic() - started >= max_seconds:
             break
+        heartbeat.beat(f"rejeu {market} : {day}")
         try:
             universe = await prepare_day(db, market, day, now, transport) if collect else None
             n = run_day(db, market, day, "replay", universe, progress=(job, "last_day"))

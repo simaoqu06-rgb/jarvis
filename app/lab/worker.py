@@ -15,7 +15,9 @@ Toutes les ~10 min :
 5. Carnet des leçons (étape « lecons », lessons.py) : leçons déposées par la routine du soir,
    re-mesurées quand les trades changent, fichier des leçons confirmées lu par JARVIS en direct.
 6. Grade de JARVIS (étape « grade », grade.py) : avis du council et décisions de Simão, grade de
-   chaque marché recalculé quand les trades changent, fichier lab_grade.json lu en direct.
+   chaque marché recalculé quand les trades changent, fichier lab_grade.json lu en direct. Aussi
+   en tête de chaque passage : le grade n'attend pas une collecte longue du rejeu.
+Le battement (lab.heartbeat) porte l'étape en cours, affichée par /api/lab/status et !labo.
 Le rejeu couvre JARVIS_LAB_REPLAY_DAYS séances (504 ≈ 2 ans) avant le premier lancement du worker ;
 le direct prend le relais à partir de ce jour-là. JARVIS_LAB_ENABLED=off met le worker en veille.
 """
@@ -215,6 +217,13 @@ async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, tra
     live_start = date.fromisoformat(live_start)
     R.method(db)
     report: dict = {"live": {}, "replay": {}, "paused": {}}
+    # Grade en tête de passage (lecture de la base, sans réseau, < 1 s) : il ne doit pas attendre derrière
+    # une collecte longue du rejeu (journalier de tout l'univers crypto au premier passage…).
+    heartbeat.beat("grade")
+    try:
+        report["grade"] = GRADE.step(db, now)
+    except Exception as exc:
+        log.warning("Labo : grade en échec : %s: %s", type(exc).__name__, exc)
     pause = stock_pause(now, collect)
     if pause:
         report["paused"]["stock"] = pause
@@ -222,6 +231,7 @@ async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, tra
             warn_missing_keys()
     markets = [m for m in R.MARKETS if not (m == "stock" and pause)]
     for market in markets:
+        heartbeat.beat(f"direct {market}")
         try:
             last = db.get(f"live:{market}", "last_day")
             for day in live_days_due(market, date.fromisoformat(last) if last else None, live_start, now):
@@ -249,6 +259,7 @@ async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, tra
     if summary_first(now, db.get("summary", "last_day")):
         report["labo2"] = await lab2(db, current(), collect)
     for market in market_order(db, markets):
+        heartbeat.beat(f"rejeu {market}")
         try:
             report["replay"][market] = await R.replay(
                 start, end, market, db, collect, budget, now, transport,
@@ -259,6 +270,7 @@ async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, tra
     if "labo2" not in report:
         report["labo2"] = await lab2(db, current(), collect)
     report["menage"] = {}
+    heartbeat.beat("ménage")
     for market in R.MARKETS:
         try:
             cutoff = prune_cutoff(db, market, current())
@@ -299,6 +311,7 @@ async def lab2(db: LabDB, now: datetime, collect: bool = True) -> dict:
     fresh: dict = {}
 
     async def step(name: str, fn):
+        heartbeat.beat(f"labo 2 : {name}")
         try:
             result = fn()
             if asyncio.iscoroutine(result):
@@ -350,7 +363,7 @@ async def loop() -> None:
             log.info("Labo : passage terminé en %.0f s (%s)", clock.monotonic() - started, report)
         except Exception as exc:
             log.warning("Labo : passage en échec : %s: %s", type(exc).__name__, exc)
-        heartbeat.beat()
+        heartbeat.beat("attente du prochain passage")
         await asyncio.sleep(max(60.0, TICK_SECONDS - (clock.monotonic() - started)))
 
 
