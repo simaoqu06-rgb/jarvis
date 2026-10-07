@@ -51,8 +51,11 @@ NEWS_MAX = 8
 NEWS_DEPTH_DAYS = 365
 NEWS_ATTEMPTS = 3
 CRYPTO_NOTE = "pas encore de source d'actus crypto : fiche sans actus"
-TYPES = ("resultats", "previsions", "fusion_acquisition", "reglementation", "produit", "analyste",
-         "financement", "justice", "macro", "secteur", "rumeur", "aucun", "autre")
+# Types de catalyseurs (classés le soir par la routine). Les exemples de Simão y sont tous :
+# changement de PDG, contrat signé ou perdu, résultats, FDA, dilution, partenariat, listing, hack.
+TYPES = ("resultats", "previsions", "direction", "contrat", "partenariat", "fusion_acquisition", "fda",
+         "reglementation", "produit", "analyste", "dilution", "financement", "listing", "hack", "justice",
+         "macro", "secteur", "rumeur", "aucun", "autre")
 POSITIONS = {"avant_ouverture": "avant l'ouverture", "avant_depart": "avant le départ", "pendant": "pendant",
              "apres": "après", "seance": "pendant la séance"}
 
