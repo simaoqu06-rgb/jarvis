@@ -27,11 +27,11 @@ async def test_rejeu_reprend_apres_une_coupure_sans_doublon(db, monkeypatch):
     real = G.stock_day
     calls = []
 
-    def flaky(db_, day, s, universe, errors=None):
+    def flaky(db_, day, s, universe, errors=None, strat_out=None):
         calls.append(day)
         if len(calls) == 2:
             raise RuntimeError("coupure")
-        return real(db_, day, s, universe, errors)
+        return real(db_, day, s, universe, errors, strat_out)
 
     monkeypatch.setattr(G, "stock_day", flaky)
     assert await R.replay(START, END, "stock", db, collect=False, now=NOW) == 1  # arrêt au jour en échec

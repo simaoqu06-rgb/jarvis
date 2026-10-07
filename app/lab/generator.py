@@ -20,6 +20,7 @@ from datetime import date, datetime, timezone
 
 from app.lab import collector as CO
 from app.lab import simulator as SIM
+from app.lab import strategies as ST
 from app.lab import universe as U
 from app.lab.db import LabDB
 from app.trading import service as T
@@ -119,19 +120,44 @@ def stock_inputs(db: LabDB, symbol: str, day: date) -> dict | None:
     check_known(bars, 15, moment, "15 min")
     check_known(h4, 0, cutoff - 1, "4 h")        # séances closes seulement (jamais le jour même)
     check_known(daily, 0, cutoff - 1, "journalier")
-    return {"moment": moment, "bars": bars, "h4": h4, "daily": daily, "session": session, "bounds": bounds}
+    return {"moment": moment, "bars": bars, "h4": h4, "daily": daily, "session": session, "bounds": bounds,
+            "hist5": hist}
+
+
+def _strategies(fn, *args) -> list[dict]:
+    """Labo v2 : une erreur dans une stratégie ne coûte jamais le trade v1 du même actif."""
+    try:
+        return fn(*args)
+    except LookAhead:
+        raise
+    except Exception as exc:
+        log.warning("Labo v2 : stratégies %s ignorées (%s: %s)", args[1], type(exc).__name__, exc)
+        return []
 
 
 def stock_trade(db: LabDB, symbol: str, day: date, s: dict, meta: dict | None = None,
-                regime: dict | None = None) -> dict | None:
+                regime: dict | None = None, strat_out: list | None = None) -> dict | None:
+    """Trade v1 de l'action ; avec `strat_out`, y ajoute aussi les lignes du labo v2 (strategies.py),
+    calculées sur les mêmes bougies, chargées une seule fois."""
     inp = stock_inputs(db, symbol, day)
     if not inp:
         return None
+    row = v1 = None
+    try:
+        row, v1 = _stock_v1(inp, symbol, day, s, meta, regime)
+    finally:
+        if strat_out is not None:
+            strat_out.extend(_strategies(ST.stock_day, day, symbol, inp["hist5"], inp["session"], inp["daily"],
+                                         (meta or {}).get("rank"), v1))
+    return row
+
+
+def _stock_v1(inp: dict, symbol: str, day: date, s: dict, meta: dict | None, regime: dict | None):
     try:
         plan = make_plan(symbol, "stock", inp["bars"], inp["daily"], inp["h4"], inp["moment"], s)
     except T.PlanError as exc:
         log.debug("Labo : plan %s %s impossible (%s)", symbol, day, exc)
-        return None
+        return None, None
     last_price = inp["bars"][-1]["c"]
     cost = SIM.costs("stock", plan["entry"])
     result = SIM.simulate(plan, inp["session"], market="stock", decided_at=inp["moment"],
@@ -148,7 +174,9 @@ def stock_trade(db: LabDB, symbol: str, day: date, s: dict, meta: dict | None = 
         "gap_open_pct": round((inp["session"][0]["o"] / prev_close - 1) * 100, 3) if prev_close else None,
         "sector": None, "catalyst_replayed": False,
     }
-    return _row("stock", symbol, day, inp["moment"], plan, context, result)
+    v1 = {"plan": plan, "decided_at": inp["moment"], "entry_until": inp["bounds"][1], "last_price": last_price,
+          "cost": cost, "result": result}
+    return _row("stock", symbol, day, inp["moment"], plan, context, result), v1
 
 
 def _guarded(errors: list | None, symbol: str, fn, *args):
@@ -166,15 +194,16 @@ def _guarded(errors: list | None, symbol: str, fn, *args):
 
 
 def stock_day(db: LabDB, day: date, s: dict, universe: list[dict],
-              errors: list | None = None) -> tuple[list[int], list[dict]]:
-    """Plans et simulations de toutes les valeurs de l'univers pour la séance `day`."""
+              errors: list | None = None, strat_out: list | None = None) -> tuple[list[int], list[dict]]:
+    """Plans et simulations de toutes les valeurs de l'univers pour la séance `day` (et, avec
+    `strat_out`, les lignes du labo v2)."""
     if not CO.session_ts(day):
         return [], []
     cutoff = CO.ny_midnight(day)
     index_daily = db.get_bars("stock", INDEX["stock"], 1440, cutoff - 120 * 86400, cutoff)
     regime = U.regime(index_daily, cutoff, ANNUAL_DAYS["stock"])
     rows = [r for meta in universe
-            if (r := _guarded(errors, meta["symbol"], stock_trade, db, meta["symbol"], day, s, meta, regime))]
+            if (r := _guarded(errors, meta["symbol"], stock_trade, db, meta["symbol"], day, s, meta, regime, strat_out))]
     return [U.stock_decision_ts(day)], rows
 
 
@@ -221,7 +250,7 @@ def crypto_inputs(data: dict, moment: int) -> dict | None:
 
 
 def crypto_trade(data: dict, symbol: str, day: date, moment: int, s: dict, meta: dict | None = None,
-                 regime: dict | None = None) -> dict | None:
+                 regime: dict | None = None, v1_out: list | None = None) -> dict | None:
     inp = crypto_inputs(data, moment)
     if not inp or not inp["sim"]:
         return None
@@ -243,12 +272,17 @@ def crypto_trade(data: dict, symbol: str, day: date, moment: int, s: dict, meta:
         "window_utc": datetime.fromtimestamp(moment, timezone.utc).strftime("%H:%M"),
         "gap_open_pct": None, "sector": None, "catalyst_replayed": False,
     }
+    if v1_out is not None:
+        v1_out.append({"plan": plan, "decided_at": moment, "entry_until": inp["horizon"], "last_price": inp["last"],
+                       "cost": cost, "result": result})
     return _row("crypto", symbol, day, moment, plan, context, result)
 
 
 def crypto_day(db: LabDB, day: date, s: dict, universe: list[dict], now: int | None = None,
-               errors: list | None = None) -> tuple[list[int], list[dict]]:
-    """Plans et simulations des créneaux du jour UTC `day` dont l'horizon est passé (tous sans `now`)."""
+               errors: list | None = None, strat_out: list | None = None) -> tuple[list[int], list[dict]]:
+    """Plans et simulations des créneaux du jour UTC `day` dont l'horizon est passé (tous sans `now`).
+    Avec `strat_out`, et seulement quand toutes les sorties du jour sont connues
+    (strategies.crypto_complete), les lignes du labo v2."""
     moments = [m for m in crypto_moments(day) if now is None or m + 86400 <= now]
     if not moments:
         return [], []
@@ -260,8 +294,12 @@ def crypto_day(db: LabDB, day: date, s: dict, universe: list[dict], now: int | N
         data = _guarded(errors, meta["symbol"], crypto_symbol_day, db, meta["symbol"], day)
         if data is None:
             continue
+        v1s: list[dict] = []
         for moment in moments:
-            row = _guarded(errors, meta["symbol"], crypto_trade, data, meta["symbol"], day, moment, s, meta, regime)
+            row = _guarded(errors, meta["symbol"], crypto_trade, data, meta["symbol"], day, moment, s, meta, regime, v1s)
             if row:
                 rows.append(row)
+        if strat_out is not None and ST.crypto_complete(day, now):
+            strat_out.extend(_strategies(ST.crypto_day, day, meta["symbol"], data["bars5"], data["daily"],
+                                         meta.get("rank"), v1s))
     return moments, rows

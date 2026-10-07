@@ -25,6 +25,37 @@ TRADE_FLAT = ("triggered", "filled_at", "exit_reason", "r_net", "r_gross", "tp1_
               "minutes_to_tp1", "minutes_to_tp2", "minutes_to_tp3", "mfe_r", "mae_r", "day_range_pct",
               "decision", "composite")
 
+TRADES_DDL = """CREATE TABLE IF NOT EXISTS {name} (
+    id INTEGER PRIMARY KEY,
+    origin TEXT NOT NULL CHECK (origin IN ('replay', 'live')),
+    method_version TEXT NOT NULL, market TEXT NOT NULL, symbol TEXT NOT NULL, side TEXT NOT NULL,
+    day TEXT NOT NULL, planned_at INTEGER NOT NULL,
+    plan TEXT, context TEXT, result TEXT,
+    triggered INTEGER, filled_at INTEGER, exit_reason TEXT, r_net REAL, r_gross REAL,
+    tp1_hit INTEGER, tp2_hit INTEGER, tp3_hit INTEGER,
+    minutes_to_tp1 REAL, minutes_to_tp2 REAL, minutes_to_tp3 REAL,
+    mfe_r REAL, mae_r REAL, day_range_pct REAL, decision TEXT, composite REAL,
+    UNIQUE (origin, method_version, market, symbol, planned_at)
+);"""
+# Labo v2 (strategies.py) : une ligne par stratégie, actif et jour (v1 : par créneau), toutes les sorties
+# et tous les tests de robustesse dans la même ligne. Colonnes dans STRAT_COLUMNS.
+STRAT_COLUMNS = ("origin", "market", "symbol", "day", "strategy", "slot", "signal_at", "entry", "stop", "risk_pct",
+                 "triggered", "filled_at", "entry_mode", "minutes_to_fill", "exit_reason", "r_net", "r_gross",
+                 "tp1_hit", "mfe_r", "mae_r", "r_sans_be", "r_2r", "r_suiveur", "r_glisse_x2", "r_glisse_x3",
+                 "r_retard", "r_manque", "temoin_r", "temoin_triggered", "gap_open_pct", "rank")
+STRAT_DDL = """CREATE TABLE IF NOT EXISTS {name} (
+    id INTEGER PRIMARY KEY,
+    origin TEXT NOT NULL CHECK (origin IN ('replay', 'live')),
+    market TEXT NOT NULL, symbol TEXT NOT NULL, day TEXT NOT NULL, strategy TEXT NOT NULL,
+    slot INTEGER NOT NULL, signal_at INTEGER, entry REAL, stop REAL, risk_pct REAL,
+    triggered INTEGER, filled_at INTEGER, entry_mode TEXT, minutes_to_fill REAL, exit_reason TEXT,
+    r_net REAL, r_gross REAL, tp1_hit INTEGER, mfe_r REAL, mae_r REAL,
+    r_sans_be REAL, r_2r REAL, r_suiveur REAL, r_glisse_x2 REAL, r_glisse_x3 REAL, r_retard REAL, r_manque REAL,
+    temoin_r REAL, temoin_triggered INTEGER, gap_open_pct REAL, rank INTEGER,
+    UNIQUE (origin, market, symbol, day, strategy, slot)
+);
+CREATE INDEX IF NOT EXISTS {name}_day ON {name} (market, day);"""
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS bars (
     market TEXT NOT NULL, symbol TEXT NOT NULL, tf INTEGER NOT NULL, ts INTEGER NOT NULL,
@@ -36,18 +67,7 @@ CREATE TABLE IF NOT EXISTS universe (
     market TEXT NOT NULL, day TEXT NOT NULL, symbol TEXT NOT NULL, rank INTEGER, reason TEXT, metrics TEXT,
     PRIMARY KEY (market, day, symbol)
 );
-CREATE TABLE IF NOT EXISTS trades (
-    id INTEGER PRIMARY KEY,
-    origin TEXT NOT NULL CHECK (origin IN ('replay', 'live')),
-    method_version TEXT NOT NULL, market TEXT NOT NULL, symbol TEXT NOT NULL, side TEXT NOT NULL,
-    day TEXT NOT NULL, planned_at INTEGER NOT NULL,
-    plan TEXT, context TEXT, result TEXT,
-    triggered INTEGER, filled_at INTEGER, exit_reason TEXT, r_net REAL, r_gross REAL,
-    tp1_hit INTEGER, tp2_hit INTEGER, tp3_hit INTEGER,
-    minutes_to_tp1 REAL, minutes_to_tp2 REAL, minutes_to_tp3 REAL,
-    mfe_r REAL, mae_r REAL, day_range_pct REAL, decision TEXT, composite REAL,
-    UNIQUE (origin, method_version, market, symbol, planned_at)
-);
+{trades}
 CREATE INDEX IF NOT EXISTS trades_day ON trades (market, day);
 CREATE TABLE IF NOT EXISTS progress (
     job TEXT NOT NULL, key TEXT NOT NULL, value TEXT, PRIMARY KEY (job, key)
@@ -108,7 +128,12 @@ CREATE TABLE IF NOT EXISTS grades (
     id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, market TEXT NOT NULL, version TEXT,
     rank INTEGER, measured INTEGER, source TEXT NOT NULL, reason TEXT, metrics TEXT, soiree TEXT
 );
-"""
+-- Bloc scellé (seal.py) : mêmes tables, jamais lues par les statistiques, la routine ni le grade.
+{trades_sealed}
+{strat}
+{strat_sealed}
+""".format(trades=TRADES_DDL.format(name="trades"), trades_sealed=TRADES_DDL.format(name="trades_sealed"),
+           strat=STRAT_DDL.format(name="strat_trades"), strat_sealed=STRAT_DDL.format(name="strat_trades_sealed"))
 # Colonnes ajoutées après coup (ALTER TABLE à l'ouverture par le worker ; idempotent).
 MIGRATIONS = {
     "rules": (("pourquoi", "TEXT"), ("council", "TEXT"), ("soiree", "TEXT"), ("decision", "TEXT"),
@@ -250,18 +275,39 @@ class LabDB:
     # --- Trades -----------------------------------------------------------------------------
     def replace_trades(self, origin: str, version: str, market: str, planned_at: list[int], rows: list[dict]) -> None:
         """Remplace les trades de ces créneaux (rejouer un jour ne crée jamais de doublon)."""
+        from app.lab import seal  # import tardif : seal n'importe rien, mais garde db sans dépendance
+
         with self.transaction():
             for t in planned_at:
-                self.conn.execute("DELETE FROM trades WHERE origin = ? AND method_version = ? AND market = ? "
-                                  "AND planned_at = ?", (origin, version, market, t))
+                for table in ("trades", "trades_sealed"):
+                    self.conn.execute(f"DELETE FROM {table} WHERE origin = ? AND method_version = ? AND market = ? "
+                                      "AND planned_at = ?", (origin, version, market, t))
             for r in rows:
+                table = "trades_sealed" if seal.sealed(origin, r["day"]) else "trades"
                 cols = ["origin", "method_version", "market", "symbol", "side", "day", "planned_at",
                         "plan", "context", "result", *TRADE_FLAT]
                 values = [origin, version, market, r["symbol"], r["side"], r["day"], r["planned_at"],
                           json.dumps(r["plan"], ensure_ascii=False), json.dumps(r["context"], ensure_ascii=False),
                           json.dumps(r["result"], ensure_ascii=False)] + [r["flat"].get(k) for k in TRADE_FLAT]
                 self.conn.execute(
-                    f"INSERT OR REPLACE INTO trades ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", values)
+                    f"INSERT OR REPLACE INTO {table} ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", values)
+
+    def replace_strat(self, origin: str, market: str, day: str, rows: list[dict], symbols: list[str] | None = None) -> None:
+        """Remplace les lignes des stratégies du jour (toutes, ou celles de `symbols`) : rejouer un jour
+        ne crée jamais de doublon. Les jours du bloc scellé vont dans strat_trades_sealed."""
+        from app.lab import seal
+
+        table = "strat_trades_sealed" if seal.sealed(origin, day) else "strat_trades"
+        with self.transaction():
+            for t in ("strat_trades", "strat_trades_sealed"):
+                if symbols is None:
+                    self.conn.execute(f"DELETE FROM {t} WHERE origin = ? AND market = ? AND day = ?", (origin, market, day))
+                else:
+                    self.conn.executemany(f"DELETE FROM {t} WHERE origin = ? AND market = ? AND day = ? AND symbol = ?",
+                                          [(origin, market, day, s) for s in symbols])
+            self.conn.executemany(
+                f"INSERT OR REPLACE INTO {table} ({', '.join(STRAT_COLUMNS)}) VALUES ({', '.join('?' * len(STRAT_COLUMNS))})",
+                [[origin, market, r["symbol"], day, *[r.get(k) for k in STRAT_COLUMNS[4:]]] for r in rows])
 
     def count_trades(self, **where) -> int:
         sql = "SELECT COUNT(*) FROM trades" + (" WHERE " + " AND ".join(f"{k} = ?" for k in where) if where else "")

@@ -17,6 +17,9 @@ Toutes les ~10 min :
 6. Grade de JARVIS (étape « grade », grade.py) : avis du council et décisions de Simão, grade de
    chaque marché recalculé quand les trades changent, fichier lab_grade.json lu en direct. Aussi
    en tête de chaque passage : le grade n'attend pas une collecte longue du rejeu.
+7. Labo v2 (strategies.py) : les stratégies à déclencheur sont calculées dans le même passage que v1
+   (runner.run_day) ; les jours traités avant elles sont rattrapés hors séance (rattrapage.py, bougies
+   relues et gardées en mémoire) ; leur tableau (strat_stats.py) est mis en cache à l'étape « strategies ».
 Le battement (lab.heartbeat) porte l'étape en cours, affichée par /api/lab/status et !labo.
 Le rejeu couvre JARVIS_LAB_REPLAY_DAYS séances (504 ≈ 2 ans) avant le premier lancement du worker ;
 le direct prend le relais à partir de ce jour-là. JARVIS_LAB_ENABLED=off met le worker en veille.
@@ -35,9 +38,11 @@ from app.lab import grade as GRADE
 from app.lab import heartbeat
 from app.lab import lessons as L
 from app.lab import method as M
+from app.lab import rattrapage as RAT
 from app.lab import regime as REG
 from app.lab import runner as R
 from app.lab import stats as STATS
+from app.lab import strat_stats as SS
 from app.lab import summary as SUM
 from app.lab import validator as V
 from app.lab.db import LabDB, now_iso
@@ -51,6 +56,9 @@ CHUNK_DAYS = {"nuit": 20, "jour": 4, "seance": 1}
 # sans borne, 20 jours la nuit retenaient la crypto et le Labo 2 plus d'une heure, et une mise à
 # jour du serveur coupait le passage avant qu'ils ne tournent.
 REPLAY_SECONDS = {"nuit": 900, "jour": 300, "seance": 120}
+# Labo v2 : rattrapage des stratégies sur les jours traités avant lui (rattrapage.py), bougies relues à la
+# source et gardées en mémoire ; jamais pendant la séance US.
+RATTRAPAGE_SECONDS = {"nuit": 600, "jour": 120, "seance": 0}
 MAX_LIVE_DAYS_PER_TICK = 5
 KEY_WARNING_SECONDS = 3600
 # Labo 2 : jours de mouvements calculés, appels Finnhub, règles validées et âge maximal des
@@ -269,6 +277,15 @@ async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, tra
         heartbeat.beat()
     if "labo2" not in report:
         report["labo2"] = await lab2(db, current(), collect)
+    seconds = RATTRAPAGE_SECONDS[period(current())] if collect else 0
+    if seconds:
+        report["rattrapage"] = {}
+        for market in markets:
+            heartbeat.beat(f"labo v2 : rattrapage {market}")
+            try:
+                report["rattrapage"][market] = await RAT.step(db, market, seconds, transport)
+            except Exception as exc:
+                log.warning("Labo v2 : rattrapage %s en échec : %s: %s", market, type(exc).__name__, exc)
     report["menage"] = {}
     heartbeat.beat("ménage")
     for market in R.MARKETS:
@@ -304,6 +321,22 @@ def refresh_stats(db: LabDB, now: datetime, max_age: float, force: bool = False)
     return data
 
 
+def refresh_strategies(db: LabDB, now: datetime, max_age: float) -> int | None:
+    """Labo v2 : tableau des stratégies et diagnostic v1 (strat_stats), recalculés quand les lignes ont
+    changé et que le cache a plus de `max_age` secondes. Renvoie le nombre de lignes, ou None."""
+    sig = SS.signature(db.conn)
+    last = db.get("strats", "signature")
+    at = db.get("strats", "at", 0) or 0
+    if sig == last or (SS.cached(db.conn) and now.timestamp() - at < max_age):
+        return None
+    data = SS.report(db.conn)
+    with db.transaction():
+        STATS.store(db.conn, SS.CACHE_KEY, data, sig[0], now_iso())
+        db.set("strats", "signature", sig)
+        db.set("strats", "at", now.timestamp())
+    return sig[0]
+
+
 async def lab2(db: LabDB, now: datetime, collect: bool = True) -> dict:
     """Étapes du Labo 2, chacune isolée, dans le budget de la période."""
     budget = LAB2_BUDGET[period(now)]
@@ -334,6 +367,7 @@ async def lab2(db: LabDB, now: datetime, collect: bool = True) -> dict:
     await step("methode", lambda: M.step(db, now))
     await step("lecons", lambda: L.step(db, now, budget["stats_age"]))
     await step("grade", lambda: GRADE.step(db, now))
+    await step("strategies", lambda: refresh_strategies(db, now, budget["stats_age"]))
     summary_day = SUM.due(now, db.get("summary", "last_day"))
     stats = await step("stats", lambda: refresh_stats(db, now, budget["stats_age"], force=bool(summary_day)))
     if stats:

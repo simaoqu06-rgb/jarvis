@@ -29,6 +29,7 @@ from app.lab import method as lab_method
 from app.lab import morning as lab_morning
 from app.lab import page as lab_page
 from app.lab import stats as lab_stats
+from app.lab import strat_stats as lab_strategies
 from app.lab import status as lab_status
 from app.lab import summary as lab_summary
 from app.lab import validator as lab_validator
@@ -685,6 +686,17 @@ def lab_grade_get(limit: int = Query(20, ge=1, le=200)):
     conn = _lab_conn()
     try:
         return lab_grade.payload(conn) | {"historique": lab_grade.history(conn, limit=limit)}
+    finally:
+        conn.close()
+
+
+@app.get("/api/lab/strategies", dependencies=[Depends(lab_key)])
+def lab_strategies_get():
+    """Labo v2 : tableau des stratégies à déclencheur (v1 en référence), sorties, robustesse, écart au
+    témoin aléatoire, et diagnostic de v1. Hors bloc scellé. Cache du worker, sinon calcul direct."""
+    conn = _lab_conn()
+    try:
+        return lab_strategies.cached(conn) or lab_strategies.report(conn)
     finally:
         conn.close()
 

@@ -10,6 +10,7 @@ from datetime import date
 from pathlib import Path
 
 from app.lab import heartbeat
+from app.lab import seal as SEAL
 from app.lab.db import db_path, open_readonly
 
 MARKET_FR = {"stock": "actions", "crypto": "crypto"}
@@ -54,6 +55,13 @@ def status(path: str | None = None) -> dict:
             out["live"][market] = {"last_day": _progress(conn, f"live:{market}").get("last_day")}
         for market, origin, n in conn.execute("SELECT market, origin, COUNT(*) FROM trades GROUP BY market, origin"):
             out["trades"].setdefault(market, {})[origin] = n
+        out["scelle"] = {**SEAL.describe(), "trades": {}}
+        try:  # base d'avant le scellé ouverte en lecture seule : table absente
+            for market, n in conn.execute("SELECT market, COUNT(*) FROM trades_sealed GROUP BY market"):
+                out["scelle"]["trades"][market] = n
+        except sqlite3.Error:
+            pass
+        out["labo_v2"] = labo_v2(conn)
         from app.lab import method as M  # import tardif, comme runner
 
         out["methode"] = M.state(conn)
@@ -65,6 +73,21 @@ def status(path: str | None = None) -> dict:
         out["error"] = f"base illisible : {exc}"
     finally:
         conn.close()
+    return out
+
+
+def labo_v2(conn: sqlite3.Connection) -> dict:
+    """Lignes des stratégies (hors scellé) et jours encore à rattraper, par marché."""
+    from app.lab import rattrapage as RAT  # import tardif : tire runner et generator
+
+    out: dict = {"lignes": {}, "rattrapage": {}}
+    try:
+        for market, n in conn.execute("SELECT market, COUNT(*) FROM strat_trades GROUP BY market"):
+            out["lignes"][market] = n
+        for market in ("stock", "crypto"):
+            out["rattrapage"][market] = RAT.remaining(conn, market)
+    except sqlite3.Error:
+        pass
     return out
 
 
@@ -91,6 +114,10 @@ def headline(conn: sqlite3.Connection) -> dict:
         pass
     out["regles"] = V.counts(conn)
     return out
+
+
+def _date_fr(iso: str) -> str:
+    return date.fromisoformat(iso).strftime("%d/%m/%Y")
 
 
 def _fr(x: float, digits: int = 2) -> str:
@@ -122,6 +149,17 @@ def text(st: dict) -> str:
                   f"{f.get('sans_actus', 0)} sans actus)") if f.get("total") else ""
         lines.append(f"Fiches catalyseurs : {f.get('total', 0)}{detail} · règles : {regles.get('en_attente', 0)} "
                      f"en attente, {regles.get('validee', 0) + regles.get('rejetee', 0)} testées")
+    v2 = st.get("labo_v2")
+    if v2 and (v2.get("lignes") or any(sum(r.values()) for r in (v2.get("rattrapage") or {}).values())):
+        left = {m: sum(r.values()) for m, r in (v2.get("rattrapage") or {}).items()}
+        lines.append(f"Labo v2 : {sum((v2.get('lignes') or {}).values())} lignes de stratégies (`!strategies`)"
+                     + (f" · rattrapage : {left.get('stock', 0)} jours actions, {left.get('crypto', 0)} jours crypto"
+                        if any(left.values()) else ""))
+    sc = st.get("scelle")
+    if sc:
+        n = sum((sc.get("trades") or {}).values())
+        lines.append(f"🔒 Bloc scellé : rejeu du {_date_fr(sc['du'])} au {_date_fr(sc['au'])}, "
+                     f"{n} trades calculés, jamais montrés")
     if st.get("methode"):
         from app.lab import method as M
 

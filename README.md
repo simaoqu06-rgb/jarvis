@@ -313,6 +313,24 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
     un cran au plus : une baisse s'applique, une hausse de lettre passe par ton accord).
   - `!grade`, `GET /api/lab/grade` (historique), page `/cockpit/labo`, ligne 🏅 sous chaque plan.
 
+### Labo v2 : stratégies à déclencheur et bloc scellé
+
+v1 achète tout l'univers à heure fixe sans attendre de signal. Le labo v2 mesure, à côté d'elle et sur
+les mêmes jours, des stratégies qui attendent leur déclencheur : pullback en tendance + bougie de
+confirmation, cassure du range d'ouverture (15 et 30 min), cassure du plus haut de la veille puis retest.
+Liste, seuils et sorties sont déclarés d'avance : [docs/labo-strategies.md](docs/labo-strategies.md).
+
+- Chaque trade est mesuré avec quatre sorties (gestion v1, sans break-even, 2 R, stop suiveur), trois
+  tests de robustesse (glissement ×2 et ×3, entrée retardée, ordres limités à peine touchés) et un
+  **témoin aléatoire** (même stop, mêmes objectifs, entrée au hasard) : une stratégie qui ne bat pas
+  son témoin n'a pas d'avantage d'entrée.
+- Classement à l'espérance nette en R (intervalle en grappes par jour), jamais au taux de réussite.
+- Diagnostic de v1 : espérance par gap d'ouverture, mode d'entrée, raison de sortie, brut contre net.
+- **Bloc scellé** : le rejeu du 6 avril au 5 octobre 2026 est calculé mais rangé à part, invisible des
+  statistiques, du brief, du grade et du validateur (`app/lab/seal.py`). Il sert une seule fois.
+- Les jours traités avant le labo v2 sont rattrapés hors séance (bougies relues à la source, rien stocké).
+- `!strategies`, `GET /api/lab/strategies`, ligne « Labo v2 » et ligne 🔒 de `!labo`.
+
 ## Commandes Discord
 
 | Commande | Effet |
@@ -328,6 +346,7 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
 | `!labo` | état du labo (rejeu, espérance, règles, méthode en place, challenger, propositions du labo) |
 | `!lecons` | carnet des leçons du labo : confirmées, à confirmer, démenties, avec leur preuve chiffrée |
 | `!grade` | grade de JARVIS (F- à S+) par marché, de quoi il est fait, risque permis, derniers changements |
+| `!strategies` | labo v2 : stratégies à déclencheur contre v1, sorties, témoin aléatoire, diagnostic de v1 |
 | `!aide` | liste des commandes |
 
 Le bot ne répond qu'aux comptes de `JARVIS_DISCORD_OWNER_ID`. Mise en place : [DEPLOY.md](DEPLOY.md).
