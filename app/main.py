@@ -415,7 +415,7 @@ async def trading_proposal_decide(pid: int, choice: str):
 # Lecture seule sur data/lab.db (le worker jarvis-lab est seul à écrire) ; une règle soumise est
 # déposée dans une file de fichiers que le worker lit. Rien ici ne change la méthode en direct.
 # Labo 3 : tout ce que la routine du soir utilise est sous /api/lab/ (seul chemin ouvert par Tailscale
-# Funnel, sur le port 8443) et demande la clé ; /api/lab/status aussi dès que la requête vient d'Internet.
+# Funnel, sur le port 443 ; le cockpit est sur 4443, privé) et demande la clé ; /api/lab/status aussi dès que la requête vient d'Internet.
 LAB_KEY_NAME = "JARVIS_LAB_API_KEY"
 PRIVATE_NETS = [ipaddress.ip_network(n) for n in ("127.0.0.0/8", "::1/128", "100.64.0.0/10", "fd7a:115c:a1e0::/48",
                                                    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")]
@@ -432,7 +432,7 @@ def public_request(request: Request) -> bool:
         return True
     for host in (request.headers.get("host", ""), request.headers.get("x-forwarded-host", "")):
         if host.rsplit(":", 1)[-1] in FUNNEL_PORTS and ":" in host:
-            return True  # ports réservés à Funnel (le cockpit est servi sur 443 par tailscale serve)
+            return True  # anciens ports de Funnel ; sur 443, l'en-tête Tailscale-Funnel-Request suffit
     forwarded = request.headers.get("x-forwarded-for", "")
     for part in [x.strip() for x in forwarded.split(",") if x.strip()]:
         try:
