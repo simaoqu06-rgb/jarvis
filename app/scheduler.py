@@ -141,10 +141,6 @@ async def tick_trades() -> None:
             log.warning("Cockpit Discord pas mis à jour : %s", exc)
 
 
-async def nyse_trading_day(now: datetime) -> bool:
-    return CAL.is_trading_day(now.astimezone(NEW_YORK).date())
-
-
 def scan_due(now: datetime) -> bool:
     """À l'heure prévue, une fois par jour de séance ; pas de rattrapage plus de 30 min après (serveur
     redémarré en pleine séance : les entrées de pré-ouverture n'auraient plus de sens)."""

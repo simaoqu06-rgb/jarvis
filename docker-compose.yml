@@ -1,6 +1,16 @@
+# Journaux Docker plafonnés (sans cela, json-file grossit sans limite) : 3 fichiers de 10 Mo par service
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   jarvis:
     build: .
+    # Une seule image pour les deux services (le second build est servi par le cache, rien n'est stocké en double)
+    image: jarvis:latest
+    logging: *logging
     # Redémarre après un plantage ou un redémarrage du serveur ; santé vérifiée par le HEALTHCHECK du Dockerfile
     restart: unless-stopped
     env_file: .env
@@ -14,6 +24,8 @@ services:
   # Même image, même .env et même dossier data/ ; aucun port, un seul cœur pour laisser JARVIS réactif.
   jarvis-lab:
     build: .
+    image: jarvis:latest
+    logging: *logging
     command: python -m app.lab.worker
     restart: unless-stopped
     env_file: .env

@@ -57,11 +57,6 @@ CACHE_MAX_ENTRIES = 256
 _candle_cache: dict[tuple, tuple[float, list[dict]]] = {}
 
 
-def nyse_session_open(now: datetime) -> bool:
-    """Séance régulière en cours (fériés et séances courtes compris, calendrier calculé)."""
-    return CAL.session_open(now)
-
-
 class PlanError(Exception):
     """Plan impossible (données absentes, niveaux incohérents)."""
 

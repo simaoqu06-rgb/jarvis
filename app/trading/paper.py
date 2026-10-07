@@ -27,7 +27,6 @@ from app.trading.settings import settings
 
 log = logging.getLogger(__name__)
 PAPER_PATH = os.getenv("JARVIS_PAPER_PATH", "data/paper.json")
-SESSION_MINUTES = 390
 MIN_SAMPLES = 15  # en dessous, un groupe ne sert pas à proposer un réglage
 
 

@@ -243,8 +243,11 @@ Change la clé (`JARVIS_LAB_API_KEY`, puis `docker compose up -d`) si elle a pu 
 ## Mettre à jour
 
 ```bash
-cd jarvis && git pull && docker compose up -d --build
+cd jarvis && git pull && docker compose up -d --build && docker image prune -f
 ```
+
+`docker image prune -f` efface les anciennes versions de l'image que chaque mise à jour laisse derrière elle
+(images « sans nom », plus utilisées par aucun conteneur). Les données de `data/` ne sont pas touchées.
 
 ## Arrêter les notifications sans tout couper
 

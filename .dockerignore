@@ -5,3 +5,7 @@ data
 tests
 __pycache__
 .pytest_cache
+docs
+*.md
+.claude
+.github

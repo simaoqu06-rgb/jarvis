@@ -6,7 +6,7 @@ qui récupère les données en temps réel pour l'agent JARVIS et ses futures no
 ## Lancer
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 cp .env.example .env   # puis remplis les clés
 .venv/bin/uvicorn app.main:app --reload
 ```
