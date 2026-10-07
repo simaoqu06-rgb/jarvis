@@ -14,6 +14,7 @@ from app.lab import status as ST_STATUS
 from app.lab import strat_stats as SS
 from app.lab import strategies as ST
 from app.lab.db import LabDB
+from app.trading import indicators as I
 from tests.lab_fixtures import fill_crypto, fill_stock
 
 DAY = date(2026, 10, 6)  # mardi, séance normale
@@ -227,12 +228,33 @@ def test_rebond_confirme_attend_la_cassure_de_la_resistance():
     first = ST.rebond_confirme(d)[0]
     i = first["i"]
     assert i - d.d0 == 7
-    assert first["entry"] == pytest.approx(max(d.h[i - 5:i + 1]) + 0.01)   # pas d'entrée au contact
+    assert first["entry"] == pytest.approx(109.11)   # pas d'entrée au contact : dernier sommet de réaction + 1 pas
     assert first["stop"] == pytest.approx(107.95 - ST.STOP_BUFFER_ATR * d.atr[i])
-    assert first["entry_until"] == d.t[i] + 300 + ST.BOUNCE_VALID_BARS * 300
+    assert first["entry_until"] == d.signal_until_ts   # valable jusqu'à la fin de la fenêtre (n° 3)
     rows = {r["strategy"]: r for r in ST.strategy_rows(d, "AAA", 3, 0.0)}
     assert rows["rebond_confirme"]["triggered"] == 1
     assert rows["rebond_confirme"]["filled_at"] == d.t[i + 3]
+
+
+# Descente avec un sommet de réaction (bougie 6), puis 7 bougies plus bas, contact de la zone 108 à la bougie 14.
+STRUCTURE = [(109.0, 109.1, 108.9, 109.0)] * 3 + [
+    (109.0, 109.02, 108.88, 108.9), (108.9, 108.92, 108.78, 108.8), (108.8, 108.82, 108.68, 108.7),
+    (108.7, 109.05, 108.68, 109.0),    # sommet de réaction (plus haut que les 3 bougies de chaque côté)
+    (109.0, 109.0, 108.85, 108.9), (108.9, 108.92, 108.75, 108.8), (108.8, 108.82, 108.65, 108.7),
+    (108.7, 108.72, 108.55, 108.6), (108.6, 108.62, 108.45, 108.5), (108.5, 108.52, 108.35, 108.4),
+    (108.4, 108.42, 108.22, 108.25), (108.25, 108.3, 107.95, 108.1)]
+
+
+def test_rebond_confirme_casse_la_structure_pas_les_6_dernieres_bougies():
+    d = zone_day(STRUCTURE)
+    first = ST.rebond_confirme(d)[0]
+    i = first["i"]
+    assert i - d.d0 == 14
+    assert first["entry"] == pytest.approx(109.06)          # dernier sommet de réaction (bougie 6) + 1 pas
+    assert max(d.h[i - 5:i + 1]) + 0.01 < first["entry"]     # l'ancienne règle (n° 2) serait entrée plus bas
+    # Le sommet n'est utilisable qu'une fois confirmé (3 bougies après) : rien de l'avenir.
+    early = zone_day(STRUCTURE[:8] + [(108.95, 108.97, 107.95, 108.1)])
+    assert all(c["entry"] != pytest.approx(109.06) for c in ST.rebond_confirme(early) if c["i"] - early.d0 == 8)
 
 
 def test_rebond_confirme_annule_si_le_stop_casse_avant():
@@ -257,6 +279,42 @@ def test_cassure_zone_retest():
     assert first["entry"] == pytest.approx(110.56) and first["stop"] == pytest.approx(110.0 - 0.1 * d.atr[first["i"]])
 
 
+def test_cassure_zone_annulee_par_une_cloture_sous_la_zone():
+    rows = [(109.6, 109.7, 109.5, 109.6)] * 3 + [
+        (109.6, 109.9, 109.55, 109.85), (109.85, 110.4, 109.8, 110.3),   # cassure de la zone 110
+        (110.3, 110.35, 109.7, 109.8),                                   # clôture sous la zone : fausse cassure
+        (109.8, 110.3, 109.95, 110.2)]                                   # aurait été un « retest » en n° 2
+    d = zone_day(rows)
+    assert ST.cassure_zone_retest(d) == []
+
+
+def test_contacts_distincts_et_reaction_minimale():
+    assert ST._contacts([(0, 300), (300, 600), (600, 900)]) == 1           # congestion : un seul contact
+    assert ST._contacts([(0, 300), (7200, 7500)]) == 2
+    assert ST._contacts([(0, 86400), (3600, 3900)]) == 1                   # creux du jour d'un niveau journalier
+    assert ST._reacted([{"h": 101.0, "l": 99.9}], 100.0, False, 1.0)
+    assert not ST._reacted([{"h": 100.5, "l": 99.9}], 100.0, False, 1.0)
+    assert ST._reacted([{"h": 100.1, "l": 98.9}], 100.0, True, 1.0) and not ST._reacted([], 100.0, True, 1.0)
+    # Six bougies aux plus bas égaux puis une hausse : six « creux » pour le détecteur, un seul contact.
+    rows = [(104.0, 104.1, 103.9, 104.0)] * 120
+    rows += [(104.0, 104.02, 103.75, 103.77), (103.77, 103.79, 103.52, 103.54), (103.54, 103.56, 103.29, 103.31),
+             (103.31, 103.33, 103.06, 103.08)]
+    rows += [(103.08, 103.1, 102.98, 103.05)] * 6
+    p = 103.05
+    for _ in range(10):
+        rows.append((p, p + 0.32, p - 0.02, p + 0.3))
+        p += 0.3
+    rows += [(p, p + 0.1, p - 0.1, p)] * (156 - len(rows))
+    hist = (bars_from(CO.session_ts(CO.sessions_back(DAY, 2))[0], rows[:78])
+            + bars_from(CO.session_ts(CO.sessions_back(DAY, 1))[0], rows[78:]))
+    _, _, daily = stock_day_bars()
+    d = make_day(hist, bars_from(OPEN, REBOND), daily)
+    d.daily = []
+    lows = [j for j, p in I.swings(d.bars[:d.first], side=ST.ZONE_SWING_SIDE)[1] if p == pytest.approx(102.98)]
+    assert len(lows) >= 5
+    assert not any(z[0] <= 102.98 <= z[1] for z in d.zones())
+
+
 def test_sortie_emperor_objectifs_et_signal_de_retournement():
     d = zone_day(REBOND)
     c = ST.rebond_confirme(d)[0]
@@ -270,12 +328,19 @@ def test_sortie_emperor_objectifs_et_signal_de_retournement():
     args = (d, plan, c["decided_at"], c["entry_until"], d.exit_at(c["decided_at"]), cost, "stop", d.c[c["i"]])
     d._exit_signal = {k: False for k in range(len(d.t))}
     plain = ST._sim(*args)
-    assert ST._emperor(*args) == plain["r_net"]
+    assert set(ST._emperor(*args).values()) == {plain["r_net"]}
     d._exit_signal = {k: True for k in range(len(d.t))}
     k0 = d.t.index(plain["filled_at"])
     k = next(k for k in range(k0, len(d.t)) if d.c[k] > plain["fill_price"])
     early = ST._sim(*args[:4], d.t[k + 1] + 300, *args[5:], exit_reason_end="signal_sortie")
-    assert early["exit_reason"] == "signal_sortie" and ST._emperor(*args) == early["r_net"]
+    out = ST._emperor(*args)
+    assert early["exit_reason"] == "signal_sortie" and out["r_emperor_alerte"] == early["r_net"]
+    assert out["r_emperor"] == plain["r_net"]                 # objectifs seuls : le signe ne fait pas sortir
+    assert out["r_emperor_confirme"] == plain["r_net"]        # aucune clôture sous le plus bas de la bougie du signe
+    d._exit_signal = {j: j == k for j in range(len(d.t))}
+    d.c[k + 2] = d.l[k] - 0.01                                # confirmation deux bougies après le signe
+    late = ST._sim(*args[:4], d.t[k + 3] + 300, *args[5:], exit_reason_end="signal_sortie")
+    assert ST._emperor(*args)["r_emperor_confirme"] == late["r_net"]
 
 
 def test_nouvelle_declaration_relance_le_rattrapage(tmp_path, monkeypatch):
@@ -292,6 +357,7 @@ def test_nouvelle_declaration_relance_le_rattrapage(tmp_path, monkeypatch):
 
 def test_seuil_candidate_corrige_du_nombre_d_essais():
     assert SS.candidate_z(32) == pytest.approx(2.96, abs=0.01) and SS.candidate_z(60) == pytest.approx(3.14, abs=0.01)
+    assert SS.candidate_z() == pytest.approx(3.24, abs=0.01)   # 84 essais (déclaration n° 3)
     db = LabDB(":memory:")
     _rows(db, "pullback", 0.3, 0.2, days=40)   # bat son témoin (z ≈ 2,5), mais trop peu pour 60 essais
     db.conn.execute("UPDATE strat_trades SET temoin_r = r_net - (0.1 + CASE WHEN CAST(substr(day, 9, 2) AS INTEGER) "
@@ -300,6 +366,25 @@ def test_seuil_candidate_corrige_du_nombre_d_essais():
     item = rep["strategies"]["stock"]["pullback"]
     assert 2 <= item["temoin"]["z"] < SS.candidate_z() and not item["candidate"]
     assert item["frais_r"] == pytest.approx(0.15) and "rang inconnu" in item["par_rang"]
+
+
+def test_commission_ibkr_et_tranches_de_frais():
+    assert SS.ibkr_commission_r(10.0, 9.9) == pytest.approx(0.1)            # 2 × 0,005 $ / 0,10 $ de risque
+    assert SS.ibkr_commission_r(0.3, 0.29) == pytest.approx(0.6)            # plafond 1 % : 0,003 $ par action
+    assert SS.ibkr_commission_r(None, 1.0) is None and SS.ibkr_commission_r(1.0, 1.0) is None
+    db = LabDB(":memory:")
+    _rows(db, "pullback", 0.12, -0.5)        # gagne et bat largement son témoin, mais avec un stop de 5 cents
+    db.conn.execute("UPDATE strat_trades SET entry = 10.0, stop = 9.95, risk_pct = 0.5")
+    item = SS.report(db.conn)["strategies"]["stock"]["pullback"]
+    assert item["commission_ibkr_r"] == pytest.approx(0.2)
+    assert item["esperance_ibkr_r"] == pytest.approx(item["esperance_r"] - 0.2)
+    assert item["ic95"][0] > 0 and not item["candidate"]                    # la commission mange l'avantage
+    assert list(item["par_frais"]) == ["frais ≥ 0,4 R"]                     # 2 × 6 pb / 0,5 % + 0,2 R
+    db.conn.execute("UPDATE strat_trades SET entry = 10.0, stop = 9.0, risk_pct = 10.0")
+    item = SS.report(db.conn)["strategies"]["stock"]["pullback"]
+    assert item["commission_ibkr_r"] == pytest.approx(0.01) and item["candidate"]
+    assert list(item["par_frais"]) == ["frais < 0,1 R"]
+    assert "commission" in SS.text(SS.report(db.conn))
 
 
 # --- Lignes, témoin, v1 -------------------------------------------------------------------
@@ -317,6 +402,23 @@ def test_une_ligne_par_strategie_et_temoin_reproductible():
         assert r["r_glisse_x3"] <= r["r_glisse_x2"] <= r["r_net"]
 
 
+def test_temoin_moyenne_de_plusieurs_tirages():
+    d = make_day()
+    key, cost_of = ("stock", "AAA", DAY, "pullback"), (lambda p: SIM.costs("stock", p, 3))
+    lo, hi = d.first, d.last
+
+    def one(k):
+        entry = d.o[k]
+        p = ST._plan(entry, entry * 0.99, ST._r_targets(entry, entry * 0.99))
+        return ST._sim(d, p, d.t[k], d.t[k] + 300, d.exit_at(d.t[k]), cost_of(entry), "market", entry)["r_net"]
+
+    picks = ST._seed(*key).sample(range(lo, hi), ST.WITNESS_DRAWS)
+    w = ST.witness(d, key, 1.0, list(ST.TARGETS_R), cost_of, (lo, hi))
+    assert len(set(picks)) == ST.WITNESS_DRAWS
+    assert w["temoin_triggered"] == 1 and w["temoin_r"] == pytest.approx(sum(map(one, picks)) / len(picks), abs=1e-4)
+    assert ST.witness(d, key, 1.0, list(ST.TARGETS_R), cost_of, (lo, lo + 1))["temoin_r"] == pytest.approx(one(lo))
+
+
 def test_v1_rejouee_avec_ses_objectifs():
     hist, session, daily = stock_day_bars()
     entry = session[0]["o"]
@@ -330,8 +432,9 @@ def test_v1_rejouee_avec_ses_objectifs():
 
 def test_essais_declares():
     t = ST.trials()
-    # Déclaration n° 1 : 32 essais ; n° 2 : + 2 stratégies sur deux marchés et la sortie EmperorBTC partout.
-    assert len(t) == 60 and {x["exit"] for x in t} == set(ST.EXITS) and len(ST.EXITS) == 5
+    # Déclaration n° 1 : 32 essais ; n° 2 : + 2 stratégies sur deux marchés et la sortie EmperorBTC partout ;
+    # n° 3 : la sortie EmperorBTC en trois variantes.
+    assert len(t) == 84 and {x["exit"] for x in t} == set(ST.EXITS) and len(ST.EXITS) == 7
 
 
 # --- Bloc scellé --------------------------------------------------------------------------
@@ -488,4 +591,4 @@ def test_route_api_des_strategies(tmp_path, monkeypatch):
     _rows(db, "pullback", 0.3, -0.2)
     r = TestClient(main.app).get("/api/lab/strategies", headers={"X-Lab-Key": "cle"})
     assert r.status_code == 200 and "pullback" in r.json()["strategies"]["stock"]
-    assert r.json()["declaration"]["essais"] == 60 and r.json()["declaration"]["z_candidate"] == 3.14
+    assert r.json()["declaration"]["essais"] == 84 and r.json()["declaration"]["z_candidate"] == 3.24

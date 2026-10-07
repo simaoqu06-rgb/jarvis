@@ -46,6 +46,21 @@ EmperorBTC », chapitre S/R ; council : GO modifié) :
   de retournement du manuel (signals.exit_signals, code des alertes en direct) quand le trade est en gain,
   exécutée une bougie plus tard (c'est une alerte, Simão passe l'ordre à la main).
 Le trident (Stoch RSI + VWAP + pivot) n'est pas repris : v1 le mesure déjà (−0,07 R en crypto).
+Déclaration n° 3 (même soir, avis de GPT et Gemini, avant tout résultat de la n° 2, jamais déployée) :
+- zones : un contact = un creux ou sommet de réaction (5 min ou journalier, plus haut et plus bas de la
+  veille), suivi d'une réaction d'au moins ZONE_REACTION_ATR ATR dans les ZONE_REACTION_BARS bougies
+  (5 min) ; deux contacts d'une zone ne comptent pour deux que s'ils sont séparés d'au moins
+  ZONE_CONTACT_GAP (une congestion à plus bas égaux n'est qu'un contact ; un creux de 5 min du même jour
+  qu'un creux journalier non plus). Les points pivots sortent des zones (ils viennent du trident) ;
+- cassure_zone_retest : une clôture sous le bas de zone avant le retest annule la cassure ;
+- rebond_confirme : la résistance à casser est le dernier sommet de réaction confirmé avant le contact
+  (cassure de structure), et non plus le plus haut des 6 dernières bougies ; ordre valable jusqu'à la fin de la
+  fenêtre des signaux, annulé si le stop est touché avant ;
+- sorties EmperorBTC séparées : r_emperor (objectifs sur les résistances seuls), r_emperor_alerte (sortie à
+  la bougie qui suit le premier signe, comme les alertes en direct), r_emperor_confirme (le signe n'est
+  qu'un avertissement : sortie si une clôture passe sous le plus bas de la bougie du signe dans les
+  EXIT_CONFIRM_BARS bougies, exécutée à la bougie suivante) ;
+- témoin : moyenne de WITNESS_DRAWS tirages au lieu d'un seul.
 Objectifs : 1, 2 et 3 R. Fenêtre des signaux : actions de 9 h 45 à 15 h New York (soldé à la
 clôture) ; crypto de 0 h à 20 h UTC (soldé 24 h après le signal).
 v1 est rejouée avec les mêmes sorties et tests, sur ses propres objectifs : c'est la référence.
@@ -56,8 +71,8 @@ Pour chaque déclenchement, une seule ligne (db.STRAT_COLUMNS) avec :
 - tests de robustesse : glissement ×2 et ×3, entrée une bougie plus tard, ordre limite à peine
   touché (moins de MISS_DEPTH) compté comme non exécuté ;
 - témoin aléatoire : même jour, même fenêtre, même stop en %, mêmes objectifs en R, entrée au marché
-  à une bougie tirée au hasard (graine fixe). Une stratégie qui ne bat pas son témoin n'a pas
-  d'avantage d'entrée.
+  à des bougies tirées au hasard (graine fixe, moyenne de WITNESS_DRAWS tirages). Une stratégie qui ne
+  bat pas son témoin n'a pas d'avantage d'entrée.
 """
 import hashlib
 import random
@@ -72,7 +87,7 @@ from app.trading import signals as S
 REGISTERED_ON = "2026-10-07"
 # Déclaration en vigueur (docs/labo-strategies.md). En changer relance le rattrapage de tous les jours déjà
 # traités (progress_job), pour que chaque stratégie soit mesurée sur les mêmes jours.
-DECLARATION = 2
+DECLARATION = 3
 BAR = CO.BASE_TF * 60
 REFERENCE = "v1"
 STRATEGIES = {
@@ -91,8 +106,10 @@ EXITS = {
     "r_sans_be": "mêmes objectifs, sans remonter le stop",
     "r_2r": "un seul objectif à 2 R",
     "r_suiveur": "aucun objectif, stop suiveur 1 R sous le plus haut",
-    "r_emperor": "EmperorBTC : objectifs sur les prochaines résistances, gestion v1, sortie sur signe de retournement "
-                 "(une bougie plus tard)",
+    "r_emperor": "EmperorBTC : objectifs sur les prochaines résistances, gestion v1",
+    "r_emperor_alerte": "EmperorBTC + sortie à la bougie qui suit le premier signe de retournement "
+                        "(alertes en direct)",
+    "r_emperor_confirme": "EmperorBTC + signe de retournement confirmé par une clôture sous le plus bas de sa bougie",
 }
 STRESS = {
     "r_glisse_x2": "glissement ×2", "r_glisse_x3": "glissement ×3",
@@ -105,19 +122,23 @@ IMPULSE_LOOKBACK, IMPULSE_ATR = 12, 1.0
 STOP_BUFFER_ATR = 0.1
 VALID_BARS = 3
 RETEST_BARS, RETEST_TOL = 12, 0.002
-# Déclaration n° 2 : zones S/R EmperorBTC (figées avant le premier résultat).
+# Déclarations n° 2 et 3 : zones S/R EmperorBTC (figées avant le premier résultat).
 ZONE_SWING_SIDE = 3         # creux et sommets de réaction : 3 bougies de chaque côté (comme v1)
 ZONE_DAILY_BARS = 40        # séances journalières où chercher les creux et sommets
 ZONE_5M_BARS = {"stock": 150, "crypto": 288}  # bougies de 5 min avant la fenêtre (2 séances / 24 h), mêmes
                                               # en rejeu et en rattrapage
 ZONE_MERGE_ATR = 0.5        # niveaux à moins de 0,5 ATR (5 min) du premier niveau de la zone : même zone
 ZONE_MIN_CONTACTS = 2
+ZONE_REACTION_ATR = 1.0     # n° 3 : un creux (sommet) de 5 min ne compte que si le prix s'en éloigne d'1 ATR
+ZONE_REACTION_BARS = 12     # dans les 12 bougies qui suivent (connues avant la fenêtre)
+ZONE_CONTACT_GAP = 3600     # n° 3 : deux contacts d'une zone à moins d'une heure (ou le même jour qu'un
+                            # niveau journalier) n'en font qu'un
 ZONE_TOUCH_ATR, ZONE_BREAK_ATR = 0.1, 0.5  # contact : plus bas entre bas - 0,5 ATR et haut + 0,1 ATR
-BOUNCE_HIGH_BARS = 6        # rebond confirmé : résistance = plus haut des 6 dernières bougies
-BOUNCE_VALID_BARS = 12
 TARGET_BUFFER_ATR = 0.1     # objectif un peu avant la résistance (comme v1)
 MIN_TARGET_R = 0.5
 EXIT_SIGNAL_BARS = 80       # bougies lues par les signes de retournement (divergence RSI sur 60)
+EXIT_CONFIRM_BARS = 6       # n° 3 : délai de confirmation d'un signe de retournement (30 min)
+WITNESS_DRAWS = 5           # n° 3 : tirages du témoin aléatoire, moyennés
 MISS_DEPTH = 0.001          # ordre limite : traversée de moins de 0,1 % = probablement pas exécuté en réel
 TRAIL_R = 1.0
 STOCK_SIGNAL_FROM_MIN = 15  # actions : signaux à partir de 9 h 45 (après 3 bougies)
@@ -218,6 +239,7 @@ class Day:
         self.prev_close = daily_before[-1]["c"] if daily_before else None
         self._zones: list[tuple[float, float, int]] | None = None
         self._exit_signal: dict[int, bool] = {}
+        self._swing_highs: list[tuple[int, float]] | None = None
 
     @property
     def zone_atr(self) -> float | None:
@@ -230,6 +252,13 @@ class Day:
         if self._zones is None:
             self._zones = zones(self)
         return self._zones
+
+    def swing_highs(self) -> list[tuple[int, float]]:
+        """Sommets de réaction (indice, prix) de toutes les bougies ; celui en j est connu à la clôture de
+        j + ZONE_SWING_SIDE."""
+        if self._swing_highs is None:
+            self._swing_highs = I.swings(self.bars, side=ZONE_SWING_SIDE)[0]
+        return self._swing_highs
 
     def exit_signal(self, k: int) -> bool:
         """Signe de retournement EmperorBTC (alertes en direct) à la clôture de la bougie k."""
@@ -323,30 +352,57 @@ def cassure_retest(d: Day) -> list[dict]:
     return out
 
 
+def _reacted(after: list[dict], price: float, high: bool, move: float) -> bool:
+    """Le prix s'est éloigné d'au moins `move` du sommet (high) ou du creux dans les bougies `after`."""
+    if not after:
+        return False
+    return price - min(b["l"] for b in after) >= move if high else max(b["h"] for b in after) - price >= move
+
+
+def _contacts(spans: list[tuple[int, int]]) -> int:
+    """Contacts distincts d'une zone : des moments (début, fin) séparés de moins de ZONE_CONTACT_GAP n'en
+    font qu'un (congestion, ou creux de 5 min du jour d'un niveau journalier)."""
+    n, end = 0, None
+    for t0, t1 in sorted(spans):
+        if end is None or t0 >= end + ZONE_CONTACT_GAP:
+            n += 1
+            end = t1
+        else:
+            end = max(end, t1)
+    return n
+
+
 def zones(d: Day) -> list[tuple[float, float, int]]:
     """Zones S/R de la formation EmperorBTC, avec ce qui est connu au début de la fenêtre (indice d.first) :
-    un creux ou sommet en j n'est confirmé qu'à la clôture de j + ZONE_SWING_SIDE."""
+    un creux ou sommet en j n'est confirmé qu'à la clôture de j + ZONE_SWING_SIDE. Un contact = un creux
+    ou sommet de réaction (5 min, avec une réaction d'au moins ZONE_REACTION_ATR ATR ; journalier ; plus
+    haut et plus bas de la veille), daté pour ne pas compter deux fois le même moment (déclaration n° 3)."""
     a = d.zone_atr
     if not a:
         return []
     known = d.bars[max(0, d.first - ZONE_5M_BARS[d.market]):d.first]
     highs, lows = I.swings(known, side=ZONE_SWING_SIDE)
-    levels = [p for _, p in highs + lows]
+    levels = []  # (prix, début, fin) de chaque contact
+    for points, high in ((highs, True), (lows, False)):
+        for j, p in points:
+            if _reacted(known[j + 1:j + 1 + ZONE_REACTION_BARS], p, high, ZONE_REACTION_ATR * a):
+                levels.append((p, known[j]["t"], known[j]["t"] + BAR))
     daily = d.daily[-ZONE_DAILY_BARS:]
     dh, dl = I.swings(daily, side=ZONE_SWING_SIDE)
-    levels += [p for _, p in dh + dl]
+    levels += [(p, daily[j]["t"], daily[j]["t"] + 86400) for j, p in dh + dl]
     if daily:
         prev = daily[-1]
-        levels += [*I.pivots(prev).values(), prev["h"], prev["l"]]
+        levels += [(prev["h"], prev["t"], prev["t"] + 86400), (prev["l"], prev["t"], prev["t"] + 86400)]
     out, group = [], []
-    for p in sorted(x for x in levels if x > 0):
-        if group and p - group[0] > ZONE_MERGE_ATR * a:
+    for lv in sorted(x for x in levels if x[0] > 0):
+        if group and lv[0] - group[0][0] > ZONE_MERGE_ATR * a:
             out.append(group)
             group = []
-        group.append(p)
+        group.append(lv)
     if group:
         out.append(group)
-    return [(g[0], g[-1], len(g)) for g in out if len(g) >= ZONE_MIN_CONTACTS]
+    zs = [(g[0][0], g[-1][0], _contacts([(t0, t1) for _, t0, t1 in g])) for g in out]
+    return [z for z in zs if z[2] >= ZONE_MIN_CONTACTS]
 
 
 def _in_band(low: float, zone: tuple, a: float) -> bool:
@@ -368,6 +424,10 @@ def cassure_zone_retest(d: Day) -> list[dict]:
             if i - b > RETEST_BARS:
                 b = None
                 continue  # même bougie : peut-être une nouvelle cassure
+            if d.c[i] < lo:
+                b = None  # retour sous la zone avant le retest : fausse cassure (n° 3)
+                i += 1
+                continue
             a = d.atr[i]
             if a and _in_band(d.l[i], zone, a) and d.c[i] > hi:
                 c = _cand(d, i, d.h[i] + d.tick(d.h[i]), min(d.l[i], lo) - STOP_BUFFER_ATR * a)
@@ -380,18 +440,23 @@ def cassure_zone_retest(d: Day) -> list[dict]:
 
 def rebond_confirme(d: Day) -> list[dict]:
     zs = sorted(d.zones(), key=lambda z: -z[1])
+    highs = d.swing_highs()
     out = []
-    for i in range(max(d.first, BOUNCE_HIGH_BARS, 1), d.last):
+    for i in range(max(d.first, 1), d.last):
         a = d.atr[i]
         if not a:
             continue
         zone = next((z for z in zs if d.c[i - 1] > z[1] and _in_band(d.l[i], z, a) and d.c[i] >= z[0]), None)
         if zone is None:
             continue
-        entry = max(d.h[i - BOUNCE_HIGH_BARS + 1:i + 1])
-        entry += d.tick(entry)
+        # Cassure de structure (n° 3) : le dernier sommet de réaction confirmé à la clôture du contact.
+        k = bisect_left(highs, (i - ZONE_SWING_SIDE + 1,))
+        level = next((p for j, p in reversed(highs[:k]) if j >= i - ZONE_5M_BARS[d.market] and p > d.c[i]), None)
+        if level is None:
+            continue
+        entry = level + d.tick(level)
         stop = min(d.l[i], zone[0]) - STOP_BUFFER_ATR * a
-        until = d.t[i] + BAR + BOUNCE_VALID_BARS * BAR
+        until = d.signal_until_ts
         for j in range(i + 1, len(d.t)):  # ordre annulé dès que le stop est touché avant l'entrée
             if d.t[j] >= until:
                 break
@@ -464,20 +529,34 @@ def emperor_targets(d: Day, entry: float, stop: float) -> list[float]:
 
 
 def _emperor(d: Day, plan: dict, decided_at: int, entry_until: int, exit_at: int, cost: dict, order: str,
-             last_price: float) -> float | None:
-    """Sortie EmperorBTC : objectifs du plan, gestion v1, et solde à la clôture de la bougie qui suit le
-    premier signe de retournement vu en gain (alerte, puis ordre passé à la main)."""
+             last_price: float) -> dict:
+    """Sorties EmperorBTC (déclaration n° 3) : objectifs du plan et gestion v1 seuls (r_emperor) ; plus
+    une sortie à la clôture de la bougie qui suit le premier signe de retournement vu en gain (alerte, puis
+    ordre passé à la main : r_emperor_alerte) ; ou seulement si une clôture passe sous le plus bas de la
+    bougie du signe dans les EXIT_CONFIRM_BARS bougies, exécutée à la bougie suivante (r_emperor_confirme)."""
     res = _sim(d, plan, decided_at, entry_until, exit_at, cost, order, last_price)
     if not res["triggered"]:
-        return None
+        return {"r_emperor": None, "r_emperor_alerte": None, "r_emperor_confirme": None}
+    out = {"r_emperor": res["r_net"], "r_emperor_alerte": res["r_net"], "r_emperor_confirme": res["r_net"]}
+
+    def early(k: int) -> float:
+        return _sim(d, plan, decided_at, entry_until, min(exit_at, d.t[k + 1] + BAR), cost, order, last_price,
+                    exit_reason_end="signal_sortie")["r_net"]
+
     k0 = bisect_left(d.t, res["filled_at"])
     m = bisect_left(d.t, res["closed_at"] - BAR)
+    alert = confirmed = False
     for k in range(k0, min(m - 1, len(d.t) - 1)):
-        if d.c[k] > res["fill_price"] and d.exit_signal(k):
-            early = _sim(d, plan, decided_at, entry_until, min(exit_at, d.t[k + 1] + BAR), cost, order, last_price,
-                         exit_reason_end="signal_sortie")
-            return early["r_net"]
-    return res["r_net"]
+        if not (d.c[k] > res["fill_price"] and d.exit_signal(k)):
+            continue
+        if not alert:
+            out["r_emperor_alerte"], alert = early(k), True
+        q = next((q for q in range(k + 1, min(k + 1 + EXIT_CONFIRM_BARS, m, len(d.t) - 1)) if d.c[q] < d.l[k]), None)
+        if q is not None:
+            out["r_emperor_confirme"], confirmed = early(q), True
+        if confirmed:
+            break
+    return out
 
 
 def measure(d: Day, plan: dict, decided_at: int, entry_until: int, cost: dict, order: str, last_price: float,
@@ -499,7 +578,7 @@ def measure(d: Day, plan: dict, decided_at: int, entry_until: int, cost: dict, o
                        cost, order, last_price)["r_net"]
     out["r_suiveur"] = _sim(d, plan, decided_at, entry_until, exit_at, cost, order, last_price,
                             exit_mode="suiveur", trail_r=TRAIL_R)["r_net"]
-    out["r_emperor"] = _emperor(d, emperor_plan or plan, decided_at, entry_until, exit_at, cost, order, last_price)
+    out.update(_emperor(d, emperor_plan or plan, decided_at, entry_until, exit_at, cost, order, last_price))
     out["r_glisse_x2"] = SIM.net_r(res, cost, slip_factor=2.0)
     out["r_glisse_x3"] = SIM.net_r(res, cost, slip_factor=3.0)
     late = _sim(d, plan, decided_at + BAR, entry_until + BAR, exit_at, cost, order, last_price)
@@ -512,18 +591,25 @@ NO_WITNESS = {"temoin_r": None, "temoin_triggered": 0}
 
 
 def witness(d: Day, key: tuple, risk_pct: float, multiples: list[float], cost_of, window: tuple[int, int]) -> dict:
-    """Entrée au marché à une bougie tirée au hasard dans `window` (indices), même stop en %, mêmes
-    objectifs en R, sortie v1."""
+    """Entrées au marché à WITNESS_DRAWS bougies tirées au hasard dans `window` (indices), chacune avec le
+    même stop en % et les mêmes objectifs en R que le trade, sortie v1 ; temoin_r = leur moyenne."""
     lo, hi = window
     if hi <= lo or risk_pct <= 0:
         return NO_WITNESS
-    k = _seed(*key).randrange(lo, hi)
-    entry = d.o[k]
-    stop = entry * (1 - risk_pct / 100)
-    plan = _plan(entry, stop, _r_targets(entry, stop, multiples))
-    decided = d.t[k]
-    res = _sim(d, plan, decided, decided + BAR, d.exit_at(decided), cost_of(entry), "market", entry)
-    return {"temoin_r": res["r_net"], "temoin_triggered": int(res["triggered"])}
+    rng = _seed(*key)
+    picks = rng.sample(range(lo, hi), min(WITNESS_DRAWS, hi - lo))
+    rs = []
+    for k in picks:
+        entry = d.o[k]
+        stop = entry * (1 - risk_pct / 100)
+        plan = _plan(entry, stop, _r_targets(entry, stop, multiples))
+        decided = d.t[k]
+        res = _sim(d, plan, decided, decided + BAR, d.exit_at(decided), cost_of(entry), "market", entry)
+        if res["triggered"] and res["r_net"] is not None:
+            rs.append(res["r_net"])
+    if not rs:
+        return {"temoin_r": None, "temoin_triggered": 0}
+    return {"temoin_r": round(sum(rs) / len(rs), 4), "temoin_triggered": 1}
 
 
 def _row(symbol: str, strategy: str, slot: int, plan: dict, decided_at: int, m: dict, wit: dict,

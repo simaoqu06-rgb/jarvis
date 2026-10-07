@@ -318,16 +318,18 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
 v1 achète tout l'univers à heure fixe sans attendre de signal. Le labo v2 mesure, à côté d'elle et sur
 les mêmes jours, des stratégies qui attendent leur déclencheur : pullback en tendance + bougie de
 confirmation, cassure du range d'ouverture (15 et 30 min), cassure du plus haut de la veille puis retest,
-et, depuis la déclaration n° 2, les supports et résistances de la formation EmperorBTC (zones tracées sur
-les creux et sommets, pivots, veille) : cassure d'une zone puis retest, rebond confirmé par la cassure de
-la résistance au-dessus, et une sortie EmperorBTC (prochaines résistances, signes de retournement).
+et, depuis les déclarations n° 2 et 3, les supports et résistances de la formation EmperorBTC (zones
+tracées sur les creux et sommets de réaction, contacts distincts, veille) : cassure d'une zone puis retest,
+rebond confirmé par la cassure du dernier sommet de réaction, et trois sorties EmperorBTC (prochaines
+résistances seules, plus sortie sur alerte de retournement, ou sur alerte confirmée par le prix).
 Liste, seuils et sorties sont déclarés d'avance : [docs/labo-strategies.md](docs/labo-strategies.md).
 
-- Chaque trade est mesuré avec quatre sorties (gestion v1, sans break-even, 2 R, stop suiveur), trois
-  tests de robustesse (glissement ×2 et ×3, entrée retardée, ordres limités à peine touchés) et un
-  **témoin aléatoire** (même stop, mêmes objectifs, entrée au hasard) : une stratégie qui ne bat pas
-  son témoin n'a pas d'avantage d'entrée.
-- Classement à l'espérance nette en R (intervalle en grappes par jour), jamais au taux de réussite.
+- Chaque trade est mesuré avec sept sorties (gestion v1, sans break-even, 2 R, stop suiveur, trois
+  EmperorBTC), trois tests de robustesse (glissement ×2 et ×3, entrée retardée, ordres limités à peine
+  touchés) et un **témoin aléatoire** (même stop, mêmes objectifs, entrée au hasard, moyenne de 5
+  tirages) : une stratégie qui ne bat pas son témoin n'a pas d'avantage d'entrée.
+- Classement à l'espérance nette en R (intervalle en grappes par jour), jamais au taux de réussite ; en
+  actions, après la commission IBKR Fixe estimée (0,005 $ par action), avec les frais par tranche.
 - Diagnostic de v1 : espérance par gap d'ouverture, mode d'entrée, raison de sortie, brut contre net.
 - **Bloc scellé** : le rejeu du 6 avril au 5 octobre 2026 est calculé mais rangé à part, invisible des
   statistiques, du brief, du grade et du validateur (`app/lab/seal.py`). Il sert une seule fois.
