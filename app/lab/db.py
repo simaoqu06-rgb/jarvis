@@ -97,6 +97,12 @@ CREATE TABLE IF NOT EXISTS lab_events (
     id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, ts INTEGER NOT NULL, kind TEXT NOT NULL,
     version TEXT, text TEXT NOT NULL, data TEXT
 );
+-- Carnet des leçons (lessons.py) : observations chiffrées de la routine du soir, re-mesurées chaque nuit.
+CREATE TABLE IF NOT EXISTS lessons (
+    id INTEGER PRIMARY KEY, hash TEXT NOT NULL UNIQUE, text TEXT NOT NULL, cond TEXT NOT NULL, markets TEXT,
+    sens TEXT NOT NULL, pourquoi TEXT, status TEXT NOT NULL, metrics TEXT, soiree TEXT,
+    created_at TEXT NOT NULL, measured_at TEXT, retired_at TEXT, retired_reason TEXT
+);
 """
 # Colonnes ajoutées après coup (ALTER TABLE à l'ouverture par le worker ; idempotent).
 MIGRATIONS = {

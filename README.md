@@ -261,6 +261,15 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
   redémarrage (état dans `data/lab_morning.json`, marqué avant l'envoi). **Rodage** :
   `JARVIS_LAB_DM=off` (défaut) garde le message sans l'envoyer (`!labo`, `/cockpit/labo`,
   `GET /api/lab/matin`) ; à passer à `on` après ~5 séances.
+- **Carnet des leçons** (`app/lab/lessons.py`) : en plus des règles, la routine du soir écrit ce
+  qu'elle a compris (`POST /api/lab/lessons`, au plus ~3 par soir, carnet de 50 leçons actives au plus).
+  Une leçon ne filtre rien : le worker la re-mesure chaque nuit sur les trades du labo (espérance et
+  TP1 des trades concernés contre l'ensemble, z en grappes par jour, même sens sur les deux moitiés de
+  l'historique) et la passe **confirmée** ou **démentie** tout seul. Les démenties restent au carnet
+  (ne pas les retenter). Les confirmées (`data/lab_lessons.json`) ajustent la note des plans en direct
+  de ±0,5 chacune (±1 au plus), avec une ligne « Leçons du labo » dans le plan ; le labo, lui, note
+  ses plans sans elles. La routine relit le carnet (dans `GET /api/lab/brief`) avant d'analyser ;
+  Simão le lit avec `!lecons`.
 - **Approuvée** : la règle crée la version suivante (v2 = v1 + ses filtres), d'abord **challenger**.
   Les trades restent journalisés une seule fois (version de génération v1) ; champion et challenger
   en sont des sous-ensembles calculés avec le même SQL que le validateur. Quand le challenger a au moins
@@ -294,6 +303,7 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
 | `!oui 3` / `!non 3` | approuver ou refuser la proposition 3 (ou les boutons) |
 | `!regle` | réglages actuels |
 | `!labo` | état du labo (rejeu, espérance, règles, méthode en place, challenger, propositions du labo) |
+| `!lecons` | carnet des leçons du labo : confirmées, à confirmer, démenties, avec leur preuve chiffrée |
 | `!aide` | liste des commandes |
 
 Le bot ne répond qu'aux comptes de `JARVIS_DISCORD_OWNER_ID`. Mise en place : [DEPLOY.md](DEPLOY.md).

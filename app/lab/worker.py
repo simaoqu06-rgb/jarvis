@@ -12,6 +12,8 @@ Toutes les ~10 min :
    le week-end, minimes pendant la séance.
 4. Labo 3 (étape « methode ») : décisions de Simão et types de catalyseurs déposés par le serveur,
    challenger, bascule automatique ou retrait, fichier du champion lu par JARVIS en direct.
+5. Carnet des leçons (étape « lecons », lessons.py) : leçons déposées par la routine du soir,
+   re-mesurées quand les trades changent, fichier des leçons confirmées lu par JARVIS en direct.
 Le rejeu couvre JARVIS_LAB_REPLAY_DAYS séances (504 ≈ 2 ans) avant le premier lancement du worker ;
 le direct prend le relais à partir de ce jour-là. JARVIS_LAB_ENABLED=off met le worker en veille.
 """
@@ -26,6 +28,7 @@ from app.lab import catalysts as CAT
 from app.lab import collector as CO
 from app.lab import generator as G
 from app.lab import heartbeat
+from app.lab import lessons as L
 from app.lab import method as M
 from app.lab import regime as REG
 from app.lab import runner as R
@@ -235,6 +238,7 @@ async def lab2(db: LabDB, now: datetime, collect: bool = True) -> dict:
     await step("file_regles", lambda: V.ingest_queue(db))
     await step("regles", lambda: len(V.process_pending(db, budget["rules"])))
     await step("methode", lambda: M.step(db, now))
+    await step("lecons", lambda: L.step(db, now, budget["stats_age"]))
     summary_day = SUM.due(now, db.get("summary", "last_day"))
     stats = await step("stats", lambda: refresh_stats(db, now, budget["stats_age"], force=bool(summary_day)))
     if stats:

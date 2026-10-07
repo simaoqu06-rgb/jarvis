@@ -3,7 +3,8 @@ de règles par soirée (au plus 3 acceptées par la route POST /api/lab/rules).
 
 Contenu : dernier résumé du soir, statistiques clés (cache du worker), fiches catalyseurs à classer
 des 2 derniers jours (plafonnées), règles soumises récemment et leur verdict, méthode en place et
-challenger, dernier message du matin, place restante pour ce soir et types de catalyseurs permis.
+challenger, dernier message du matin, place restante pour ce soir, types de catalyseurs permis et
+carnet des leçons (actives et démenties récentes, à relire avant d'analyser).
 """
 import fcntl
 import json
@@ -13,6 +14,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from app.lab import catalysts as CAT
+from app.lab import lessons as L
 from app.lab import method as M
 from app.lab import stats as STATS
 from app.lab import summary as SUM
@@ -130,6 +132,13 @@ def _rules(conn, now: datetime) -> list[dict]:
     return out
 
 
+def _lessons(conn) -> dict | None:
+    try:
+        return L.brief(conn)
+    except Exception:  # base d'avant le carnet (worker pas encore redémarré)
+        return None
+
+
 def size(data: dict) -> int:
     return len(json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode())
 
@@ -141,7 +150,7 @@ def build(conn, now: datetime, db_file: str, morning: dict | None = None, dm: bo
             "message_prive": "activé" if dm else "rodage",
             "methode": M.state(conn), "resume": (SUM.latest(conn) or {}).get("resume"), "stats": _stats(conn),
             "fiches_a_classer": _catalysts(conn, now), "types_permis": list(CAT.TYPES),
-            "regles_recentes": _rules(conn, now), "compteurs": V.counts(conn),
+            "regles_recentes": _rules(conn, now), "compteurs": V.counts(conn), "lecons": _lessons(conn),
             "point_du_matin": {k: morning.get(k) for k in ("jour", "etat", "rejetees", "propositions", "texte")}
             if morning else None}
     cut = False
@@ -155,10 +164,14 @@ def build(conn, now: datetime, db_file: str, morning: dict | None = None, dm: bo
             data["resume"]["idees_rejetees"] = data["resume"]["idees_rejetees"][:-5]
         elif data["resume"] and len(data["resume"].get("potentiel_10") or []) > 3:
             data["resume"]["potentiel_10"] = data["resume"]["potentiel_10"][:-1]
+        elif data["lecons"] and data["lecons"]["dementies"]:
+            data["lecons"]["dementies"] = data["lecons"]["dementies"][:-2]
         elif data["fiches_a_classer"]:
             data["fiches_a_classer"] = data["fiches_a_classer"][:-1]
         elif data["regles_recentes"]:
             data["regles_recentes"] = data["regles_recentes"][:-1]
+        elif data["lecons"] and len(data["lecons"]["actives"]) > 10:
+            data["lecons"]["actives"] = data["lecons"]["actives"][:-5]  # confirmées en tête : on garde celles-là
         else:
             break
     if cut:

@@ -23,6 +23,7 @@ from app import alerts, config, needs, scheduler
 from app.lab import brief as lab_brief
 from app.lab import catalysts as lab_catalysts
 from app.lab import db as lab_db
+from app.lab import lessons as lab_lessons
 from app.lab import method as lab_method
 from app.lab import morning as lab_morning
 from app.lab import page as lab_page
@@ -646,6 +647,29 @@ async def lab_catalyst_types(request: Request):
         clean.append({"id": item["id"], "type": kind})
     await asyncio.to_thread(lab_method.enqueue_types, lab_db.db_path(), clean)
     return {"en_file": len(clean)}
+
+
+@app.get("/api/lab/lessons", dependencies=[Depends(lab_key)])
+def lab_lessons_get(status: str | None = Query(None, pattern="^(a_confirmer|confirmee|dementie|invalide|retiree)$"),
+                    limit: int = Query(200, ge=1, le=500)):
+    """Carnet des leçons : compteurs et leçons avec leurs mesures (confirmées d'abord)."""
+    conn = _lab_conn()
+    try:
+        return {"compteurs": lab_lessons.counts(conn), "lecons": lab_lessons.list_lessons(conn, status, limit)}
+    finally:
+        conn.close()
+
+
+@app.post("/api/lab/lessons", dependencies=[Depends(lab_key)])
+async def lab_lessons_submit(request: Request):
+    """Dépose une leçon (ou un retrait : {"retirer": 12, "raison": …}) ; mise en file, mesurée par le
+    worker. Une leçon ne filtre aucun trade : confirmée, elle ajuste la note des plans en direct."""
+    raw = await _lab_rule_body(request)
+    try:
+        return await asyncio.to_thread(lab_lessons.enqueue, lab_db.db_path(), raw,
+                                       lab_brief.soiree(datetime.now(timezone.utc)))
+    except lab_lessons.LessonError as exc:
+        raise HTTPException(429 if "file pleine" in str(exc) else 422, str(exc))
 
 
 @app.get("/api/lab/brief", dependencies=[Depends(lab_key)])

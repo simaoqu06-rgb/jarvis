@@ -304,8 +304,13 @@ async def build_plan(
     h4 = await _optional_candles(symbol, market, 240, source)
     if market == "stock" and cat is None:
         cat = await C.safe_check(symbol, now)
-    return plan_from_bars(symbol, market, side, bars, daily, h4, now, cat, entry, stop, targets,
+    plan = plan_from_bars(symbol, market, side, bars, daily, h4, now, cat, entry, stop, targets,
                           capital, risk_pct, levels=levels)
+    # Leçons confirmées du labo : en direct seulement (le labo note ses plans sans elles).
+    from app.lab import lessons as LESSONS  # import tardif : le labo importe ce module
+
+    await LESSONS.apply(plan, daily, cat, now)
+    return plan
 
 def _num(x: float) -> str:
     return f"{x:,.6g}".replace(",", " ")
@@ -323,6 +328,9 @@ def score_lines(p: dict) -> list[str]:
              + (f" · {' ; '.join(sc['reasons'])}" if sc["reasons"] else "")]
     for k, label in (("technique", "Technique"), ("catalyst", "Catalyseur"), ("risk", "Risque")):
         lines.append(f"-# {label} : {' ; '.join(parts[k]['reasons'])}")
+    if sc.get("lecons"):
+        les = sc["lecons"]
+        lines.append(f"-# Leçons du labo ({les['ajustement']:+g} sur la note) : {' ; '.join(les['lignes'])}")
     cat = p.get("catalyst") or {}
     marks = {"positive": "🟢", "negative": "🔴", "dilution": "🟠", "neutre": "⚪"}
     for n in cat.get("news", [])[:3]:

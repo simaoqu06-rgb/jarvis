@@ -114,14 +114,17 @@ def risk(plan: dict, daily: list[dict] | None, s) -> tuple[float, list[str]]:
     return _clamp(score), reasons
 
 
-def evaluate(plan: dict, daily: list[dict] | None, cat: dict | None, s) -> dict:
-    """Note composite, sous-notes et verdict GO / NO GO avec ses raisons."""
+def evaluate(plan: dict, daily: list[dict] | None, cat: dict | None, s, lessons: dict | None = None) -> dict:
+    """Note composite, sous-notes et verdict GO / NO GO avec ses raisons. `lessons` : ajustement des
+    leçons confirmées du labo (app/lab/lessons.adjustment), en direct seulement, appliqué avant le verdict."""
     tech, tech_r = technique(plan, daily, s)
     cata, cata_r = catalyst(cat, plan["side"], s) if plan["market"] == "stock" else (None, ["non évalué pour la crypto"])
     rsk, rsk_r = risk(plan, daily, s)
     w = s["weights"]
     parts = [(tech, w["technique"]), (rsk, w["risk"])] + ([(cata, w["catalyst"])] if cata is not None else [])
     composite = round(sum(v * k for v, k in parts) / sum(k for _, k in parts), 1)
+    if lessons:
+        composite = _clamp(composite + lessons["ajustement"])
     vetoes, notes = [], []
     rr = plan_rr(plan)
     if rr < s["rr_min"]:
@@ -134,7 +137,7 @@ def evaluate(plan: dict, daily: list[dict] | None, cat: dict | None, s) -> dict:
         vetoes.append(f"résultats trimestriels dans {hours:.0f} h")
     if composite < s["go_min"]:
         vetoes.append(f"note {composite:g} sous {s['go_min']:g}")
-    return {
+    out = {
         "composite": composite, "go": not vetoes, "decision": "GO" if not vetoes else "NO GO",
         "reasons": vetoes or notes, "go_min": s["go_min"],
         "parts": {
@@ -143,3 +146,6 @@ def evaluate(plan: dict, daily: list[dict] | None, cat: dict | None, s) -> dict:
             "risk": {"score": rsk, "weight": w["risk"], "reasons": rsk_r},
         },
     }
+    if lessons:
+        out["lecons"] = lessons
+    return out
