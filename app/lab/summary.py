@@ -19,6 +19,7 @@ from app.lab.db import LabDB, now_iso
 
 PARIS = ZoneInfo("Europe/Paris")
 SUMMARY_AT = time(22, 30)
+CATCH_UP_UNTIL = time(12, 0)
 MAX_BYTES = 8000
 MAX_MOVERS = 10
 MAX_NEWS = 3
@@ -27,12 +28,16 @@ MAX_REJECTED = 30
 
 
 def due(now: datetime, last_day: str | None) -> str | None:
-    """Jour (Paris) du résumé à construire maintenant, ou None."""
+    """Jour (Paris) du résumé à construire maintenant, ou None. Un résumé manqué avant minuit (worker
+    arrêté, passage trop long) est rattrapé le lendemain jusqu'à CATCH_UP_UNTIL."""
     local = now.astimezone(PARIS)
-    if local.time() < SUMMARY_AT:
+    if local.time() >= SUMMARY_AT:
+        day = local.date()
+    elif local.time() < CATCH_UP_UNTIL:
+        day = local.date() - timedelta(days=1)
+    else:
         return None
-    day = local.date()
-    if last_day == day.isoformat():
+    if last_day and last_day >= day.isoformat():
         return None
     bounds = CO.session_ts(day)
     if bounds and now.timestamp() < bounds[1] + 30 * 60:

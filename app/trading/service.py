@@ -92,7 +92,7 @@ async def candles(symbol: str, market: str, interval: int, source: str | None = 
     `max_age` : âge maximal accepté pour le cache (TTL de l'intervalle par défaut) ;
     `outputsize` : nombre de bougies demandées à Twelve Data (pour rattraper une coupure).
     """
-    key = (symbol, market, interval)
+    key = (symbol, market, interval, source or "")  # Alpaca (16 min de retard) ne sert pas un plan en direct
     now_mono = clock.monotonic()
     cached = _candle_cache.get(key)
     if cached and now_mono - cached[0] < (TTL.get(interval, 120) if max_age is None else max_age):
@@ -116,6 +116,17 @@ async def candles(symbol: str, market: str, interval: int, source: str | None = 
     _prune_cache(now_mono)
     _candle_cache[key] = (now_mono, rows)
     return rows
+
+
+def with_open_bar(bars: list[dict], interval: int, now: datetime) -> list[dict]:
+    """Le plan tient la dernière bougie pour en cours. Hors séance (scanner et labo à 09:10 NY,
+    week-end) ou avec le retard d'Alpaca, la dernière bougie reçue est déjà close : on ajoute une
+    bougie en cours vide (prix plat, volume nul), comme collector.in_progress, pour ne pas perdre la
+    dernière bougie close (plus haut, plus bas et clôture de la veille, pivots, ATR)."""
+    if not bars or bars[-1].get("pending") or bars[-1]["t"] + interval * 60 > now.timestamp():
+        return bars
+    c = bars[-1]["c"]
+    return bars + [{"t": bars[-1]["t"] + interval * 60, "o": c, "h": c, "l": c, "c": c, "v": 0.0, "pending": True}]
 
 
 async def _optional_candles(symbol: str, market: str, interval: int, source: str | None = None,
@@ -207,6 +218,8 @@ def plan_levels(bars: list[dict], market: str, side: str, entry: float | None = 
                 timing_lookback: int | None = None) -> tuple[P.Levels, dict, float]:
     """Niveaux, délais rejoués et ATR du plan ; PlanError si les bougies ne permettent pas de plan."""
     cfg = SETTINGS[market]
+    if now is not None:
+        bars = with_open_bar(bars, cfg["interval"], now)
     try:
         levels = P.default_levels(bars, side, entry, stop, targets, market=market, now=now)
         timing = P.historical_timing(bars, levels, cfg["horizon_bars"], lookback=timing_lookback)
@@ -231,6 +244,7 @@ def plan_from_bars(
     symbol, market, side = symbol.strip().upper(), _market(market), side.lower()
     s = settings if s is None else s
     cfg = SETTINGS[market]
+    bars = with_open_bar(bars, cfg["interval"], now)
     levels, timing, atr_value = levels or plan_levels(bars, market, side, entry, stop, targets, now, timing_lookback)
     # Signaux sur les bougies closes : la dernière, en cours, fausserait le volume et les figures.
     check = S.checklist(bars[:-1], daily, h4, market, side, atr_value, now=now)
@@ -438,6 +452,10 @@ def apply_bars(trade: dict, bars: list[dict], now: datetime) -> list[str]:
         # La dernière bougie peut être en cours : elle sera relue au prochain passage (sans doublon).
         trade["last_check"] = bar["t"]
         stop_hit = bar["l"] <= trade["stop_current"] if sign == 1 else bar["h"] >= trade["stop_current"]
+        # La bougie du TP2 est relue au passage suivant : son plus bas date d'avant le TP2, donc d'avant
+        # la remontée du stop à l'entrée ; elle ne peut pas toucher ce nouveau stop.
+        if stop_hit and bar["t"] <= trade.get("stop_moved_at", -1):
+            stop_hit = False
         if stop_hit:
             trade["status"] = "closed"
             _event(trade, "stop", trade["stop_current"], bar["t"])
@@ -468,6 +486,7 @@ def apply_bars(trade: dict, bars: list[dict], now: datetime) -> list[str]:
                 nxt = trade["targets"][n]
                 if n >= 2:
                     trade["stop_current"] = trade["entry"]
+                    trade["stop_moved_at"] = bar["t"]
                     stop_text = f"Stop remonté à l'entrée ({_num(trade['entry'])})."
                 else:
                     stop_text = f"Stop inchangé à {_num(trade['stop_current'])} (pas de break-even précipité)."
@@ -689,7 +708,7 @@ async def live(book: Book) -> list[dict]:
         if t["market"] == "crypto":
             bars = await _optional_candles(t["symbol"], "crypto", 1) or []
         else:
-            cached = _candle_cache.get((t["symbol"], "stock", 1))
+            cached = _candle_cache.get((t["symbol"], "stock", 1, ""))
             bars = cached[1] if cached else []
         bars = bars[-LIVE_BARS:]
         price = bars[-1]["c"] if bars else t["last_price"]

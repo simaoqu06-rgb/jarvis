@@ -66,7 +66,7 @@ class Outbox:
             return
         if len(self.items) > MAX_ITEMS:
             log.warning("File d'envoi pleine : %d messages anciens abandonnés", len(self.items) - MAX_ITEMS)
-            self.items = self.items[-MAX_ITEMS:]
+            del self.items[:-MAX_ITEMS]  # sur place : un passage d'envoi en cours garde la même liste
         self.save()
 
     def pending(self, key: str) -> bool:
@@ -84,7 +84,7 @@ class Outbox:
             created = datetime.fromisoformat(item["created_at"])
             if (expires and now >= datetime.fromisoformat(expires)) or now - created > MAX_AGE:
                 log.warning("Message « %s » abandonné après %d tentatives (trop tard)", item["kind"], item["attempts"])
-                self.items.remove(item)
+                self._drop(item)
                 self.save()
                 continue
             try:
@@ -98,12 +98,16 @@ class Outbox:
                             item["sent"] + 1, len(item["parts"]), item["attempts"], exc)
                 if getattr(exc, "permanent", False) or item["attempts"] >= MAX_ATTEMPTS:
                     log.error("Message « %s » abandonné : %s", item["kind"], exc)
-                    self.items.remove(item)
+                    self._drop(item)
                     self.save()
                     continue  # refus définitif : on passe au suivant
                 self.save()
                 break  # panne passagère : on garde l'ordre et on réessaie au prochain passage
-            self.items.remove(item)
+            self._drop(item)
             self.save()
             done += 1
         return done
+
+    def _drop(self, item: dict) -> None:
+        if item in self.items:  # peut déjà être sorti de la file (file pleine pendant l'envoi)
+            self.items.remove(item)

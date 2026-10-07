@@ -1,6 +1,8 @@
 """Boucles de fond qui envoient les notifications Discord pendant que le serveur tourne.
 
-Démarrées seulement si DISCORD_WEBHOOK_URL est définie (et JARVIS_NOTIFICATIONS n'est pas « off »).
+Le suivi des trades (TP/SL), le compte fictif et le scanner tournent toujours ; les alertes (point du
+matin, cours, séismes, actus) et tous les envois ne partent que si DISCORD_WEBHOOK_URL est définie
+(et JARVIS_NOTIFICATIONS n'est pas « off »).
 """
 import asyncio
 import logging
@@ -44,8 +46,16 @@ async def _send_part(text: str) -> None:
     await discord.send(text)
 
 
+def _queue(texts: list[str] | str, kind: str = "alerte", **kw) -> None:
+    """Met en file seulement si les envois sont actifs (sinon la file grossirait sans jamais partir)."""
+    if enabled():
+        outbox.add(texts, kind, **kw)
+
+
 def _kick_outbox() -> None:
     """Lance l'envoi en tâche de fond : les attentes de Discord (limites, pannes) ne bloquent jamais le verrou global."""
+    if not enabled():
+        return
     task = asyncio.get_running_loop().create_task(outbox.flush(_send_part))
     _background.add(task)  # garde une référence tant que la tâche tourne
     task.add_done_callback(_background.discard)
@@ -57,7 +67,7 @@ async def _post_all(messages: list[str], kind: str = "alerte", expires_at: datet
     Un message en échec reste en file et repart au passage suivant ; il n'empêche pas les autres.
     """
     if messages:
-        outbox.add(messages, kind, expires_at)
+        _queue(messages, kind, expires_at=expires_at)
     _kick_outbox()
 
 
@@ -118,10 +128,10 @@ async def tick_news() -> None:
 
 async def tick_trades() -> None:
     messages = await trading.check_trades(book, save=False)
-    outbox.add(messages, "trade")  # sur disque avant l'état des trades : un TP/SL ne se perd plus
+    _queue(messages, "trade")  # sur disque avant l'état des trades : un TP/SL ne se perd plus
     book.save()
     _kick_outbox()
-    if os.getenv("JARVIS_DISCORD_COCKPIT", "on").lower() != "off" and (book.trades or state.data.get("cockpit_message_id")):
+    if enabled() and os.getenv("JARVIS_DISCORD_COCKPIT", "on").lower() != "off" and (book.trades or state.data.get("cockpit_message_id")):
         # Message « cockpit » réécrit à chaque passage : à épingler une fois dans le salon.
         try:
             state.data["cockpit_message_id"] = await discord.upsert(
@@ -171,7 +181,7 @@ async def tick_scan() -> None:
         return
     bounds = CAL.session_bounds(now_ny.date())
     async with _lock:
-        outbox.add(scanner.text(result), "scanner", expires_at=bounds[1] if bounds else None)
+        _queue(scanner.text(result), "scanner", expires_at=bounds[1] if bounds else None)
         state.data["scan_date"] = today
         state.save()
         for pick in result["picks"]:
@@ -209,7 +219,7 @@ async def tick_paper() -> None:
                 bot.offer(p)  # en privé, avec les boutons Approuver / Refuser
             else:
                 messages.append(f"🧪 {PR.text(p)}\n-# À approuver ou refuser dans le cockpit.")
-        outbox.add(messages, "bilan du forward-test")
+        _queue(messages, "bilan du forward-test")
         state.data["paper_report_week"] = week  # seulement une fois le bilan calculé et mis en file
         state.save()
         _kick_outbox()
@@ -234,12 +244,16 @@ async def tick_lab(now: datetime | None = None) -> dict | None:
 
 
 # (nom, job, période, verrou global pendant tout le job)
-JOBS = [
+# Toujours lancés, webhook ou pas : seul l'envoi de leurs messages dépend de enabled().
+CORE_JOBS = [
     ("suivi des trades et cockpit Discord", tick_trades, MINUTE, True),
-    ("file d'envoi Discord", tick_outbox, MINUTE, False),  # l'envoi a son propre verrou
-    ("point du matin", tick_brief, MINUTE, True),
     ("scanner pré-ouverture", tick_scan, MINUTE, False),  # prend le verrou lui-même, seulement pour l'état
     ("forward-test sur le compte fictif", tick_paper, 2 * MINUTE, True),
+]
+# Seulement avec les notifications actives.
+JOBS = [
+    ("file d'envoi Discord", tick_outbox, MINUTE, False),  # l'envoi a son propre verrou
+    ("point du matin", tick_brief, MINUTE, True),
     ("mouvements de cours", tick_moves, 5 * MINUTE, True),
     ("séismes", tick_quakes, 5 * MINUTE, True),
     ("actus", tick_news, 15 * MINUTE, True),
@@ -286,7 +300,9 @@ def start() -> list[asyncio.Task]:
         tasks.append(asyncio.create_task(_bot()))
     else:
         log.info("Commandes Discord désactivées (DISCORD_BOT_TOKEN ou JARVIS_DISCORD_OWNER_ID absent)")
+    tasks += [asyncio.create_task(_loop(name, job, every, locked)) for name, job, every, locked in CORE_JOBS]
     if not enabled():
-        log.info("Notifications Discord désactivées (DISCORD_WEBHOOK_URL absente ou JARVIS_NOTIFICATIONS=off)")
+        log.info("Notifications Discord désactivées (DISCORD_WEBHOOK_URL absente ou JARVIS_NOTIFICATIONS=off) : "
+                 "suivi des trades, compte fictif et scanner tournent quand même, sans envoi")
         return tasks
     return tasks + [asyncio.create_task(_loop(name, job, every, locked)) for name, job, every, locked in JOBS]

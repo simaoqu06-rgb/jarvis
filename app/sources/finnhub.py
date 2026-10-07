@@ -84,7 +84,9 @@ def _news_item(n: dict) -> dict:
 
 async def market_news(limit: int) -> list[dict]:
     items = await get_json(f"{BASE}/news", params={"category": "general", "token": _key()})
-    return [_news_item(n) for n in items[:limit]]
+    if not isinstance(items, list):  # objet d'erreur ({"error": …}) au lieu de la liste
+        raise SourceError("réponse inattendue de news")
+    return [_news_item(n) for n in items[:limit] if isinstance(n, dict)]
 
 
 async def company_news(symbol: str, limit: int, days: int = 7) -> list[dict]:
@@ -98,7 +100,9 @@ async def company_news(symbol: str, limit: int, days: int = 7) -> list[dict]:
             "token": _key(),
         },
     )
-    return [_news_item(n) for n in items[:limit]]
+    if not isinstance(items, list):
+        raise SourceError(f"{symbol} : réponse inattendue de company-news")
+    return [_news_item(n) for n in items[:limit] if isinstance(n, dict)]
 
 
 async def company_news_between(symbol: str, start: date, end: date) -> list[dict]:

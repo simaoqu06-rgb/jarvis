@@ -136,8 +136,8 @@ async def test_une_reponse_inattendue_n_arrete_pas_les_autres(monkeypatch):
 def test_cache_des_bougies_borne(monkeypatch):
     monkeypatch.setattr(S, "CACHE_MAX_ENTRIES", 3)
     for i in range(5):
-        S._candle_cache[(f"S{i}", "stock", 1)] = (1000.0 + i, [])
-    S._candle_cache[("OLD", "stock", 1)] = (0.0, [])
+        S._candle_cache[(f"S{i}", "stock", 1, "")] = (1000.0 + i, [])
+    S._candle_cache[("OLD", "stock", 1, "")] = (0.0, [])
     S._prune_cache(1000.0 + S.CACHE_MAX_AGE + 1)
     assert len(S._candle_cache) == 3 and ("OLD", "stock", 1) not in S._candle_cache
 

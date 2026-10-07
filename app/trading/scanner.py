@@ -131,7 +131,15 @@ async def scan(now: datetime | None = None, s=settings, save: bool = True) -> di
 
     # Catalyseur (3 appels Finnhub par valeur) sur les mieux classées seulement.
     shortlist = passed[: s["scan_max_results"] * 3]
-    cats = await asyncio.gather(*(C.safe_check(sym, now) for sym, _ in shortlist))
+    # 4 valeurs à la fois (12 appels) : les 45 appels d'un coup dépassaient la limite de Finnhub (429),
+    # et un calendrier des résultats en échec faisait sauter le veto résultats.
+    gate = asyncio.Semaphore(4)
+
+    async def _check(sym: str):
+        async with gate:
+            return await C.safe_check(sym, now)
+
+    cats = await asyncio.gather(*(_check(sym) for sym, _ in shortlist))
     picks, skipped, filtered = [], [], []
     champ = LAB.current()
     index_daily = await _index_daily(now) if champ["regles"] else None
@@ -143,6 +151,9 @@ async def scan(now: datetime | None = None, s=settings, save: bool = True) -> di
             continue
         if s["scan_exclude_dilution"] and cat and cat.get("dilution"):
             skipped.append(f"{symbol} (augmentation de capital)")
+            continue
+        if cat and s["earnings_veto_hours"] and not cat.get("earnings_known", True):
+            skipped.append(f"{symbol} (date des résultats non vérifiée)")
             continue
         hours = (cat or {}).get("hours_to_earnings")
         if hours is not None and s["earnings_veto_hours"] and hours <= s["earnings_veto_hours"]:

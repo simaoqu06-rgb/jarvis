@@ -160,6 +160,47 @@ def crypto_windows_due(day: date, now: datetime, done_until: int | None) -> bool
     return bool(due) and (done_until is None or due[-1] > done_until)
 
 
+def _history_start(market: str, day: date, stock_sessions: int, crypto_days: int) -> int:
+    if market == "stock":
+        return CO.session_ts(CO.sessions_back(day, stock_sessions))[0]
+    return CO.utc_midnight(day) - crypto_days * 86400
+
+
+def prune_cutoff(db: LabDB, market: str, now: datetime) -> int | None:
+    """Plus ancienne bougie de 5 min encore utile : fenêtre du prochain jour rejoué (120 séances ou
+    40 jours), fenêtre du direct, et historique des jours dont les mouvements restent à calculer.
+    None : rien à effacer de sûr."""
+    today = now.astimezone(CO.NEW_YORK).date() if market == "stock" else now.astimezone(timezone.utc).date()
+    cuts = [_history_start(market, today, CO.STOCK_HISTORY_SESSIONS + 2, CO.CRYPTO_HISTORY_DAYS + 2)]
+    job = f"replay:{market}"
+    start, end, last = db.get(job, "start"), db.get(job, "end"), db.get(job, "last_day")
+    if start and not (last and last >= end):
+        cursor = date.fromisoformat(last) if last else date.fromisoformat(start)
+        cuts.append(_history_start(market, cursor, CO.STOCK_HISTORY_SESSIONS + 1, CO.CRYPTO_HISTORY_DAYS + 1))
+    row = db.conn.execute(
+        "SELECT MIN(u.day) FROM universe u WHERE u.market = ? AND NOT EXISTS "
+        "(SELECT 1 FROM progress p WHERE p.job = ? AND p.key = u.day)", (market, f"moves:{market}")).fetchone()
+    if row and row[0]:
+        cuts.append(_history_start(market, date.fromisoformat(row[0]), CAT.RVOL_SESSIONS + 2, CAT.RVOL_SESSIONS + 2))
+    return min(cuts)
+
+
+def summary_first(now: datetime, summary_last_day: str | None) -> bool:
+    """Le résumé du soir est attendu à ce passage : le Labo 2 passe avant le rejeu."""
+    return SUM.due(now, summary_last_day) is not None
+
+
+def market_order(db: LabDB, markets: list[str]) -> list[str]:
+    """Le rejeu alterne le marché qui passe en premier : un marché lent (journalier de tout l'univers
+    au premier passage, collecte) n'affame plus l'autre."""
+    if len(markets) < 2:
+        return markets
+    first = db.get("replay", "first")
+    order = markets[1:] + markets[:1] if first == markets[0] else list(markets)
+    db.set("replay", "first", order[0])
+    return order
+
+
 # --- Boucle -------------------------------------------------------------------------------
 
 async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, transport=None) -> dict:
@@ -200,7 +241,11 @@ async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, tra
     def current() -> datetime:  # `now` avancé du temps déjà passé dans ce passage
         return now + timedelta(seconds=clock.monotonic() - started)
 
-    for market in markets:
+    # Résumé du soir attendu : le Labo 2 (qui le construit) passe avant le rejeu, sinon 2 × 15 min de
+    # rejeu le repoussaient après la routine de 22 h 52, voire après minuit (résumé perdu).
+    if summary_first(now, db.get("summary", "last_day")):
+        report["labo2"] = await lab2(db, current(), collect)
+    for market in market_order(db, markets):
         try:
             report["replay"][market] = await R.replay(
                 start, end, market, db, collect, budget, now, transport,
@@ -208,7 +253,17 @@ async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, tra
         except Exception as exc:
             log.warning("Labo : rejeu %s en échec : %s: %s", market, type(exc).__name__, exc)
         heartbeat.beat()
-    report["labo2"] = await lab2(db, current(), collect)
+    if "labo2" not in report:
+        report["labo2"] = await lab2(db, current(), collect)
+    report["menage"] = {}
+    for market in R.MARKETS:
+        try:
+            cutoff = prune_cutoff(db, market, current())
+            if cutoff is not None:
+                report["menage"][market] = CO.prune_intraday(db, market, cutoff)
+        except Exception as exc:
+            log.warning("Labo : ménage %s en échec : %s: %s", market, type(exc).__name__, exc)
+    heartbeat.beat()
     return report
 
 

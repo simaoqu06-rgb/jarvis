@@ -337,7 +337,20 @@ async def ensure_intraday(db: LabDB, market: str, symbols: list[str], start: int
     cap = int((now - SRC.alpaca.SIP_DELAY).timestamp()) if market == "stock" else int(now.timestamp())
     end = min(end, cap - cap % (BASE_TF * 60))
     job = f"cov5:{market}"
-    wanted = {s: _missing(db.get(job, s), start, end) for s in symbols}
+    # Symbole de retour dans l'univers après une absence : on repart de `start` au lieu de combler
+    # tout le trou depuis sa dernière couverture (des mois de bougies inutiles) ; les anciennes
+    # bougies, d'avant `start`, sont effacées pour ne pas rester hors couverture.
+    base = {}
+    for s in symbols:
+        cov = db.get(job, s)
+        if cov and cov[1] < start:
+            with db.transaction():
+                db.conn.execute("DELETE FROM bars WHERE market = ? AND symbol = ? AND tf = ? AND ts < ?",
+                                (market, s, BASE_TF, start))
+                db.conn.execute("DELETE FROM progress WHERE job = ? AND key = ?", (job, s))
+            cov = None
+        base[s] = cov
+    wanted = {s: _missing(base[s], start, end) for s in symbols}
     wanted = {s: r for s, r in wanted.items() if r}
     stored, failed = 0, set()
     if market == "stock":
@@ -376,11 +389,30 @@ async def ensure_intraday(db: LabDB, market: str, symbols: list[str], start: int
         for symbol, ranges in wanted.items():
             if symbol in failed:
                 continue
-            cov = db.get(job, symbol)
+            cov = base[symbol]
             for a, b in ranges:
                 cov = _extend(cov, a, b)
             db.set(job, symbol, cov)
     return stored
+
+
+def prune_intraday(db: LabDB, market: str, cutoff: int) -> int:
+    """Efface les bougies de 5 min commencées avant `cutoff` et rogne la couverture d'autant.
+    Sans cela, le rejeu de 2 ans gardait toutes ses bougies (~50 Mo par jour d'actions rejoué) et
+    remplissait le disque du serveur. Renvoie le nombre de bougies effacées."""
+    job = f"cov5:{market}"
+    removed = 0
+    with db.transaction():
+        for symbol, cov in db.keys(job).items():
+            if not cov or cov[0] >= cutoff:
+                continue
+            removed += db.conn.execute("DELETE FROM bars WHERE market = ? AND symbol = ? AND tf = ? AND ts < ?",
+                                       (market, symbol, BASE_TF, cutoff)).rowcount
+            if cov[1] <= cutoff:
+                db.conn.execute("DELETE FROM progress WHERE job = ? AND key = ?", (job, symbol))
+            else:
+                db.set(job, symbol, [cutoff, cov[1]])
+    return removed
 
 
 def stock_window(day: date) -> tuple[int, int]:

@@ -159,7 +159,7 @@ async def test_cockpit_live_sans_appel_pour_les_actions(monkeypatch):
     t = book.add(trade(symbol="NVDA", market="stock"))
     S._candle_cache.pop(("NVDA", "stock", 1), None)
     assert (await S.live(book))[0] == {"id": t["id"], "price": 100.0, "chart": [], "as_of": None}
-    S._candle_cache[("NVDA", "stock", 1)] = (0.0, bars([100.0, 101.5], start=T0, step=60))
+    S._candle_cache[("NVDA", "stock", 1, "")] = (0.0, bars([100.0, 101.5], start=T0, step=60))
     live = (await S.live(book))[0]
     assert live["price"] == 101.5 and live["chart"] == [[T0, 100.0], [T0 + 60, 101.5]]
 

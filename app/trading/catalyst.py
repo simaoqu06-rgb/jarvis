@@ -96,10 +96,11 @@ def _earnings_moment(e: dict) -> datetime:
 
 
 async def check(symbol: str, now: datetime | None = None, days: int = 7) -> dict:
-    """Catalyseur d'une action. `available` vaut False si Finnhub ne répond pas (la note l'ignore alors)."""
+    """Catalyseur d'une action. `available` vaut False si Finnhub ne répond pas (la note l'ignore alors) ;
+    `earnings_known` vaut False si le calendrier des résultats n'a pas répondu (veto résultats non vérifiable)."""
     now = now or datetime.now(timezone.utc)
     today = now.date()
-    out = {"available": False, "name": None, "market_cap": None, "company": None,
+    out = {"available": False, "earnings_known": False, "name": None, "market_cap": None, "company": None,
            "next_earnings": None, "hours_to_earnings": None,
            "last_earnings": None, "news": [], "positive": 0, "negative": 0, "dilution": False, "fresh_news": False,
            "errors": []}
@@ -118,7 +119,7 @@ async def check(symbol: str, now: datetime | None = None, days: int = 7) -> dict
         if isinstance(value, Exception):
             out["errors"].append(f"{label} : {value}")
     if isinstance(earnings, list):
-        out["available"] = True
+        out["available"] = out["earnings_known"] = True
         upcoming = sorted((e for e in earnings if _earnings_moment(e) >= now), key=_earnings_moment)
         past = sorted((e for e in earnings if _earnings_moment(e) < now), key=_earnings_moment)
         if upcoming:

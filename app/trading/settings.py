@@ -106,6 +106,9 @@ def validate(key: str, value):
         out = {k: _number(f"{key}.{k}", value[k]) for k in default}
         if any(v < 0 for v in out.values()) or not sum(out.values()) > 0:
             raise ValueError(f"{key} : poids positifs attendus, de somme non nulle")
+        if key == "weights" and not out["technique"] + out["risk"] > 0:
+            # crypto et actions sans catalyseur : seules technique et risque comptent (division par zéro)
+            raise ValueError("weights : technique + risque doit être non nul")
         return out
     if isinstance(default, str):
         if not isinstance(value, str) or not value.strip():
@@ -123,9 +126,19 @@ class Settings:
         self.overrides: dict = {}
         if self.path and self.path.exists():
             try:
-                self.overrides = json.loads(self.path.read_text(encoding="utf-8"))
+                raw = json.loads(self.path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 log.warning("Réglages du trading illisibles, valeurs par défaut")
+                raw = {}
+            # Fichier retouché à la main : une valeur invalide ferait planter chaque note ou chaque scan.
+            for key, value in (raw.items() if isinstance(raw, dict) else ()):
+                try:
+                    if key in DEFAULTS and value is not None:
+                        self.overrides[key] = validate(key, value)
+                    else:
+                        log.warning("Réglage du trading ignoré : %s", key)
+                except (ValueError, TypeError) as exc:
+                    log.warning("Réglage du trading ignoré (%s)", exc)
 
     def get(self, key: str):
         return self.overrides.get(key, DEFAULTS[key])

@@ -90,8 +90,8 @@ def checklist(bars: list[dict], daily: list[dict] | None, h4: list[dict] | None,
                        f"dernière bougie à {rv:.1f}× le volume moyen 14" if rv else "volume indisponible"))
 
     # Bonus : divergence et bougies de retournement / absorption.
-    div = I.rsi_divergence(bars)
     want = "haussière" if long else "baissière"
+    div = I.rsi_divergence(bars, want=want)
     items.append(_item("divergence", "Divergence RSI (bonus)", True if div == want else None,
                        f"divergence {div} récente" if div else "aucune divergence récente"))
     pattern = None
@@ -124,8 +124,8 @@ def exit_signals(bars: list[dict], side: str) -> list[tuple[str, str]]:
     long = side == "long"
     sign = 1 if long else -1
     out = []
-    div = I.rsi_divergence(bars)
-    if div == ("baissière" if long else "haussière"):
+    div = I.rsi_divergence(bars, want="baissière" if long else "haussière")
+    if div:
         out.append(("divergence", f"divergence RSI {div} : l'élan faiblit"))
     if (I.weis_anomaly(bars) if long else I.weis_anomaly_short(bars)):
         out.append(("weis", "anomalie corps/volume : gros volume, petit corps, longue mèche contre toi"))

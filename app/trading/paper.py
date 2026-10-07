@@ -163,8 +163,9 @@ def finish(entry: dict) -> None:
     if not filled:
         entry["outcome"], entry["result_r"] = "non déclenché", None
     else:
-        rs = [(leg_r(leg, entry) or 0.0, leg["qty"]) for leg in filled]
-        entry["result_r"] = round(sum(r * q for r, q in rs) / sum(q for _, q in rs), 2)
+        # Jambe au cours de sortie inconnu (cliché Alpaca en échec) : écartée, pas comptée à 0 R.
+        rs = [(r, leg["qty"]) for leg in filled if (r := leg_r(leg, entry)) is not None]
+        entry["result_r"] = round(sum(r * q for r, q in rs) / sum(q for _, q in rs), 2) if rs else None
         tps = [leg["name"] for leg in filled if leg["exit"] == "tp"]
         entry["outcome"] = (f"{tps[-1]} touché" if tps else
                             "stop" if any(leg["exit"] == "stop" for leg in filled) else "expiré")
@@ -252,7 +253,7 @@ def stats(book: PaperBook, s=settings) -> dict:
     done = [e for e in book.entries if e["status"] == "done"]
     traded = [e for e in done if e["result_r"] is not None]
     out = {"total": len(book.entries), "done": len(done), "traded": len(traded),
-           "fill_rate": round(len(traded) / len(done), 2) if done else None,
+           "fill_rate": round(sum(1 for e in done if e["outcome"] != "non déclenché") / len(done), 2) if done else None,
            "overall": _group(traded) if traded else None, "by": {}, "timing": None, "suggestions": []}
     for key, (label, fn) in BUCKETS.items():
         groups: dict[str, list] = {}
