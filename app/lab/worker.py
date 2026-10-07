@@ -42,6 +42,10 @@ log = logging.getLogger("app.lab.worker")
 PARIS = ZoneInfo("Europe/Paris")
 TICK_SECONDS = 600
 CHUNK_DAYS = {"nuit": 20, "jour": 4, "seance": 1}
+# Durée maximale du rejeu par marché et par passage (secondes) : un jour d'actions coûte 2 à 5 min ;
+# sans borne, 20 jours la nuit retenaient la crypto et le Labo 2 plus d'une heure, et une mise à
+# jour du serveur coupait le passage avant qu'ils ne tournent.
+REPLAY_SECONDS = {"nuit": 900, "jour": 300, "seance": 120}
 MAX_LIVE_DAYS_PER_TICK = 5
 KEY_WARNING_SECONDS = 3600
 # Labo 2 : jours de mouvements calculés, appels Finnhub, règles validées et âge maximal des
@@ -181,7 +185,8 @@ async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, tra
     budget = replay_budget(now)
     for market in markets:
         try:
-            report["replay"][market] = await R.replay(start, end, market, db, collect, budget, now, transport)
+            report["replay"][market] = await R.replay(start, end, market, db, collect, budget, now, transport,
+                                                      max_seconds=REPLAY_SECONDS[period(now)])
         except Exception as exc:
             log.warning("Labo : rejeu %s en échec : %s: %s", market, type(exc).__name__, exc)
         heartbeat.beat()

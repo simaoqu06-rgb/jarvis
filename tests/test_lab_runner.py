@@ -53,6 +53,24 @@ async def test_rejeu_par_morceaux_et_jour_pas_encore_pret(db):
     assert await R.replay(START, END, "stock", db, collect=False, now=early) == 0  # clôture + 10 min : trop tôt
 
 
+async def test_rejeu_borne_en_temps_au_moins_un_jour(db, monkeypatch):
+    clock = iter(range(0, 10_000, 400))  # chaque lecture de l'horloge du rejeu avance de 400 s
+
+    class FakeTime:
+        @staticmethod
+        def monotonic():
+            return next(clock)
+    monkeypatch.setattr(R, "time", FakeTime)
+    # Départ à 0 ; après le 1er jour, 400 s < 600 : on continue ; après le 2e, 800 s : on s'arrête.
+    assert await R.replay(START, END, "stock", db, collect=False, now=NOW, max_seconds=600) == 2
+    assert await R.replay(START, END, "stock", db, collect=False, now=NOW, max_seconds=0) == 1  # au moins un jour
+
+
+def test_rejeu_borne_par_periode():
+    assert W.REPLAY_SECONDS["nuit"] > W.REPLAY_SECONDS["jour"] > W.REPLAY_SECONDS["seance"] > 0
+    assert set(W.REPLAY_SECONDS) == set(W.CHUNK_DAYS)
+
+
 async def test_journee_en_direct_idempotente(db):
     out = await R.run_live_day(END, db, markets=("stock",), collect=False, now=NOW)
     assert out == {"stock": 3}
