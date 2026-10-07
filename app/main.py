@@ -546,8 +546,10 @@ def lab_catalysts_get(day: str | None = None, symbol: str | None = Query(None, m
     """Fiches catalyseurs (mouvements de ±8 % et contre-exemples) avec leurs actus."""
     conn = _lab_conn()
     try:
+        # a_classer : fiches classables seulement (actus trouvées), comme le brief.
         return lab_catalysts.query(conn, _day(day, "day"), symbol.upper() if symbol else None, market, kind,
-                                   _day(since, "since"), _day(until, "until"), a_classer, limit)
+                                   _day(since, "since"), _day(until, "until"), a_classer, limit,
+                                   news_status="ok" if a_classer else None)
     finally:
         conn.close()
 
