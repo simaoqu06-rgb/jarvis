@@ -1,7 +1,7 @@
 """État du labo en lecture seule (route /api/lab/status et commande Discord !labo).
 
 Avancement du rejeu, trades par marché et par origine, dernier jour en direct, taille de la base,
-et quelques chiffres du Labo 2 lus dans le cache du worker : espérance en R avec son intervalle de
+étape en cours du worker et son dernier signe de vie (lab.heartbeat), et quelques chiffres du Labo 2 lus dans le cache du worker : espérance en R avec son intervalle de
 confiance, fiches catalyseurs, règles en attente et testées.
 """
 import json
@@ -9,9 +9,11 @@ import sqlite3
 from datetime import date
 from pathlib import Path
 
+from app.lab import heartbeat
 from app.lab.db import db_path, open_readonly
 
 MARKET_FR = {"stock": "actions", "crypto": "crypto"}
+WORKER_SILENT_S = 1800  # comme le healthcheck docker : 30 min sans battement = boucle bloquée
 LIMITATIONS = [
     "Crypto : OKX ne liste que les paires cotées aujourd'hui ; les paires retirées pendant la période "
     "rejouée manquent à l'univers (biais du survivant, résultats crypto du rejeu probablement flattés).",
@@ -36,7 +38,8 @@ def status(path: str | None = None) -> dict:
     path = path or db_path()
     size = sum(p.stat().st_size for p in Path(path).parent.glob(Path(path).name + "*")) if Path(path).exists() else 0
     out = {"db": path, "exists": Path(path).exists(), "db_size_mb": round(size / 1e6, 1),
-           "replay": {}, "trades": {}, "live": {}, "method_version": None, "limitations": LIMITATIONS}
+           "replay": {}, "trades": {}, "live": {}, "method_version": None, "limitations": LIMITATIONS,
+           "worker": heartbeat.read(file=Path(path).parent / "lab.heartbeat")}
     conn = open_readonly(path)
     if conn is None:
         return out
@@ -123,6 +126,12 @@ def text(st: dict) -> str:
         from app.lab import method as M
 
         lines.append(M.state_line(st["methode"]))
+    w = st.get("worker")
+    if w:
+        ago = w.get("il_y_a_s") or 0
+        when = "à l'instant" if ago < 60 else f"il y a {ago // 60} min" if ago < 3600 else f"il y a {ago / 3600:.1f} h".replace(".", ",")
+        lines.append(("⚠️ Worker muet" if ago >= WORKER_SILENT_S else "Worker") + f" : {w.get('etape') or 'étape inconnue'}"
+                     + f" · dernier signe de vie {when}")
     if st.get("error"):
         lines.append(f"⚠️ {st['error']}")
     return "\n".join(lines)

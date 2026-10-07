@@ -191,7 +191,8 @@ de `settings.py`, via `service.plan_from_bars`) et les journalise dans SQLite (`
   pour l'entrée au marché, le stop et la sortie à l'horizon.
 
 `GET /api/lab/status` ou `!labo` : avancement du rejeu, nombre de trades par marché et origine,
-dernier jour en direct, taille de la base, et les chiffres clés du Labo 2 (espérance en R avec son
+dernier jour en direct, taille de la base, étape en cours du worker et son dernier signe de vie
+(« ⚠️ Worker muet » après 30 min sans battement), et les chiffres clés du Labo 2 (espérance en R avec son
 intervalle de confiance, fiches catalyseurs, règles en attente et testées).
 Mise en route et vérification des sources : [DEPLOY.md](DEPLOY.md#labo-de-performance).
 
