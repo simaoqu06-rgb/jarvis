@@ -89,6 +89,18 @@ def period(now: datetime) -> str:
     return "jour"
 
 
+def replay_seconds(now: datetime, summary_last_day: str | None) -> float:
+    """Durée permise au rejeu d'un marché à ce passage : REPLAY_SECONDS de la période, sans déborder
+    sur l'heure du résumé du soir (22 h 30 à Paris) tant qu'il n'est pas fait, pour qu'il soit prêt
+    avant la routine du soir (22 h 52)."""
+    box = float(REPLAY_SECONDS[period(now)])
+    local = now.astimezone(PARIS)
+    target = datetime.combine(local.date(), SUM.SUMMARY_AT, PARIS)
+    if summary_last_day != local.date().isoformat() and local < target:
+        box = min(box, (target - local).total_seconds())
+    return box
+
+
 def replay_budget(now: datetime) -> int:
     """Nombre de jours de rejeu par passage et par marché."""
     return CHUNK_DAYS[period(now)]
@@ -183,14 +195,20 @@ async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, tra
             log.warning("Labo : direct %s en échec : %s: %s", market, type(exc).__name__, exc)
     start, end = replay_bounds(live_start, replay_sessions())
     budget = replay_budget(now)
+    started = clock.monotonic()
+
+    def current() -> datetime:  # `now` avancé du temps déjà passé dans ce passage
+        return now + timedelta(seconds=clock.monotonic() - started)
+
     for market in markets:
         try:
-            report["replay"][market] = await R.replay(start, end, market, db, collect, budget, now, transport,
-                                                      max_seconds=REPLAY_SECONDS[period(now)])
+            report["replay"][market] = await R.replay(
+                start, end, market, db, collect, budget, now, transport,
+                max_seconds=replay_seconds(current(), db.get("summary", "last_day")))
         except Exception as exc:
             log.warning("Labo : rejeu %s en échec : %s: %s", market, type(exc).__name__, exc)
         heartbeat.beat()
-    report["labo2"] = await lab2(db, now, collect)
+    report["labo2"] = await lab2(db, current(), collect)
     return report
 
 
