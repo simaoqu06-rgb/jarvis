@@ -122,6 +122,13 @@ suivi à la lettre : jusqu'à 0,2 en dessous, il passe si la note dépasse 7,5.
 Tous les seuils vivent dans `app/trading/settings.py` (`GET /api/trading/settings`, `!regle`).
 Ils évoluent par propositions : JARVIS propose, tu approuves ou refuses (voir plus bas).
 
+**JARVIS n'est pas d'accord parce que c'est toi.** Si tu prends un plan noté NO GO (`!prends` ou le
+cockpit), il le dit franchement avec ses raisons, suit le trade quand même et le marque « contre l'avis
+de JARVIS ». `!desaccords` (ou `GET /api/trading/disagreements`) compare ces trades aux plans GO, avec
+un tiers de la position par objectif : au bout de 10 trades terminés de chaque côté, il dit qui avait
+raison, toi ou sa note. Le même principe s'applique aux Claude qui travaillent sur JARVIS
+([CLAUDE.md](CLAUDE.md)).
+
 ## Scanner avant l'ouverture US
 
 Chaque jour de Bourse à 9 h 10 heure de New York (15 h 10 à Paris), JARVIS examine les 100
@@ -282,6 +289,7 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
 | `!prends NVDA` | calcule le plan et suit le trade (TP/SL annoncés, cockpit) |
 | `!scan` | scanner tout de suite |
 | `!bilan` | bilan du forward-test |
+| `!desaccords` | trades pris contre l'avis de JARVIS (NO GO) comparés aux plans GO : qui avait raison |
 | `!propositions` | réglages proposés qui attendent ta réponse |
 | `!oui 3` / `!non 3` | approuver ou refuser la proposition 3 (ou les boutons) |
 | `!regle` | réglages actuels |

@@ -162,3 +162,42 @@ async def test_cockpit_live_sans_appel_pour_les_actions(monkeypatch):
     S._candle_cache[("NVDA", "stock", 1)] = (0.0, bars([100.0, 101.5], start=T0, step=60))
     live = (await S.live(book))[0]
     assert live["price"] == 101.5 and live["chart"] == [[T0, 100.0], [T0 + 60, 101.5]]
+
+
+def scored(go: bool, **over):
+    reasons = [] if go else ["R/R 1.2 sous le minimum de 1.5"]
+    return trade(score={"go": go, "decision": "GO" if go else "NO GO", "reasons": reasons}, **over)
+
+
+def test_desaccord_dit_franchement_et_marque_le_trade():
+    tr = scored(False)
+    assert S.against_jarvis(tr) and S.summary(tr)["against_jarvis"]
+    assert "pas d'accord" in S.disagreement_text(tr) and "R/R 1.2" in S.disagreement_text(tr)
+    assert not S.against_jarvis(scored(True)) and not S.against_jarvis(trade())
+
+
+def test_gain_en_r_un_tiers_par_objectif():
+    tr = trade()
+    S.apply_bars(tr, bars([97.0], spread=0.5, start=T0, step=60), NOW)
+    assert S.realized_r(tr) == -1.0  # stop direct
+    tr = trade()
+    S.apply_bars(tr, bars([102.5, 104.2, 99.0], spread=0.5, start=T0, step=60), NOW)
+    assert S.realized_r(tr) == 1.0  # TP1 (1 R) + TP2 (2 R) + dernier tiers au stop remonté à l'entrée (0 R)
+    tr = trade()
+    S.apply_bars(tr, bars([105.0], spread=1.5, start=T0, step=60), NOW)
+    assert S.realized_r(tr) == 2.0
+    assert S.realized_r(trade()) is None  # en cours
+
+
+def test_tableau_des_desaccords():
+    book = S.Book(None)
+    for go, close in [(True, 105.0)] * 10 + [(False, 97.0)] * 10:
+        tr = book.add(scored(go))
+        S.apply_bars(tr, bars([close], spread=1.5 if close > 100 else 0.5, start=T0, step=60), NOW)
+    book.add(scored(False))  # un trade contre l'avis encore en cours
+    st = S.disagreements(book)
+    assert st["avec"]["closed"] == 10 and st["avec"]["avg_r"] == 2.0
+    assert st["contre"]["closed"] == 10 and st["contre"]["open"] == 1 and st["contre"]["avg_r"] == -1.0
+    assert "JARVIS a raison" in S.disagreements_text(st)
+    st["contre"]["closed"] = 3
+    assert "Pas encore de verdict" in S.disagreements_text(st)

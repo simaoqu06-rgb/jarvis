@@ -8,6 +8,7 @@ qu'aux comptes listés dans JARVIS_DISCORD_OWNER_ID et ignore tout le reste sans
   !prends NVDA          calcule le plan et suit le trade (TP/SL annoncés, cockpit)
   !scan                 scanner pré-ouverture tout de suite
   !bilan                bilan du forward-test sur le compte fictif
+  !desaccords           trades pris contre l'avis de JARVIS (plans NO GO) comparés aux autres
   !propositions         réglages que JARVIS propose et qui attendent ta réponse
   !oui 3 / !non 3       approuver ou refuser la proposition 3 (ou les boutons sous le message)
   !regle                réglages actuels
@@ -152,12 +153,16 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
             async with lock or asyncio.Lock():
                 from app import scheduler  # import tardif : scheduler importe ce module
                 scheduler.book.add(plan, "via Discord")
-            return "📌 Trade suivi\n" + trading.plan_text(plan)
+            head = trading.disagreement_text(plan) + "\n" if trading.against_jarvis(plan) else ""
+            return head + "📌 Trade suivi\n" + trading.plan_text(plan)
         if cmd == "scan":
             return scanner.text(await scanner.scan(save=False))
         if cmd == "bilan":
             from app import scheduler
             return paper.report_text(paper.stats(scheduler.paper_book))
+        if cmd in ("desaccords", "désaccords"):
+            from app import scheduler
+            return trading.disagreements_text(trading.disagreements(scheduler.book))
         if cmd == "regle":
             return settings_text()
         if cmd == "labo":
