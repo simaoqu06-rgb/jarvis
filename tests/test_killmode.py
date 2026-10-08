@@ -1,4 +1,6 @@
 """JARVIS Killmode : règle de prix du labo (déclaration n° 5), piliers, interrupteur, journal et bilan."""
+import gzip
+import json
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -89,6 +91,7 @@ def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(K, "SCANS_PATH", str(tmp_path / "scans.json"))
     monkeypatch.setattr(K.T, "TRADES_PATH", str(tmp_path / "trades.json"))
     monkeypatch.setattr(K, "BARS_DIR", str(tmp_path / "bars"))
+    monkeypatch.setattr(K, "TICKS_DIR", str(tmp_path / "ticks"))
 
     async def eurusd():
         return 1.15
@@ -160,6 +163,24 @@ def sources(monkeypatch, catalyst=None, price=106.7, sessions=60, iex_prev=100.0
     monkeypatch.setattr(K.C, "check", check)
     monkeypatch.setattr(K.finnhub, "profile", profile)
     monkeypatch.setattr(K.T, "build_plan", build_plan)
+    tick_feed(monkeypatch)
+
+
+def tick_feed(monkeypatch, order="olhc", fail=()):
+    """Transactions d'une minute tirées de sa bougie gardée (ouverture, plus bas, plus haut, clôture, 100 actions
+    chacune, sans cotation) ; `fail` : minutes qu'Alpaca refuse."""
+    asked = []
+
+    async def minute_ticks(call, m):
+        asked.append(m)
+        if m in fail:
+            raise K.SourceError("HTTP 500 panne")
+        with gzip.open(K._bars_file(call), "rt", encoding="utf-8") as f:
+            b = next(x for x in json.load(f) if x["t"] == m)
+        return {"t": [[m * 10**9 + i, b[k], 100.0, "@", "C", ""] for i, k in enumerate(order)], "q": [], "q0": None}
+
+    monkeypatch.setattr(K, "minute_ticks", minute_ticks)
+    return asked
 
 
 async def test_analyse_setup_complet(paths, monkeypatch):
@@ -174,7 +195,8 @@ async def test_analyse_setup_complet(paths, monkeypatch):
     assert "Aerospace" in txt and "Acme wins" in txt
     assert "!prends ACME <ton prix d'exécution> stop 104.49 kill tp 108.53 110.55 112.57" in txt
     assert "**11 actions en 3 brackets**" in txt and "**4 actions → TP1 108,53 · 4 actions → TP2 110,55 · " \
-        "3 actions → TP3 112,57**" in txt and "remonte les SL restants à l'entrée" in txt
+        "3 actions → TP3 112,57**" in txt and "stop ajustable IBKR (« Adjustable Stop ») : déclencheur 108,53, " \
+        "nouveau stop 106,51" in txt
     assert "vends-le en un ordre avant la clôture (aujourd'hui 22:00, 16 h New York)" in txt
     assert K.record(a, NOW) and K.record(a, NOW) is None  # une fois par séance
 
@@ -221,7 +243,7 @@ async def test_bilan(paths, monkeypatch):
     monkeypatch.setattr(K, "lab_item", lambda: None)
     txt = K.bilan_text(K.calls())
     assert "1 déclenchés" in txt or "1 déclenché" in txt
-    assert "ACME" in txt and "Minutes ambiguës" in txt
+    assert "ACME" in txt and "Prix mesurés sur les transactions" in txt
 
 
 # --- Alignement sur le labo, journal comparable, témoin catalyseur, règle de lecture ----------------
@@ -753,7 +775,7 @@ def test_pire_et_meilleur_ordre(paths, monkeypatch):
     c = _call(at) | {"groupe": "kill", "resultat": res | {"eurusd": 1.15, "plan_ibkr": "fixe"}}
     assert K.value(c) < -1 < 0 < K.value(c, "r_fav")
     line = K.ambiguous_line([c])
-    assert "1/1 KILL changent selon l'ordre" in line and "pire ordre (celui qui compte)" in line
+    assert "1/1 KILL changent selon l'ordre" in line and "pire de tous les ordres possibles (celui qui compte)" in line
     w = c | {"groupe": "temoin_catalyseur", "codes": ["pas_de_positive"], "symbol": "WIT"}
     gap = K._call_gap_line([c, w])
     assert "toutes sources +0,00 R" in gap and "meilleur ordre des minutes ambiguës +0,00 R" in gap
@@ -819,3 +841,156 @@ async def test_scan_garde_les_valeurs_coupees(paths, monkeypatch):
     monkeypatch.setattr(K, "scan", scan)
     await K.command(["scan"], NOW)
     assert K._read(K.SCANS_PATH, [])[0]["coupees"][0]["symbol"] == "ZZZ"
+
+
+# --- Méthode du solde n° 3 (8 octobre, troisième avis de GPT et Gemini) -------------------------------------
+
+def _ticks(m, trades, quotes=(), q0=None):
+    """Données d'une minute : transactions (décalage en ns, prix, conditions, tape, mise à jour) et cotations
+    (décalage, bid, ask)."""
+    n0 = m * 10**9
+    return {"t": [[n0 + d, p, 100.0, c, z, u] for d, p, c, z, u in trades],
+            "q": [[n0 + d, b, a] for d, b, a in quotes], "q0": [n0 - 1, *q0] if q0 else None}
+
+
+def test_transactions_comme_ibkr_les_voit():
+    """Règle « Last » d'IBKR : transaction qui fait un dernier cours, dans un NBBO valide à 0,5 % près ; l'ordre au
+    marché qui part prend le pire de la cotation en vigueur et de la suivante."""
+    m = OPEN + 600
+    data = _ticks(m, [(1, 100.01, "@", "C", ""),
+                      (2, 99.0, "@I", "C", ""),            # lot incomplet : pas un dernier cours
+                      (3, 100.5, " B", "A", ""),           # prix moyen (CTA)
+                      (4, 100.01, "@B", "C", ""),          # transaction groupée (UTP) : éligible
+                      (5, 101.0, "@", "C", ""),            # à plus de 0,5 % du NBBO : IBKR l'ignore
+                      (6, 100.02, "@", "C", "canceled"),   # annulée
+                      (31, 100.04, "@", "C", ""),          # NBBO sans bid : IBKR ne déclenche pas
+                      (41, 100.05, "@F", "C", "")],        # balayage intermarchés, sans cotation après
+                  quotes=[(10, 100.01, 100.03), (30, 0.0, 100.05), (40, 100.0, 100.06)], q0=(100.0, 100.02))
+    bars = K.tick_bars(m, data)
+    assert [(b["o"], b["bid"], b["ask"]) for b in bars] == [(100.01, 100.0, 100.03), (100.01, 100.0, 100.03),
+                                                           (100.05, 100.0, 100.06)]
+    assert all(b["t"] == m and b["h"] == b["l"] == b["o"] for b in bars)
+    # Sans cotation lue, la transaction compte à son prix.
+    assert K.tick_bars(m, _ticks(m, [(1, 100.0, "@", "C", "")]))[0]["bid"] is None
+
+
+def test_achat_stop_sur_un_saut_dans_la_minute():
+    """GPT : ordre stop d'achat à 106,51, la minute ouvre dessous et saute à 107,8 sans rien entre les deux. La
+    bougie seule remplissait à 106,51 ; la transaction qui déclenche et l'ask d'après donnent 107,9."""
+    at = OPEN + 30 * 60
+    m = OPEN + 31 * 60
+    rows = [(106.0, 106.1, 105.9, 106.0)] * 31 + [(106.2, 108.0, 106.1, 107.9)] + [(107.9,) * 4] * 300
+    assert K.settle(_call(at), minutes(rows))["remplissage"] == 106.51
+    data = _ticks(m, [(1, 106.2, "@", "C", ""), (2, 106.3, "@", "C", ""), (4, 107.8, "@", "C", ""),
+                      (6, 108.0, "@", "C", ""), (8, 107.9, "@", "C", "")],
+                  quotes=[(0, 106.19, 106.21), (3, 107.7, 107.82), (5, 107.85, 107.9), (7, 107.88, 108.01)])
+    res = K.settle(_call(at), minutes(rows), ticks={str(m): data})
+    assert res["remplissage"] == 107.9 and res["remplissage_mesure"] and res["a_lire"] == []
+    assert res["entree_r"] == pytest.approx((107.9 - 106.51) / 2.02, abs=1e-3) and res["minutes_lues"] == [m]
+    c = _call(at) | {"groupe": "kill", "resultat": res | {"eurusd": 1.15, "plan_ibkr": "fixe"}}
+    q = K.shares(2.02)
+    # Rien ajouté au prix mesuré ; 3 entrées et la vente à la clôture en un ordre, au minimum de 1 $ chacune.
+    assert K.value(c) == pytest.approx(-(q * K._half_tick_slip(107.9) + 4.0) / (q * 2.02), abs=1e-3)
+
+
+def test_stop_dans_une_minute_qui_s_effondre():
+    """Gemini : stop 104,49 touché dans une minute qui tombe à 101. La bougie seule sortait au stop exact ; la
+    transaction qui déclenche (104,30) et le bid d'après (103,90) donnent la vraie sortie."""
+    at = OPEN + 30 * 60
+    fill_m, crash = OPEN + 31 * 60, OPEN + 32 * 60
+    rows = ([(107.0, 107.1, 106.9, 107.0)] * 31 + [(107.2, 107.3, 107.0, 107.1), (106.8, 106.9, 101.0, 101.5)]
+            + [(101.5,) * 4] * 300)
+    assert K.settle(_call(at), minutes(rows))["sorties"][0]["prix"] == 104.49
+    data = _ticks(crash, [(1, 106.8, "@", "C", ""), (2, 105.0, "@", "C", ""), (4, 104.3, "@", "C", ""),
+                          (6, 101.0, "@", "C", ""), (8, 101.5, "@", "C", "")],
+                  quotes=[(0, 106.7, 106.85), (3, 104.2, 104.35), (5, 103.9, 104.1), (7, 100.9, 101.1)])
+    res = K.settle(_call(at), minutes(rows), ticks={str(crash): data})
+    assert res["sorties"] == [{"prix": 103.9, "part": 1.0, "raison": "stop", "mesure": True}]
+    assert res["sous_stop_r"] == pytest.approx((104.49 - 103.9) / 2.02, abs=1e-3)
+    assert res["a_lire"] == [fill_m]  # la minute d'achat (ouverte au-dessus de l'entrée) reste à lire
+    c = _call(at) | {"groupe": "kill", "resultat": res | {"eurusd": 1.15, "plan_ibkr": "fixe"}}
+    assert "1 sortie à 0,25 R ou plus sous le stop actif" in K.risk_line([c])
+    line = K.execution_line([c])
+    assert "achat sur 0/1 KILL" in line and "1 stop mesuré, +0,29 R sous le stop actif" in line
+    assert "1 minute encore à lire" in line
+
+
+def test_pire_de_tous_les_ordres():
+    """GPT : le pire ordre minute par minute n'est pas le pire résultat. Entrée et stop dans la minute d'entrée : le
+    pire ordre stoppe à −1 R ; l'autre ordre (le plus bas avant l'achat) garde le trade jusqu'à un gap à 103."""
+    at = OPEN + 30 * 60
+    rows = ([(106.0, 106.1, 105.9, 106.0)] * 31 + [(106.0, 106.8, 104.3, 106.6), (106.6, 106.7, 106.3, 106.4),
+                                                    (103.0, 103.1, 102.9, 103.0)] + [(103.0,) * 4] * 300)
+    res = K.settle(_call(at), minutes(rows))
+    assert res["sorties"][0]["prix"] == 103.0 and res["sorties_fav"][0]["prix"] == 104.49
+    assert res["ordres_joues"] == 2 and not res["ordres_tronques"]
+    assert res["ambigus"] == [{"t": OPEN + 31 * 60, "cas": "entree_et_stop"}] and res["a_lire"] == [OPEN + 31 * 60,
+                                                                                                    OPEN + 33 * 60]
+    c = _call(at) | {"groupe": "kill", "resultat": res | {"eurusd": 1.15, "plan_ibkr": "fixe"}}
+    assert K.value(c) < K.value(c, "r_fav") < -1
+
+
+async def test_minutes_qui_decident_lues_et_gardees(paths, monkeypatch):
+    sources(monkeypatch)
+    asked = tick_feed(monkeypatch, fail=())
+    at = OPEN + 30 * 60
+    rows = minutes([(106.0, 106.1, 105.9, 106.0)] * 31 + [(106.2, 106.9, 106.1, 106.8), (106.8, 106.9, 104.0, 104.2)]
+                   + [(104.2,) * 4] * 300)
+    path = K._bars_file(_call(at))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with gzip.open(path, "wt", encoding="utf-8") as f:
+        json.dump(rows, f)
+    res = await K.settle_ticks(_call(at), rows)
+    assert asked == [OPEN + 31 * 60, OPEN + 32 * 60] and res["a_lire"] == [] and res["sortie"] == "stop"
+    assert res["minutes_lues"] == asked and K.load_ticks(_call(at)).keys() == {str(m) for m in asked}
+    # Transactions dans l'ordre ouverture, plus bas, plus haut, clôture : rien d'ambigu, stop à 104,0.
+    assert res["sorties"][0]["prix"] == 104.0 and res["ambigus"] == []
+    await K.settle_ticks(_call(at), rows)
+    assert len(asked) == 2  # gardées : rien redemandé
+
+
+async def test_minute_refusee_retentee_au_bilan_suivant(paths, monkeypatch):
+    sources(monkeypatch)
+    call = K.record(await K.analyze("ACME", NOW), NOW)
+    after = spread(RANGE + RUN + [(114.7, 115.0, 114.5, 114.8)] * 60)
+
+    async def bars_range(symbols, interval, start, end, **kw):
+        return {"ACME": after}
+
+    monkeypatch.setattr(K.alpaca, "bars_range", bars_range)
+    fill_m = call["at"] + 60
+    tick_feed(monkeypatch, fail=(fill_m,))
+    later = datetime.fromtimestamp(call["close_ts"], timezone.utc) + timedelta(hours=1)
+    assert await K.settle_due(later) == 1
+    res = K.calls()[0]["resultat"]
+    assert res["a_lire"] == [fill_m] and not res["remplissage_mesure"]
+    monkeypatch.setattr(K, "lab_item", lambda: None)
+    assert "1 minute encore à lire" in K.bilan_text(K.calls())
+    asked = tick_feed(monkeypatch)
+    assert await K.settle_due(later) == 1 and asked == [fill_m]
+    c = K.calls()[0]
+    assert c["resultat"]["a_lire"] == [] and c["resultat"]["minutes_lues"] == [fill_m] and "soldes_anciens" not in c
+    assert await K.settle_due(later) == 0
+    stale = datetime.fromtimestamp(call["close_ts"], timezone.utc) + timedelta(days=K.UNSETTLED_DAYS + 1)
+    book = K.calls()
+    book[0]["resultat"]["a_lire"] = [fill_m]
+    K._write(K.CALLS_PATH, book)
+    assert await K.settle_due(stale) == 0  # au-delà de 7 jours, plus retentée
+
+
+def test_frais_sans_glissement_sur_un_prix_mesure():
+    c = {"entry": 10.0, "stop": 9.0, "targets": [11.0, 12.0, 13.0]}
+    res = {"declenche": True, "remplissage": 10.0, "eurusd": 1.15, "plan_ibkr": "fixe",
+           "sorties": [{"prix": 9.0, "part": 1.0, "raison": "stop"}]}
+    fees = (0.8 + 0.72) + (0.8 + 0.72) + (0.7 + 0.63)
+    assert K.real_r(c, res) == pytest.approx(-1 - 0.0114 - fees / 23, abs=1e-4)
+    measured = res | {"remplissage_mesure": True, "sorties": [{"prix": 9.0, "part": 1.0, "raison": "stop",
+                                                               "mesure": True}]}
+    assert K.real_r(c, measured) == pytest.approx(-1 - fees / 23, abs=1e-4)
+    assert K.stress_20e(c, measured) == K.stress_20e(c, res)  # le stress de 3 c reste par-dessus
+
+
+def test_stress_a_deux_pas_affiche():
+    rows = book([0.0])
+    rows[0]["resultat"] |= {"sorties_2t": [{"prix": 9.0, "part": 1.0, "raison": "stop"}]}
+    assert "objectifs exigés à 2 pas au-delà : -1," in K.stress_line(rows)

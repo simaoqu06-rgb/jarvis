@@ -6,6 +6,7 @@ donc les bougies jusqu'à « maintenant - 16 min » ; en cas de refus, on retomb
 Seul le compte fictif est utilisé (ALPACA_PAPER doit rester à true) : JARVIS ne passe jamais d'ordre réel.
 """
 import os
+import re
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -114,6 +115,53 @@ async def bars_range(symbols: list[str], interval_min: int, start: datetime, end
     else:
         raise SourceError(f"pagination Alpaca interrompue après {max_pages} pages")
     return {s: sorted(rows, key=lambda r: r["t"]) for s, rows in out.items()}
+
+
+_STAMP = re.compile(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(?:\.(\d{1,9}))?(Z|[+-]\d\d:\d\d)")
+
+
+def ns(stamp: str) -> int:
+    """Horodatage RFC 3339 d'Alpaca en nanosecondes depuis 1970 (« 2026-10-07T14:30:00.12345678Z » : précision à
+    la nanoseconde, zéros de fin retirés ; datetime s'arrêterait à la microseconde)."""
+    m = _STAMP.fullmatch(stamp or "")
+    if not m:
+        raise SourceError(f"horodatage Alpaca illisible : {str(stamp)[:40]}")
+    base = datetime.fromisoformat(m[1] + ("+00:00" if m[3] == "Z" else m[3]))
+    return int(base.timestamp()) * 10**9 + int((m[2] or "").ljust(9, "0"))
+
+
+def _rfc(t: datetime) -> str:
+    return t.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+async def ticks(kind: str, symbol: str, start: datetime, end: datetime, feed: str = "sip", sort: str = "asc",
+                first: int | None = None, max_pages: int = 50, transport: httpx.AsyncBaseTransport | None = None,
+                call=None) -> list[dict]:
+    """Transactions (`kind` = "trades" : t, x, p, s, c, i, z, u) ou cotations NBBO (`kind` = "quotes" : t, bx, bp,
+    bs, ax, ap, as, c, z) d'une action entre deux instants inclus, dans l'ordre de l'API. Flux SIP gratuit : `end`
+    doit dater de plus de 15 min. `first` : les `first` premières seulement (`first` = 1 et `sort` = "desc" : la
+    dernière avant `end`). Au-delà de `max_pages` pages : erreur, jamais une liste tronquée en silence."""
+    if kind not in ("trades", "quotes"):
+        raise ValueError(f"données {kind} inconnues")
+
+    async def direct(fn, *args, **kwargs):
+        return await fn(*args, **kwargs)
+
+    call = call or direct
+    params = {"start": _rfc(start), "end": _rfc(end), "limit": min(first or 10000, 10000), "feed": feed,
+              "sort": sort}
+    out: list[dict] = []
+    for _ in range(max_pages):
+        payload = await call(_request, "GET", f"{DATA}/v2/stocks/{symbol}/{kind}", dict(params),
+                             transport=transport) or {}
+        out.extend(payload.get(kind) or [])
+        token = payload.get("next_page_token")
+        if first is not None and len(out) >= first:
+            return out[:first]
+        if not token:
+            return out
+        params["page_token"] = token
+    raise SourceError(f"pagination Alpaca ({kind} {symbol}) interrompue après {max_pages} pages")
 
 
 async def assets(status: str = "active", transport: httpx.AsyncBaseTransport | None = None) -> list[dict]:

@@ -234,9 +234,12 @@ def test_objectif_dans_la_bougie_d_entree():
 
 
 def test_plusieurs_objectifs_puis_retour_a_l_entree():
-    rows = [(99.5, 100.2, 99.4, 100.1), (100.1, 104.5, 99.9, 100.0)] + [(103.0,) * 4] * 3
+    rows = [(99.5, 100.2, 99.4, 100.1), (100.1, 104.5, 99.9, 100.5)] + [(103.0,) * 4] * 3
     assert r_of(rows) == pytest.approx({"v1": 1.0, "prudente": 1 / 3, "favorable": 1.5}, abs=1e-3)
     assert run_stop(rows, "prudente")["ambigus"] == [{"t": OPEN + 60, "cas": "objectif_puis_entree"}]
+    # Clôture à l'entrée : le retour vient après le plus haut, certain même dans l'ordre favorable (troisième avis).
+    rows = [(99.5, 100.2, 99.4, 100.1), (100.1, 104.5, 99.9, 100.0)] + [(103.0,) * 4] * 3
+    assert r_of(rows) == pytest.approx({"v1": 1.0, "prudente": 1 / 3, "favorable": 1.0}, abs=1e-3)
 
 
 def test_stop_et_objectif_apres_l_entree():
@@ -251,3 +254,42 @@ def test_objectif_au_prix_de_l_ordre():
     assert run_stop(rows, "prudente")["exits"][0]["price"] == 102.0  # posé, il s'exécute à son prix
     gap = run_stop([(102.5, 102.8, 102.3, 102.6)] + [(102.6,) * 4] * 3, "prudente")
     assert gap["fill_price"] == 102.5 and gap["exits"][0]["price"] == 102.5  # posé au-delà : au prix d'entrée
+
+
+# --- Troisième avis de GPT et Gemini (8 octobre) : pas entiers, tous les ordres, transactions -------------------
+
+def test_objectif_d_un_pas_en_pas_entiers():
+    """16,01 + 0,01 vaut 16,020000000000003 en flottants : un plus haut à 16,02 ne remplissait pas un objectif à 16,01.
+    Le journal compare en pas entiers ; le labo (v1) reste tel quel jusqu'à sa déclaration."""
+    p = plan(entry=15.0, stop=14.0, tps=(16.01, 17.0, 18.0))
+    rows = [(14.9, 15.05, 14.9, 15.0), (15.5, 16.02, 15.4, 16.0)] + [(16.0,) * 4] * 3
+    kw = dict(market="stock", decided_at=OPEN, entry_until=CLOSE, exit_at=CLOSE, last_price=14.9, cost=ZERO,
+              entry_order="stop", bar_seconds=60)
+    assert SIM.simulate(p, minutes(rows), resolution="prudente", **kw)["tp_hits"][0]
+    assert not SIM.simulate(p, minutes(rows), resolution="v1", **kw)["tp_hits"][0]
+    two = SIM.simulate(p, minutes(rows), resolution="prudente", tp_ticks=2, **kw)
+    assert not two["tp_hits"][0]  # stress de Gemini : 2 pas au-delà
+    rows[1] = (15.5, 16.03, 15.4, 16.0)
+    assert SIM.simulate(p, minutes(rows), resolution="prudente", tp_ticks=2, **kw)["tp_hits"][0]
+
+
+def test_autre_ordre_dans_une_minute_choisie():
+    """`flip` joue une minute dans l'autre ordre : le pire ordre minute par minute n'est pas le pire résultat."""
+    rows = [(99.5, 100.3, 97.9, 100.1), (100.1, 100.15, 99.6, 99.7), (96.0, 96.2, 95.8, 96.1)] + [(96.1,) * 4] * 3
+    base = run_stop(rows, "prudente")
+    assert base["exit_reason"] == "stop" and base["r_gross"] == -1.0  # entrée et stop dans la minute : stoppé
+    other = SIM.simulate(plan(), minutes(rows), market="stock", decided_at=OPEN, entry_until=CLOSE, exit_at=CLOSE,
+                         last_price=99.5, cost=ZERO, entry_order="stop", bar_seconds=60, resolution="prudente",
+                         flip=frozenset({OPEN}))
+    assert other["exits"][0]["price"] == 96.0 and other["r_gross"] == -2.0  # le plus bas avant : gap plus tard
+
+
+def test_bougie_d_une_transaction_transmet_son_bid_et_son_ask():
+    bars = [{"t": OPEN, "o": 99.9, "h": 99.9, "l": 99.9, "c": 99.9, "v": 100.0, "ns": 1, "bid": 99.8, "ask": 99.95},
+            {"t": OPEN, "o": 100.2, "h": 100.2, "l": 100.2, "c": 100.2, "v": 100.0, "ns": 2, "bid": 100.1, "ask": 100.3},
+            {"t": OPEN + 60, "o": 97.5, "h": 97.5, "l": 97.5, "c": 97.5, "v": 100.0, "ns": 3, "bid": 97.4, "ask": 97.6}]
+    r = SIM.simulate(plan(), bars, market="stock", decided_at=OPEN, entry_until=CLOSE, exit_at=CLOSE, last_price=99.5,
+                     cost=ZERO, entry_order="stop", bar_seconds=60, resolution="prudente")
+    assert r["fill_price"] == 100.2 and r["fill_tick"] == {"ns": 2, "bid": 100.1, "ask": 100.3}
+    assert r["exits"][0]["price"] == 97.5 and r["exits"][0]["bid"] == 97.4 and r["exits"][0]["ns"] == 3
+    assert "fill_tick" not in run_stop([(99.5, 100.5, 99.4, 100.2)], "prudente")  # bougies ordinaires : rien

@@ -369,6 +369,34 @@ réalité, d'où le journal des appels en direct pour juger le mode complet.
     labo (`simulator.simulate`, `resolution="v1"`, inchangée) ;
   - l'écart KILL − témoin propre mesure la valeur prédictive du filtre catalyseur à règle de prix égale, pas
     l'effet causal d'une actu.
+- Méthode du solde n° 3 (8 octobre, troisième avis de GPT et Gemini, fil « JARVIS Killmode »), écrite avant tout
+  solde : aucun `!kill bilan` n'avait encore tourné. Elle ne touche ni la règle de prix, ni les piliers, ni la
+  règle de lecture, ni le labo (`resolution="v1"` inchangée) ; tout le journal est re-soldé sur les mêmes
+  bougies (`SETTLE_METHOD = 3`) :
+  - les minutes qui décident d'un chemin (déclenchement de l'achat, sortie par un stop, minute ambiguë) sont
+    relues sur les transactions et le NBBO SIP d'Alpaca et gardées sur disque (`data/killmode_ticks`) ; chaque
+    transaction devient une bougie o = h = l = c ;
+  - ne déclenchent que les transactions qui font un dernier cours chez IBKR (méthode « Last », le défaut des
+    actions US) : conditions de vente qui ne font pas de dernier cours écartées (lot incomplet, prix moyen, hors
+    séquence, heures étendues…), transactions annulées ou corrigées écartées, NBBO en vigueur valide et contenant
+    la transaction à 0,5 % près ;
+  - l'ordre au marché part après la transaction qui le déclenche : l'achat se fait au pire de l'ask en vigueur et
+    de l'ask suivant (jamais sous la transaction), le stop au pire des deux bids (jamais au-dessus) ; un objectif
+    déjà dépassé quand le bracket est posé part au bid, jamais sous son prix. Un prix mesuré ne reçoit pas le
+    demi-pas de glissement ; les 3 c du stress s'y ajoutent ;
+  - une minute restée sans transactions (refus d'Alpaca) est jouée dans **tous** les ordres possibles de ses
+    minutes ambiguës (jusqu'à 256 chemins, au-delà c'est dit) : le pire résultat décide, le meilleur est affiché.
+    Le pire ordre minute par minute n'était pas le pire résultat (GPT : l'autre ordre peut garder la position
+    ouverte jusqu'à un gap) ; elle est retentée à chaque bilan pendant 7 jours ;
+  - un objectif doit être dépassé d'un pas de son propre prix, comparé en pas entiers (en flottants, 16,01 + 0,01
+    dépasse 16,02, et un plus haut à 16,02 ne comptait pas) ; une clôture de minute à l'entrée ou sous elle après
+    un objectif rend le retour à l'entrée certain, dans tous les ordres ;
+  - le bilan affiche le résultat avec des objectifs exigés à 2 pas au-delà (`r_2t`, stress de Gemini sur les
+    exécutions partielles) à côté de « avec 3 c », la part des KILL au prix mesuré, le glissement mesuré à
+    l'entrée et au stop, et les minutes encore à lire ;
+  - non modélisé : le plancher de prix des ordres au marché d'IBKR (une suite d'ordres limites, non publiée), une
+    suspension qui dure jusqu'à la clôture (toujours marquée « données incomplètes »), le prix du fixing de
+    clôture.
 
 ## Déclaration n° 6 (8 octobre 2026) : trois règles de sortie de Gemini, actions
 
