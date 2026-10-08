@@ -550,6 +550,127 @@ séance par jour, donc l'archive passe avant la déclaration, **sans rien lire**
   publication est à vérifier sur un échantillon ; la profondeur réelle du calendrier des résultats en
   gratuit n'est pas connue (les dates en échec ou vides un jour de semaine le diront).
 
+## Déclaration n° 8 (8 octobre 2026) : Killmode complet, coûts réels, jugement en t, variantes FRSH
+
+Écrite avant toute lecture de l'archive : aucune actu, aucune tonalité, aucun résultat de Killmode complet n'a été
+lu pour l'écrire. Demandes : `/mnt/project-files/labo/demande-killmode-avis-gpt-gemini.md` (D1 à D4, fil « JARVIS
+Killmode », avis de GPT et Gemini, plan complet dans `/mnt/project-files/trading/killmode-avis-gpt-gemini.md`) et
+l'ajout du 8 octobre 16 h 10 de `/mnt/project-files/labo/demande-declaration-7-confirmation-go.md` (trade FRSH arrêté
+au stop). Aucune règle de prix ne change ; le bloc scellé n'est ni lu ni archivé.
+
+### D1 : Killmode complet, le pilier catalyseur rejoué (`app/lab/kill_complet.py`)
+
+Le labo ne mesurait que le squelette prix de Killmode (n° 5). Le journal du direct, lui, ne verra un écart KILL −
+témoin qu'au-delà d'environ 0,5 R, même à 100 KILL. L'archive (section précédente) permet de rejouer le catalyseur.
+
+**Critère, figé avant lecture** :
+- Séances : celles de l'archive (non scellées, du 9 octobre 2025 au 2 avril 2026, puis après le bloc scellé), une
+  fois tout archivé pour la séance : actus de chaque gapper (ou en échec), calendrier des résultats de J − 10 à
+  J + 30, profil de chaque société. Les gappers dont les actus sont en échec ou perdues sont comptés, pas mesurés.
+- Prix : la stratégie `killmode` du labo, le même code (`strategies.strategy_rows`), sur les bougies de 5 min SIP
+  d'Alpaca relues et gardées en mémoire : gap ≥ 4 % (première bougie contre la clôture de la veille), ATR ≥ 4 %,
+  range de 15 min tenu au-dessus du VWAP sans combler le gap, ordre stop d'achat posé à **9 h 45** New York jusqu'à
+  11 h, sortie de Killmode (un tiers par objectif, stop à l'entrée après TP1, solde à la clôture). Un gapper sans
+  signal n'est pas noté.
+- Catalyseur : `catalyst.check(symbole, 9 h 45)` **tel quel**, Finnhub remplacé par l'archive le temps de l'appel
+  (mêmes signatures, ce qui manque lève une erreur comme Finnhub en panne), puis `killmode.catalyst_codes`. Le code
+  est figé par son empreinte `37f15d7363` (`killmode.CATALYST_CODE`, catalyst.py et mots de mouvement) : si elle
+  change, la mesure s'arrête et `!strategies` le dit ; changer le catalyseur demande une nouvelle déclaration.
+- Groupes, comme le journal du direct : **KILL** (aucun code), **témoin propre** (seulement « aucune actu
+  positive »), **témoin avec veto** (actus négatives, résultats dans 24 h, augmentation de capital). À part, ni KILL
+  ni témoin : **données incomplètes** (profil inconnu ou calendrier en échec : le pilier « données » du direct
+  tombe aussi) et **actus coupées** (la profondeur de Finnhub a coupé les 7 jours avant la séance).
+- **Mesure principale (essai `killmode_complet`)** : espérance de `r_20e` des KILL déclenchés, à la mise de Simão
+  (20 € de risque, change 1,15, un bracket IBKR par objectif avec son minimum de 1 $ par ordre, plan Fixe,
+  glissement du labo avec le plancher d'un demi-pas). IC 95 % en t sur les jours. **Candidate** si la borne basse
+  de l'IC est au-dessus de 0, t ≥ seuil (D4), au moins 30 trades, et si l'espérance reste positive sous le stress
+  de 3 cents et sur chaque moitié chronologique des jours. Le coût réel décide ici parce que Killmode est ce que
+  Simão trade, à cette taille.
+- **Mesure secondaire (essai `killmode_complet_ecart_temoin`)** : écart KILL − témoin propre **apparié par jour** :
+  une valeur par séance où les deux groupes ont au moins un trade déclenché (moyenne des KILL − moyenne des témoins
+  propres, en `r_20e`). Le catalyseur « aide » si cet écart est positif avec t ≥ seuil sur ces séances et au moins
+  30 séances.
+- Sans essai : les KILL par motif (`call_motif` : résultats battus, actu de fond, simple mouvement du cours), les
+  témoins avec veto, les écartés.
+
+### Variantes FRSH du bras confirmé (n° 7)
+
+Trois bras de plus sur le GO confirmé **au stop d'origine**, chacun un filtre lu à la clôture de la bougie de
+confirmation ; s'il passe, le même ordre que `go_confirme`, sinon pas d'ordre (statut « refusé par le filtre », ou
+« non jugeable » quand la donnée manque). Pas sur le stop plancher : il n'existe que sur les jours du générateur, et
+doubler les essais pour une poignée de jours affaiblirait tout le reste.
+
+| Bras | Filtre | Verdict |
+|---|---|---|
+| `go_confirme_v2` | VWAP plus haut qu'il y a 3 bougies **et** clôture ≥ VWAP + 0,25 × ATR de 5 min | Améliorer : l'idée (un VWAP plat ne confirme rien) tient, mais 3 bougies et 0,25 ATR sont pris sur un seul trade ; déclarés une fois, jamais réglés ensuite |
+| `go_confirme_v3` | Clôture au-dessus du plus haut de la séance jusque-là | Garder : une confirmation qui ne reprend pas le plus haut reste sous l'offre |
+| `go_confirme_v4` | Variation depuis l'ouverture meilleure que celle de SPY à la même bougie | Améliorer : SPY seulement, le labo n'a pas les ETF de secteur (IGV pour FRSH) |
+
+Jugement : chaque bras comme une stratégie (sa sortie déclarée `r_sans_be`), et, GO par GO, l'écart « filtré ou
+rien » − « confirmé ou rien » (le filtre « aide » s'il est positif avec t ≥ seuil et au moins 30 GO) et − brut.
+Mesure sans essai : brut et confirmé selon que la société a publié ses résultats depuis la veille (séance d'avant,
+week-end, ou avant l'ouverture), lu dans le calendrier archivé ; « calendrier non archivé » pour les GO hors de
+l'archive (rejeu de 2024-2025). L'entrée en indice n'a pas de source au labo : non mesurée.
+
+### D2 : stress de 3 cents et mise de Simão
+
+Chaque trade exécuté du labo v2 en actions garde `r_3c` (Gemini : 3 cents de plus au remplissage, de moins à chaque
+sortie au marché, stop, stop à l'entrée et clôture ; objectifs au prix de l'ordre ; sous 1 $, 1 % du prix ;
+commission IBKR par action comprise) et `r_20e` (mise de Simão, comme Killmode). **Tranché : en actions, une
+stratégie n'est « candidate » que si sa référence reste positive sous le stress de 3 cents**, en plus du glissement
+×2 et ×3, du retard, des ordres manqués et des deux moitiés. `r_20e` est affiché (« à 20 € ») avec un drapeau
+« rentable à 20 € » qui ne décide pas : il dépend de la taille du compte (6 minimums de 1 $ pèsent 0,1 à 0,3 R sur
+~23 $ de risque), pas de l'avantage de la règle.
+
+### D3 : plancher d'un demi-pas
+
+Le glissement par côté des actions n'est plus jamais sous un demi-pas de cotation : `max(pb × prix, pas / 2)`
+(`simulator.stock_slippage`, la règle de `_half_tick_slip` de Killmode). Ça change les actions entre 1 et 3,33 $ et
+entre 5 et 8,33 $ ; les tableaux des n° 3 à 7 y étaient un peu optimistes. Les lignes du labo v2 sont refaites par le
+rattrapage ; les trades v1 déjà journalisés (visibles et scellés) sont recalculés une fois, sans rien rejouer
+(`app/lab/cout.py`, étape « cout » du worker), puis les caches des statistiques, des leçons et du grade sont vidés.
+
+### D4 : jugement en t sur les jours
+
+Toutes les règles « candidate » et « aide » comparent m / se (erreur en grappes par jour) au quantile de Student à
+G − 1 degrés de liberté (G = jours), corrigé de Bonferroni sur les essais déclarés (`strat_stats.candidate_t`) ; les
+IC 95 % sont en t aussi. Seuils à 148 essais : **3,81 à 30 jours, 3,63 à 50, 3,51 à 100, 3,40 sur beaucoup de jours**
+(l'ancien seuil en z). Sous deux jours, rien n'est jugeable.
+
+### Essais
+
+**148** (143 + 3 bras FRSH + 2 pour Killmode complet). Le rattrapage repart pour les actions seulement ; la crypto
+garde celui de la n° 6 (49 essais, rien n'y change).
+
+### Limites
+
+- Calendrier des résultats et BPA publiés tels que Finnhub les donne au moment de l'archive (remplis après coup :
+  une date déplacée ne se voit pas) ; profils d'aujourd'hui (une société renommée peut perdre ses actus citées par
+  l'ancien nom) ; liste d'actus vide = « aucune actu » ou « symbole inconnu de Finnhub ».
+- Fidélité des heures de publication de Finnhub non vérifiée : à contrôler sur un échantillon avant toute
+  conclusion positive.
+- Le direct relit le catalyseur pendant toute la vie de l'ordre ; le labo le lit une fois, à 9 h 45 : une actu de
+  10 h ne fait pas un KILL au labo.
+- Population : les actions qu'Alpaca connaît encore (sociétés retirées de la cote en partie absentes).
+- Puissance : au plus ~120 séances avant le bloc scellé. Un « pas d'avantage démontré » sera la lecture la plus
+  probable, et ne voudra pas dire « pas d'avantage ».
+
+### Avis et council
+
+Position de l'analyste, sur les faits, avant l'avis de Simão : D1 est la seule façon de mesurer ce qui distingue
+Killmode d'une cassure de range ; D2 à D4 corrigent des coûts et un seuil trop doux, ce qui ne peut que retirer des
+candidates. Les variantes FRSH viennent d'un seul trade : elles se mesurent, elles ne se corrigent pas en direct.
+
+**Sceptique** : un seul trade (FRSH) a dicté trois filtres, dont les paramètres de V2 ; et le catalyseur est rejoué
+avec un calendrier rempli après coup. Réponse : V2 est déclarée une fois sans réglage ultérieur, et le Bonferroni
+compte ses essais ; le calendrier n'est lu que pour les publications passées (connues à 9 h 45) et les dates à
+venir, pas pour les BPA futurs ; la limite est écrite. **Pragmatique** : cinq essais pour trois idées et la mesure
+qui compte le plus (Killmode complet) ; tout réutilise le code du direct (catalyst.check, catalyst_codes,
+confirm.evaluate, real_r), sans second code à tenir. **Critique** : exiger le stress de 3 c pour « candidate » peut
+écarter une vraie stratégie sur les grosses valeurs (3 c ≈ le glissement du labo à 100 $, 5 fois plus à 10 $) ;
+accepté, parce que Simão trade surtout des petites valeurs volatiles et que ses `!prends … kill` mesureront le vrai
+glissement. GO modifié : D2 tranché « oui » ; `r_20e` affiché sans décider, sauf pour Killmode complet.
+
 ## Bloc scellé
 
 Le rejeu du **6 avril au 5 octobre 2026** est calculé mais rangé à part (`trades_sealed`,

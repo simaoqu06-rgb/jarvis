@@ -28,6 +28,7 @@ import json
 import math
 import sqlite3
 from datetime import date, datetime, timezone
+from functools import lru_cache
 
 from app.lab import collector as CO
 from app.lab import seal as SEAL
@@ -77,6 +78,66 @@ def mean_ci(day_sums: dict, total: float, n: int) -> tuple[float | None, float |
     se = cluster_se(day_sums, m, n)
     ci = [round(m - Z95 * se, 4), round(m + Z95 * se, 4)] if se is not None else None
     return m, se, ci
+
+
+def _beta_cf(a: float, b: float, x: float) -> float:
+    """Fraction continue de la fonction bêta incomplète (méthode de Lentz)."""
+    tiny = 1e-300
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c, d = 1.0, 1.0 - qab * x / qap
+    d = 1.0 / (d if abs(d) > tiny else tiny)
+    h = d
+    for m in range(1, 300):
+        m2 = 2 * m
+        for aa in (m * (b - m) * x / ((qam + m2) * (a + m2)), -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))):
+            d = 1.0 + aa * d
+            d = 1.0 / (d if abs(d) > tiny else tiny)
+            c = 1.0 + aa / c
+            c = c if abs(c) > tiny else tiny
+            h *= d * c
+        if abs(d * c - 1.0) < 1e-15:
+            break
+    return h
+
+
+def beta_inc(a: float, b: float, x: float) -> float:
+    """Fonction bêta incomplète régularisée I_x(a, b)."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    front = math.exp(math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b) + a * math.log(x) + b * math.log1p(-x))
+    if x < (a + 1.0) / (a + b + 2.0):
+        return front * _beta_cf(a, b, x) / a
+    return 1.0 - front * _beta_cf(b, a, 1.0 - x) / b
+
+
+def t_sf(t: float, df: float) -> float:
+    """P(T ≥ t) pour la loi de Student à `df` degrés de liberté."""
+    tail = 0.5 * beta_inc(df / 2.0, 0.5, df / (df + t * t))
+    return tail if t >= 0 else 1.0 - tail
+
+
+@lru_cache(maxsize=4096)
+def t_quantile(p: float, df: int) -> float:
+    """Quantile p (≥ 0,5) de la loi de Student, exact (bissection sur t_sf) ; l'infini sans degré de liberté.
+    Déclaration n° 8, D4 : les jugements du labo sur G jours se font à G − 1 degrés de liberté."""
+    if df < 1:
+        return math.inf
+    lo, hi = 0.0, 1.0
+    while t_sf(hi, df) > 1.0 - p:
+        hi *= 2.0
+        if hi > 1e9:
+            return math.inf
+    for _ in range(200):
+        mid = (lo + hi) / 2.0
+        if t_sf(mid, df) > 1.0 - p:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < 1e-10:
+            break
+    return (lo + hi) / 2.0
 
 
 def p_one_sided(z: float) -> float:

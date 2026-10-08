@@ -61,6 +61,7 @@ QUIET_FROM, QUIET_TO = time(8, 30), time(16, 30)  # New York, jours de Bourse : 
 POPULATION_JOB = "archive:population"
 PROFILE_JOB = "archive:profil"
 PROFILE_ATTEMPTS_JOB = "archive:profil_essais"
+KILL_JOB = "killcomplet:n8"       # séances rejouées par kill_complet.py (déclaration n° 8), comptées ici
 
 
 def _per_minute() -> int:
@@ -299,6 +300,43 @@ async def step(db: LabDB, now: datetime, seconds: float, collect: bool = True,
     return report
 
 
+# --- Lectures permises par la déclaration n° 8 ------------------------------------------------------
+
+def results_lookup(conn: sqlite3.Connection):
+    """n° 8, mesure sans essai (FRSH) : fonction (symbole, séance) → True si la société a publié ses résultats
+    depuis la veille (n'importe quelle heure de la séance d'avant ou des jours fermés qui suivent, ou avant
+    l'ouverture du jour, « bmo »), False sinon, None si l'une de ces dates n'est pas archivée. None tout court
+    si la table n'existe pas encore (base pas migrée)."""
+    try:
+        conn.execute("SELECT 1 FROM earnings_days LIMIT 1").fetchall()
+    except sqlite3.Error:
+        return None
+    cache: dict[str, dict | None] = {}
+
+    def by_symbol(x: date) -> dict | None:
+        key = x.isoformat()
+        if key not in cache:
+            row = conn.execute("SELECT status, items FROM earnings_days WHERE day = ?", (key,)).fetchone()
+            cache[key] = ({e["symbol"]: e for e in json.loads(row[1] or "[]")} if row and row[0] == "ok"
+                          else None)
+        return cache[key]
+
+    def passed(symbol: str, day: str) -> bool | None:
+        d = date.fromisoformat(day)
+        prev = CO.previous_trading_day(d)
+        found = False
+        for k in range((d - prev).days + 1):
+            x = prev + timedelta(days=k)
+            index = by_symbol(x)
+            if index is None:
+                return None
+            e = index.get(symbol)
+            found = found or bool(e and (x < d or e.get("hour") == "bmo"))
+        return found
+
+    return passed
+
+
 # --- Comptes (lecture seule, jamais le contenu) ----------------------------------------------------
 
 def counts(conn: sqlite3.Connection) -> dict | None:
@@ -313,6 +351,7 @@ def counts(conn: sqlite3.Connection) -> dict | None:
         earnings = dict(conn.execute("SELECT status, COUNT(*) FROM earnings_days GROUP BY status").fetchall())
         profiles = conn.execute("SELECT COUNT(*) FROM progress WHERE job = ?", (PROFILE_JOB,)).fetchone()[0]
         symbols = conn.execute("SELECT COUNT(DISTINCT symbol) FROM gap_news").fetchone()[0]
+        replayed = conn.execute("SELECT COUNT(*) FROM progress WHERE job = ?", (KILL_JOB,)).fetchone()[0]
     except sqlite3.Error:
         return None
     return {"seances": days[0], "du": days[1], "au": days[2], "sans_journalier": days[3] or 0,
@@ -320,7 +359,7 @@ def counts(conn: sqlite3.Connection) -> dict | None:
             "archives": rows.get("ok", 0), "a_chercher": rows.get("a_chercher", 0), "erreurs": rows.get("erreur", 0),
             "hors_profondeur": rows.get("hors_profondeur", 0), "prochaine_seance": pending,
             "dates_resultats": earnings.get("ok", 0), "dates_resultats_erreurs": earnings.get("erreur", 0),
-            "profils": profiles, "societes": symbols}
+            "profils": profiles, "societes": symbols, "rejouees": replayed}
 
 
 def line(c: dict | None) -> str | None:
@@ -335,5 +374,5 @@ def line(c: dict | None) -> str | None:
         out += f" · {c['sans_journalier']} séances sans journalier en base"
     if c["erreurs"] or c["hors_profondeur"]:
         out += f" · {c['erreurs']} en erreur, {c['hors_profondeur']} perdus (hors profondeur)"
-    return out + (f" · calendrier des résultats : {c['dates_resultats']} dates · profils {c['profils']}/"
-                  f"{c['societes']}")
+    out += f" · calendrier des résultats : {c['dates_resultats']} dates · profils {c['profils']}/{c['societes']}"
+    return out + (f" · Killmode complet rejoué sur {c['rejouees']} séances" if c.get("rejouees") else "")

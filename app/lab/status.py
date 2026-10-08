@@ -19,7 +19,9 @@ LIMITATIONS = [
     "Crypto : OKX ne liste que les paires cotées aujourd'hui ; les paires retirées pendant la période "
     "rejouée manquent à l'univers (biais du survivant, résultats crypto du rejeu probablement flattés).",
     "Actions : seules les valeurs retirées de la cote encore connues d'Alpaca sont dans l'univers.",
-    "Catalyseur (actus, résultats) non rejoué : note composite sans sa part catalyseur.",
+    "Catalyseur (actus, résultats) non rejoué pour v1 et les stratégies : note composite sans sa part catalyseur. "
+    "Killmode complet (n° 8) le rejoue sur l'archive des actus Finnhub, de octobre 2025 à aujourd'hui seulement, "
+    "avec le calendrier des résultats et les profils tels que Finnhub les donne au moment de l'archive.",
     "Univers actions approché (volume, variation et volume relatif de la veille) : le screener Alpaca "
     "du direct ne se rejoue pas. Killmode n'y voit qu'une partie des actions en gap ≥ 4 % : la part est "
     "comptée dans le tableau des stratégies (couverture).",

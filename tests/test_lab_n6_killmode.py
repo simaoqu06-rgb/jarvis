@@ -68,13 +68,14 @@ def _insert(db, rows):
     sauf indication dans extra."""
     cols = ("market", "symbol", "day", "strategy", "slot", "triggered", "r_net", "r_gross", "temoin_r",
             "temoin_triggered", "tp1_hit", "r_glisse_x2", "r_glisse_x3", "r_retard", "r_manque", "gap_open_pct",
-            "atr_pct", "vol15_adv", "stop_avant_entree", "risk_pct")
+            "atr_pct", "vol15_adv", "stop_avant_entree", "risk_pct", "r_3c", "r_20e")
     data = []
     for strategy, symbol, day_, trig, r, wit, extra in rows:
         row = {"market": "stock", "symbol": symbol, "day": day_, "strategy": strategy, "slot": 0, "triggered": trig,
                "r_net": r, "r_gross": r, "temoin_r": wit, "temoin_triggered": int(wit is not None), "tp1_hit": 0,
                "r_glisse_x2": r, "r_glisse_x3": r, "r_retard": r, "r_manque": r, "gap_open_pct": None,
-               "atr_pct": None, "vol15_adv": None, "stop_avant_entree": None, "risk_pct": None, **extra}
+               "atr_pct": None, "vol15_adv": None, "stop_avant_entree": None, "risk_pct": None, "r_3c": r, "r_20e": r,
+               **extra}
         data.append([row[c] for c in cols])
     db.conn.executemany(f"INSERT INTO strat_trades (origin, {', '.join(cols)}) VALUES ('replay', "
                         f"{', '.join('?' * len(cols))})", data)
@@ -172,4 +173,4 @@ def test_couverture_de_l_univers(tmp_path):
     cov = SS.coverage(db.conn)
     assert cov["gappers"] == 2 and cov["dans_univers"] == 1 and cov["part"] == 0.5 and cov["seances"] == 1
     assert cov["par_prix"]["< 1 $"]["part"] == 0.0
-    assert SS.signature(db.conn)[-1] == 2                     # le tableau se recalcule quand la couverture avance
+    assert SS.signature(db.conn)[2] == 2                     # le tableau se recalcule quand la couverture avance

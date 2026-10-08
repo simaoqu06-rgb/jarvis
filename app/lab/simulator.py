@@ -18,7 +18,8 @@ Règles (choix de Simão pour la gestion de position) :
   * Actions : ce qui reste est soldé à la clôture de la séance d'entrée (intraday). Crypto : à
     l'horizon du plan (24 h après la décision), à la clôture de la bougie.
 - Coûts (estimations que le labo affinera, toutes ici) : demi-écart + glissement par côté en points
-  de base selon le prix (actions) ou le rang de volume (crypto), aucune commission sur les actions.
+  de base selon le prix (actions, jamais moins d'un demi-pas de cotation depuis la n° 8) ou le rang de
+  volume (crypto), aucune commission sur les actions.
   Frais OKX : « maker » 0,08 % pour un ordre limité qui attendait dans le carnet (entrée posée, TP),
   « taker » 0,10 % pour ce qui prend la liquidité (entrée au marché, stop, sortie à la clôture ou à
   l'horizon).
@@ -54,10 +55,18 @@ def crypto_slippage_bps(volume_rank: int | None) -> float:
     return CRYPTO_SLIPPAGE_BPS["top10" if volume_rank is not None and volume_rank <= 10 else "other"]
 
 
+def stock_slippage(price: float) -> float:
+    """Demi-écart + glissement par côté (fraction du prix), jamais moins d'un demi-pas de cotation
+    (déclaration n° 8, D3 : entre 1 et 3,33 $ et entre 5 et 8,33 $, le palier en points de base donnait moins)."""
+    if price <= 0:
+        return stock_slippage_bps(price) / 10000
+    return max(stock_slippage_bps(price) / 10000, tick_size("stock", price) / 2 / price)
+
+
 def costs(market: str, price: float, volume_rank: int | None = None) -> dict:
     """Coût par côté : glissement (fraction) et frais (fraction du montant)."""
     if market == "stock":
-        return {"slippage": stock_slippage_bps(price) / 10000, "maker": STOCK_COMMISSION, "taker": STOCK_COMMISSION}
+        return {"slippage": stock_slippage(price), "maker": STOCK_COMMISSION, "taker": STOCK_COMMISSION}
     return {"slippage": crypto_slippage_bps(volume_rank) / 10000, "maker": OKX_MAKER_FEE, "taker": OKX_TAKER_FEE}
 
 

@@ -28,6 +28,9 @@ Toutes les ~10 min :
 10. Déclaration n° 8, D1 : « archive » (archive.py), actus Finnhub d'avant 9 h 45 des actions en gap, calendrier
    des résultats et profils, la séance la plus ancienne d'abord (Finnhub gratuit perd une séance par jour),
    archivés sans être lus, hors séance US, archive_seconds et archive_days par passage.
+11. Déclaration n° 8 : « cout » (cout.py), R net des trades v1 d'actions recalculé une fois au coût du demi-pas
+   (D3) ; « killmode_complet » (kill_complet.py), séances dont l'archive est complète, bougies Alpaca relues et
+   gardées en mémoire, hors séance US, kill_complet_seconds par passage.
 Le battement (lab.heartbeat) porte l'étape en cours, affichée par /api/lab/status et !labo.
 Le rejeu couvre JARVIS_LAB_REPLAY_DAYS séances (504 ≈ 2 ans) avant le premier lancement du worker ;
 le direct prend le relais à partir de ce jour-là. JARVIS_LAB_ENABLED=off met le worker en veille.
@@ -42,10 +45,12 @@ from zoneinfo import ZoneInfo
 from app.lab import archive as ARC
 from app.lab import catalysts as CAT
 from app.lab import collector as CO
+from app.lab import cout as COUT
 from app.lab import derivs as DER
 from app.lab import generator as G
 from app.lab import grade as GRADE
 from app.lab import heartbeat
+from app.lab import kill_complet as KC
 from app.lab import lessons as L
 from app.lab import method as M
 from app.lab import potentiel as PO
@@ -77,11 +82,11 @@ KEY_WARNING_SECONDS = 3600
 # statistiques en cache (secondes), par période.
 LAB2_BUDGET = {
     "nuit": {"moves_days": 30, "news_calls": 40, "rules": 3, "stats_age": 3600, "derivs_calls": 300,
-             "coverage_days": 60, "archive_seconds": 1200, "archive_days": 40},
+             "coverage_days": 60, "archive_seconds": 1200, "archive_days": 40, "kill_complet_seconds": 600},
     "jour": {"moves_days": 5, "news_calls": 10, "rules": 1, "stats_age": 3 * 3600, "derivs_calls": 100,
-             "coverage_days": 10, "archive_seconds": 600, "archive_days": 10},
+             "coverage_days": 10, "archive_seconds": 600, "archive_days": 10, "kill_complet_seconds": 120},
     "seance": {"moves_days": 2, "news_calls": 0, "rules": 0, "stats_age": 6 * 3600, "derivs_calls": 30,
-               "coverage_days": 2, "archive_seconds": 0, "archive_days": 2},
+               "coverage_days": 2, "archive_seconds": 0, "archive_days": 2, "kill_complet_seconds": 0},
 }
 _key_warned_at: float | None = None
 
@@ -379,7 +384,9 @@ async def lab2(db: LabDB, now: datetime, collect: bool = True) -> dict:
     await step("couverture", lambda: U.coverage_step(db, budget["coverage_days"]))
     await step("archive", lambda: ARC.step(db, now, budget["archive_seconds"], collect,
                                                 budget["archive_days"]))
+    await step("cout", lambda: COUT.step(db))
     if collect:
+        await step("killmode_complet", lambda: KC.step(db, budget["kill_complet_seconds"]))
         await step("derives", lambda: DER.collect(db, now, budget["derivs_calls"]))
     if collect and not CO.CAL.session_open(now):
         await step("actus", lambda: CAT.fetch_news(db, now, budget["news_calls"]))

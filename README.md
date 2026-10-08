@@ -346,6 +346,12 @@ Liste, seuils et sorties sont déclarés d'avance : [docs/labo-strategies.md](do
   actions de toute la base ouvertes en gap ≥ 3,5 % avec un ATR ≥ 4 %, leurs actus publiées avant 9 h 45 New York
   (7 jours, comme le direct), le calendrier des résultats de J − 10 à J + 30 et le profil de la société. Rien
   n'est lu avant que la déclaration n° 8 écrive le critère ; `!labo` n'en montre que l'avancement.
+- Déclaration n° 8 : **Killmode complet** (`app/lab/kill_complet.py`), la règle de prix du labo et le pilier
+  catalyseur du direct (même code, Finnhub remplacé par l'archive) à 9 h 45 New York, jugé à la mise de Simão
+  (20 €, brackets IBKR) et contre les témoins propres, apparié par jour ; trois filtres du GO confirmé après le
+  trade FRSH (VWAP qui monte, plus haut de séance repris, plus fort que SPY) ; stress de 3 cents exigé pour
+  « candidate » en actions ; glissement jamais sous un demi-pas (trades v1 recalculés une fois, `app/lab/cout.py`) ;
+  jugements en t sur les jours (148 essais).
 - **Bloc scellé** : le rejeu du 6 avril au 5 octobre 2026 est calculé mais rangé à part, invisible des
   statistiques, du brief, du grade et du validateur (`app/lab/seal.py`). Il sert une seule fois.
 - Les jours traités avant le labo v2 sont rattrapés hors séance (bougies relues à la source, rien stocké).

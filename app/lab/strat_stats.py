@@ -47,6 +47,19 @@ la confirmation « aide » si cet écart est positif avec z ≥ candidate_z() et
 est affiché, jamais utilisé pour conclure. Les mesures groupées de la n° 6 (sorties de Gemini, VWAP, tranches de
 Killmode) restent sur les stratégies d'avant la n° 7.
 
+Déclaration n° 8 (suites des avis de GPT et Gemini sur Killmode, et trade FRSH) :
+- D4 : chaque jugement (« candidate », « aide ») compare m / se en grappes au seuil candidate_t(G, essais), le
+  quantile de Student à G − 1 degrés de liberté (G = jours) corrigé de Bonferroni, et non plus à candidate_z() ;
+  les IC 95 % sont en t eux aussi. Sur peu de jours, le seuil monte (148 essais : 3,81 à 30 jours, 3,63 à 50,
+  3,51 à 100, contre 3,40 en loi normale).
+- D2 : en actions, la robustesse exigée pour « candidate » comprend le stress de 3 cents de Gemini (r_3c,
+  commission IBKR comprise : ROBUST_STOCK) ; l'espérance à la mise de Simão (r_20e : 20 €, bracket IBKR par
+  objectif, minimum par ordre) est affichée et dit « rentable à 20 € », sans décider de « candidate ».
+- Variantes FRSH du bras confirmé (stop d'origine) : pour chaque filtre, écart « filtré ou rien » − « confirmé
+  ou rien » et − brut, GO par GO (_filter_compare) ; mesure sans essai, brut et confirmé selon que des résultats
+  ont été publiés depuis la veille (archive du calendrier, _results_compare).
+- D1 : Killmode complet (kill_complet.report) : KILL, témoins propres et écart apparié par jour.
+
 Diagnostic v1 (Lot 1 du plan) : espérance par gap d'ouverture, par mode d'entrée, par raison de sortie,
 et brut contre net de frais, pour vérifier « v1 achète la faiblesse » et « les frais expliquent la perte ».
 """
@@ -57,6 +70,7 @@ from collections import defaultdict
 from datetime import date, datetime
 from statistics import NormalDist
 
+from app.lab import archive as ARC
 from app.lab import collector as CO
 from app.lab import derivs as DER
 from app.lab import seal as SEAL
@@ -68,7 +82,8 @@ from app.lab import universe as U
 MIN_N = 30
 ALPHA = 0.05
 COLUMNS = ("r_net", "r_sans_be", "r_2r", "r_suiveur", "r_emperor", "r_emperor_alerte", "r_emperor_confirme",
-           "r_vwap", "r_1430", "r_spy", "r_glisse_x2", "r_glisse_x3", "r_retard", "r_manque", "r_gross")
+           "r_vwap", "r_1430", "r_spy", "r_glisse_x2", "r_glisse_x3", "r_retard", "r_manque", "r_gross",
+           "r_3c", "r_20e")
 RANK_BUCKETS = ((1, 50, "rang 1-50"), (51, 150, "rang 51-150"), (151, 10**9, "rang 151+"))
 IBKR_PER_SHARE = 0.005      # IBKR Pro, plan Fixe (/mnt/project-files/trading/plateforme-actions-us.md)
 IBKR_MAX_PCT = 0.01         # plafond : 1 % de la valeur de l'ordre
@@ -78,6 +93,10 @@ VWAP_BUCKETS = ("avant 10 h 30", "après 10 h 30, au-dessus du VWAP", "après 10
 # n° 6 : la référence doit rester positive sous ces conditions (et sur chaque moitié des jours) pour qu'une
 # stratégie soit « candidate » (plan-labo-v2.md, lot 1, point 7 : ×2 et ×3, retard, ordres limites manqués).
 ROBUST = ("r_glisse_x2", "r_glisse_x3", "r_retard", "r_manque")
+# n° 8, D2 : en actions, la référence doit aussi tenir sous le stress de 3 cents de Gemini (r_3c, commission
+# IBKR déjà comptée dedans) ; r_20e (à la mise de Simão) est affiché, il ne décide pas de « candidate ».
+ROBUST_STOCK = (*ROBUST, "r_3c")
+WITH_COMMISSION = ("r_3c", "r_20e")  # colonnes qui comptent déjà la commission IBKR
 # n° 6, mesure de Killmode : tranches figées avant tout résultat (bornes basses comprises, hautes exclues).
 TRANCHES = {
     "gap": ((-1e9, -5.0, "gap < −5 %"), (-5.0, -2.0, "gap −5 à −2 %"), (-2.0, -0.5, "gap −2 à −0,5 %"),
@@ -91,6 +110,9 @@ TRANCHES = {
     "stop_avant_entree": ((0, 1, "stop intact avant l'entrée"), (1, 2, "stop touché avant l'entrée")),
 }
 GO_STATUS_FR = {"confirme": "confirmé", "annule": "annulé", "expire": "expiré"}  # n° 7
+GO_FILTER_STATUS_FR = {"filtre": "refusé par le filtre", "indetermine": "filtre non jugeable"}  # n° 8
+GO_FILTERS_FR = {"v2": "V2, VWAP qui monte", "v3": "V3, cassure du plus haut de séance", "v4": "V4, plus fort que SPY"}
+RESULTS_FR = {True: "résultats publiés depuis la veille", False: "sans résultats publiés", None: "calendrier non archivé"}
 GO_VARIANTS_FR = {"origine": "stop d'origine", "plancher": "stop plancher du direct"}
 _vwap_from: dict[str, int] = {}
 
@@ -107,9 +129,26 @@ def _vwap_bucket(day: str, signal_at: int | None, above: int | None) -> str | No
 
 
 def candidate_z(trials: int | None = None) -> float:
-    """Seuil de z contre le témoin, corrigé du nombre d'essais déclarés (Bonferroni, unilatéral)."""
+    """Seuil de z contre le témoin, corrigé du nombre d'essais déclarés (Bonferroni, unilatéral) : la limite
+    du seuil en t quand les jours sont très nombreux (affichage)."""
     n = trials or len(ST.trials())
     return round(NormalDist().inv_cdf(1 - ALPHA / n), 2)
+
+
+def candidate_t(days: int, trials: int | None = None) -> float | None:
+    """n° 8, D4 : seuil du jugement sur `days` jours, Bonferroni sur les essais déclarés, loi de Student à
+    days − 1 degrés de liberté (l'écart-type est estimé sur les jours) ; None sous deux jours (pas jugeable)."""
+    n = trials or len(ST.trials())
+    return round(STATS.t_quantile(1 - ALPHA / n, days - 1), 2) if days >= 2 else None
+
+
+def passes(t: float | None, seuil: float | None) -> bool:
+    """t (m / se en grappes) au-dessus du seuil en t ; faux quand l'un des deux manque."""
+    return t is not None and seuil is not None and t >= seuil
+
+
+def robust(market: str) -> tuple[str, ...]:
+    return ROBUST_STOCK if market == "stock" else ROBUST
 
 
 def ibkr_commission_r(entry: float | None, stop: float | None) -> float | None:
@@ -163,7 +202,13 @@ class Mean:
         self.n += 1
 
     def result(self) -> dict:
-        m, se, ci = STATS.mean_ci(self.days, self.total, self.n)
+        """Espérance, IC 95 % en t à G − 1 degrés de liberté (n° 8, D4 ; G = jours) et statistique m / se
+        (gardée sous la clé « z »)."""
+        m, se, _ = STATS.mean_ci(self.days, self.total, self.n)
+        ci = None
+        if m is not None and se is not None:
+            q = STATS.t_quantile(0.975, len(self.days) - 1)
+            ci = [round(m - q * se, 4), round(m + q * se, 4)]
         return {"n": self.n, "esperance_r": round(m, 4) if m is not None else None, "ic95": ci,
                 "z": round(m / se, 2) if m is not None and se else None, "jours": len(self.days)}
 
@@ -188,8 +233,8 @@ def _feed(a: dict, r: dict) -> None:
     a["regimes"][r["label"]].add(day, ref)
     a["rangs"][_rank_bucket(r["rank"])].add(day, ref)
     a["ibkr"].add(day, ref)
-    for c in ROBUST:  # n° 6 : la règle « candidate » exige que la référence tienne sous ces conditions
-        a["robuste"][c].add(day, values[c] - comm if values[c] is not None else None)
+    for c in robust(r["market"]):  # n° 6 et 8 : la règle « candidate » exige que la référence tienne sous ces conditions
+        a["robuste"][c].add(day, values[c] - (0.0 if c in WITH_COMMISSION else comm) if values[c] is not None else None)
     if r["market"] == "stock":
         a["commission"].add(day, comm)
     a["frais"][r["frais"]].add(day, ref)
@@ -220,7 +265,7 @@ def _halves(mean: Mean) -> tuple[float | None, float | None]:
     return avg(days[:len(days) // 2]), avg(days[len(days) // 2:])
 
 
-def _item(market: str, name: str, a: dict, z_min: float) -> dict:
+def _item(market: str, name: str, a: dict, trials: int) -> dict:
     n = a["declenches"]
     go = name in ST.GO_STRATEGIES  # n° 7 : une seule sortie déclarée, pas de mesures de la n° 6
     main = a["sorties"][ST.ref_exit(name)].result()
@@ -228,7 +273,7 @@ def _item(market: str, name: str, a: dict, z_min: float) -> dict:
     ecart = a["ecart"].result()
     ibkr = a["ibkr"].result() if market == "stock" else None
     ref = ibkr or main
-    rob = {c: a["robuste"][c].result()["esperance_r"] for c in ROBUST}
+    rob = {c: a["robuste"][c].result()["esperance_r"] for c in robust(market)}
     halves = _halves(a["ibkr"])
     holds = all(v is not None and v > 0 for v in (*rob.values(), *halves))
     item = {
@@ -252,12 +297,13 @@ def _item(market: str, name: str, a: dict, z_min: float) -> dict:
                         if k in a["funding"]} if market == "crypto" else None,
         "par_oi": {k: a["oi"][k].result() for _, _, k in (*DER.OI_BUCKETS, (0, 0, "inconnu"))
                    if k in a["oi"]} if market == "crypto" else None,
-        "ecarts_sorties": {c: _helps(a["ecarts"][c].result(), z_min) for c in ST.STOCK_EXITS}
+        "ecarts_sorties": {c: _helps(a["ecarts"][c].result(), trials) for c in ST.STOCK_EXITS}
         if market == "stock" and not go else None,
         "par_vwap": {k: a["vwap"][k].result() for k in VWAP_BUCKETS if k in a["vwap"]}
         if market == "stock" and not go else None,
         "tranches": _tranches(a["tranches"]) if market == "stock" and name != ST.REFERENCE and not go else None,
-        "robustesse": {c: a["sorties"][c].result() for c in ("r_glisse_x2", "r_glisse_x3", "r_retard", "r_manque")},
+        "robustesse": {c: a["sorties"][c].result() for c in robust(market)},
+        "mise_20e": a["sorties"]["r_20e"].result() if market == "stock" else None,  # n° 8, D2
         "robuste": {**rob, "moitie_1": halves[0], "moitie_2": halves[1], "tient": holds},
         "ordres_limites_retires": a["manques"],
         "temoin": {"esperance_r": a["temoin"].result()["esperance_r"], "ecart_r": ecart["esperance_r"],
@@ -266,7 +312,10 @@ def _item(market: str, name: str, a: dict, z_min: float) -> dict:
         "echantillon_faible": n < MIN_N,
     }
     ci = ref["ic95"]
-    item["candidate"] = bool(ci and ci[0] > 0 and (ecart["z"] or 0) >= z_min and n >= MIN_N and holds)
+    item["seuil_t"] = candidate_t(ecart["jours"], trials)  # n° 8, D4
+    item["candidate"] = bool(ci and ci[0] > 0 and passes(ecart["z"], item["seuil_t"]) and n >= MIN_N and holds)
+    m20 = item["mise_20e"]
+    item["rentable_20e"] = bool(m20 and m20["esperance_r"] is not None and m20["esperance_r"] > 0)
     return item
 
 
@@ -293,7 +342,7 @@ def _strategies(conn: sqlite3.Connection) -> dict:
            f"s.stop_avant_entree, s.risk_pct, s.confirmation, {', '.join('s.' + c for c in COLUMNS)}, r.label "
            "FROM strat_trades s LEFT JOIN regimes r ON r.market = s.market AND r.day = s.day")
     acc: dict = {}
-    z_min = candidate_z()
+    trials = len(ST.trials())
     derivs = DER.load(conn)
     pooled = {"ecarts": defaultdict(Mean), "par_vwap": defaultdict(Mean)}  # n° 6, toutes stratégies actions
     pooled_bands: dict = defaultdict(lambda: defaultdict(Mean))           # n° 6, stratégies v2 actions
@@ -313,7 +362,7 @@ def _strategies(conn: sqlite3.Connection) -> dict:
         ref = values[refc] - comm if values[refc] is not None else None
         spec = ST.STRATEGIES.get(name, {})
         if "go" in spec:
-            gos[(spec["go"], symbol, day)][spec["arm"]] = {"ref": ref, "status": status}
+            gos[(spec["go"], symbol, day)][spec["arm"]] = {"ref": ref, "status": status, "symbol": symbol}
         if market == "stock" and name in ("orb15", "killmode"):
             sessions[(symbol, day)][name] = {"trig": bool(trig), "ref": ref, "gap": gap, "atr": atr_pct,
                                              "ecart": values["r_net"] - wit
@@ -348,11 +397,11 @@ def _strategies(conn: sqlite3.Connection) -> dict:
         if len(key) == 3:
             continue
         market, name = key
-        item = _item(market, name, a, z_min)
+        item = _item(market, name, a, trials)
         if name in ST.POST_SEEN:  # n° 6 : jugée sur les jours qui suivent ceux déjà lus quand elle a été choisie
             sub = acc.get((market, name, "suivants"))
             item["jours_vus_jusqu_au"] = ST.SEEN_UNTIL[market]
-            item["jours_suivants"] = _item(market, name, sub, z_min) if sub else None
+            item["jours_suivants"] = _item(market, name, sub, trials) if sub else None
             item["candidate"] = bool(item["jours_suivants"] and item["jours_suivants"]["candidate"])
         out.setdefault(market, {})[name] = item
     for market, items in out.items():
@@ -365,14 +414,17 @@ def _strategies(conn: sqlite3.Connection) -> dict:
         out["_kill"] = {"tranches": _tranches(pooled_bands), **_kill_compare(sessions),
                         "couverture": coverage(conn)}
     if gos:
-        out["_n7"] = _go_compare(gos, z_min)
+        out["_n7"] = _go_compare(gos, trials, ARC.results_lookup(conn))
     return out
 
 
-def _go_compare(gos: dict, z_min: float) -> dict:
+def _go_compare(gos: dict, trials: int, passed=None) -> dict:
     """n° 7, par stop : statut de la confirmation de chaque GO, ce qu'a fait le brut dans chaque groupe (et le
     confirmé, quand son ordre est exécuté), et écart « confirmé ou rien » − brut par GO (0 pour un bras sans trade,
-    après commission IBKR), en grappes par jour."""
+    après commission IBKR), en grappes par jour.
+    n° 8 : pour chaque filtre FRSH (stop d'origine), écart « filtré ou rien » − « confirmé ou rien » et − brut, GO
+    par GO (sans les GO où le filtre n'a pas pu être jugé) ; et, mesure sans essai, brut et confirmé selon que des
+    résultats ont été publiés entre la veille et l'ouverture (`passed`(symbole, jour), archive du calendrier)."""
     out = {}
     for variant in [v for v in GO_VARIANTS_FR if any(k[0] == v for k in gos)]:
         groups = {st: {"go": 0, "executes": 0, "brut": Mean(), "confirme": Mean()} for st in GO_STATUS_FR}
@@ -393,8 +445,56 @@ def _go_compare(gos: dict, z_min: float) -> dict:
             "par_statut": {GO_STATUS_FR[st]: {"go": g["go"], "executes": g["executes"], "brut": g["brut"].result(),
                                               "confirme": g["confirme"].result() if st == "confirme" else None}
                            for st, g in groups.items() if g["go"]},
-            "ecart_par_go": _helps(diff.result(), z_min)}
+            "ecart_par_go": _helps(diff.result(), trials)}
+        filters = _filter_compare(gos, variant, trials)
+        if filters:
+            out[variant]["filtres"] = filters
+        if passed is not None:
+            out[variant]["par_resultats"] = _results_compare(gos, variant, passed)
     return out
+
+
+def _filter_compare(gos: dict, variant: str, trials: int) -> dict:
+    """n° 8 : effet de chaque filtre FRSH sur le bras confirmé, GO par GO."""
+    out = {}
+    for filt, name in ST.GO_FILTERS.items():
+        arm = ST.STRATEGIES[name]["arm"]
+        if ST.STRATEGIES[name]["go"] != variant:
+            continue
+        statuses: dict = defaultdict(int)
+        vs_conf, vs_brut = Mean(), Mean()
+        for (v, _, day), arms in gos.items():
+            f, c, b = arms.get(arm), arms.get("confirme"), arms.get("brut")
+            if v != variant or not f or not c or not b:
+                continue
+            statuses[f["status"]] += 1
+            if f["status"] == "indetermine":
+                continue
+            vs_conf.add(day, (f["ref"] or 0.0) - (c["ref"] or 0.0))
+            vs_brut.add(day, (f["ref"] or 0.0) - (b["ref"] or 0.0))
+        if statuses:
+            out[filt] = {"statuts": {**{GO_STATUS_FR[k]: statuses[k] for k in GO_STATUS_FR if statuses[k]},
+                                     **{GO_FILTER_STATUS_FR[k]: statuses[k] for k in GO_FILTER_STATUS_FR
+                                        if statuses[k]}},
+                         "ecart_au_confirme": _helps(vs_conf.result(), trials),
+                         "ecart_au_brut": _helps(vs_brut.result(), trials)}
+    return out
+
+
+def _results_compare(gos: dict, variant: str, passed) -> dict:
+    """n° 8, mesure sans essai (FRSH) : brut et confirmé (exécutés) selon les résultats publiés avant l'ouverture."""
+    groups: dict = {}
+    for (v, symbol, day), arms in gos.items():
+        b, c = arms.get("brut"), arms.get("confirme")
+        if v != variant or not b or not c:
+            continue
+        g = groups.setdefault(passed(symbol, day), {"go": 0, "brut": Mean(), "confirme": Mean()})
+        g["go"] += 1
+        g["brut"].add(day, b["ref"])
+        if c["ref"] is not None:
+            g["confirme"].add(day, c["ref"])
+    return {RESULTS_FR[k]: {"go": g["go"], "brut": g["brut"].result(), "confirme": g["confirme"].result()}
+            for k, g in groups.items()}
 
 
 def _diff(a: Mean, b: Mean) -> dict:
@@ -459,10 +559,12 @@ def coverage(conn: sqlite3.Connection) -> dict | None:
                          for _, _, label in U.PRICE_BUCKETS if label in totals}}
 
 
-def _helps(res: dict, z_min: float) -> dict:
-    """Écart apparié d'une sortie à la référence ; « aide » si positif avec z ≥ seuil et assez de trades."""
-    return res | {"aide": bool(res["esperance_r"] is not None and res["esperance_r"] > 0
-                               and (res["z"] or 0) >= z_min and res["n"] >= MIN_N)}
+def _helps(res: dict, trials: int) -> dict:
+    """Écart apparié à une référence ; « aide » si positif avec t ≥ seuil (candidate_t, sur ses jours) et assez
+    de trades."""
+    seuil = candidate_t(res["jours"], trials)
+    return res | {"seuil_t": seuil, "aide": bool(res["esperance_r"] is not None and res["esperance_r"] > 0
+                                                 and passes(res["z"], seuil) and res["n"] >= MIN_N)}
 
 
 def _bucket(gap: float | None) -> str:
@@ -500,16 +602,22 @@ def diagnostic_v1(conn: sqlite3.Connection) -> dict:
 
 
 def report(conn: sqlite3.Connection) -> dict:
-    out = {"declaration": {"numero": ST.DECLARATION, "le": ST.REGISTERED_ON, "essais": len(ST.trials()),
-                           "z_candidate": candidate_z(), "sorties": ST.EXITS, "sorties_actions": ST.STOCK_EXITS,
+    # import tardif : kill_complet importe ce module
+    from app.lab import kill_complet as KC
+
+    trials = len(ST.trials())
+    out = {"declaration": {"numero": ST.DECLARATION, "le": ST.REGISTERED_ON, "essais": trials,
+                           "z_candidate": candidate_z(), "seuil": "t à G − 1 jours (candidate_t), Bonferroni",
+                           "sorties": ST.EXITS, "sorties_actions": ST.STOCK_EXITS,
                            "robustesse": ST.STRESS, "doc": "docs/labo-strategies.md"},
            "scelle": SEAL.describe(), "strategies": {}, "sorties_gemini": None, "killmode": None,
-           "confirmation_go": None, "diagnostic_v1": {}}
+           "confirmation_go": None, "killmode_complet": None, "diagnostic_v1": {}}
     try:  # base pas encore migrée par le worker (lecture seule) : tableau vide plutôt qu'une erreur
         out["strategies"] = _strategies(conn)
         out["sorties_gemini"] = out["strategies"].pop("_n6", None)
         out["killmode"] = out["strategies"].pop("_kill", None)
         out["confirmation_go"] = out["strategies"].pop("_n7", None)
+        out["killmode_complet"] = KC.report(conn, trials)
         out["diagnostic_v1"] = diagnostic_v1(conn)
     except sqlite3.Error as exc:
         out["erreur"] = f"base pas encore prête : {exc}"
@@ -523,7 +631,10 @@ CACHE_KEY = "strategies"
 
 def signature(conn: sqlite3.Connection) -> list:  # worker seulement (base migrée)
     sig = list(conn.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM strat_trades").fetchone())
-    return sig + [conn.execute("SELECT COUNT(*) FROM progress WHERE job = ?", (U.COVERAGE_JOB,)).fetchone()[0]]
+    sig.append(conn.execute("SELECT COUNT(*) FROM progress WHERE job = ?", (U.COVERAGE_JOB,)).fetchone()[0])
+    # n° 8 : Killmode complet et calendrier des résultats archivé (GO selon les résultats publiés)
+    sig.append(conn.execute("SELECT COUNT(*) FROM kill_complet").fetchone()[0])
+    return sig + [conn.execute("SELECT COUNT(*) FROM earnings_days WHERE status = 'ok'").fetchone()[0]]
 
 
 def cached(conn: sqlite3.Connection) -> dict | None:
@@ -540,7 +651,7 @@ def _r(x) -> str:
 
 
 def _z(x) -> str:
-    return "n/d" if x is None else f"{x:g}".replace(".", ",")
+    return "n/d" if x is None or math.isinf(x) else f"{x:g}".replace(".", ",")
 
 
 def _after_seen(it: dict) -> str:
@@ -569,16 +680,29 @@ def _kill_text(kill: dict) -> str:
     return "Killmode décomposé (n° 6, mesure) : " + " · ".join(parts)
 
 
+def _t(res: dict) -> str:
+    """« t x, seuil y » d'un écart jugé par _helps (n° 8, D4)."""
+    return f"t {_z(res['z'])}, seuil {_z(res.get('seuil_t'))}"
+
+
 def _go_text(variant: str, res: dict) -> str:
-    """n° 7 : une ligne par stop, la confirmation contre le brut, GO par GO."""
+    """n° 7 : une ligne par stop, la confirmation contre le brut, GO par GO ; n° 8 : filtres FRSH et résultats."""
     diff = res["ecart_par_go"]
-    parts = [f"{res['go']} GO · confirmé ou rien − brut {_r(diff['esperance_r'])} R par GO (z {_z(diff['z'])}"
+    parts = [f"{res['go']} GO · confirmé ou rien − brut {_r(diff['esperance_r'])} R par GO ({_t(diff)}"
              + (", ✅ la confirmation aide" if diff.get("aide") else "") + ")"]
     for label, g in res["par_statut"].items():
         part = f"{label}s {g['go']} : brut {_r(g['brut']['esperance_r'])} R"
         if g["confirme"] is not None:
             part += f", confirmé {_r(g['confirme']['esperance_r'])} R sur {g['executes']} exécutés"
         parts.append(part)
+    for filt, f in (res.get("filtres") or {}).items():
+        c = f["ecart_au_confirme"]
+        parts.append(f"{GO_FILTERS_FR.get(filt, filt)} : filtré − confirmé {_r(c['esperance_r'])} R par GO ({_t(c)}"
+                     + (", ✅ le filtre aide" if c.get("aide") else "") + f"), "
+                     f"{f['statuts'].get(GO_FILTER_STATUS_FR['filtre'], 0)} refusés")
+    for label, g in (res.get("par_resultats") or {}).items():
+        parts.append(f"{label} {g['go']} : brut {_r(g['brut']['esperance_r'])} R, confirmé "
+                     f"{_r(g['confirme']['esperance_r'])} R")
     return f"Confirmation des GO (n° 7, {GO_VARIANTS_FR.get(variant, variant)}) : " + " · ".join(parts)
 
 
@@ -588,9 +712,9 @@ def text(rep: dict | None) -> str:
     decl = rep["declaration"]
     lines = [f"🧪 **Stratégies du labo v2** · {decl['essais']} essais déclarés (déclaration n° "
              f"{decl.get('numero', 1)}) · espérance nette en R par trade [IC 95 %], actions après commission "
-             f"IBKR estimée · ✅ = IC au-dessus de 0, témoin battu à z ≥ "
-             f"{str(decl.get('z_candidate', 2)).replace('.', ',')} et robuste (glissement ×2 et ×3, retard, "
-             f"deux moitiés des jours)"]
+             f"IBKR estimée · ✅ = IC au-dessus de 0, témoin battu à t ≥ seuil (loi de Student sur les jours, "
+             f"{str(decl.get('z_candidate', 2)).replace('.', ',')} sur beaucoup de jours, plus haut sur peu) et "
+             f"robuste (glissement ×2 et ×3, retard, stress de 3 c en actions, deux moitiés des jours)"]
     for market, items in (rep.get("strategies") or {}).items():
         lines.append(f"**{MARKET_FR.get(market, market)}**")
         for name, it in items.items():
@@ -600,11 +724,13 @@ def text(rep: dict | None) -> str:
             wit = it.get("temoin") or {}
             flag = "✅ " if it.get("candidate") else ""
             comm = f" · commission {_r(-(it.get('commission_ibkr_r') or 0))} R" if ibkr else ""
+            m20 = it.get("mise_20e") or {}
+            stake = f" · à 20 € {_r(m20.get('esperance_r'))} R" if m20.get("n") else ""
             lines.append(f"{flag}{it['nom']} : {_r(it['esperance_ibkr_r'] if ibkr else it['esperance_r'])} R{ci_txt}"
                          f" · {it['declenches']} trades, "
                          f"{it['jours']} j · réussite {round(100 * (it['reussite'] or 0))} % · frais "
-                         f"{_r(-(it.get('frais_r') or 0)) if it.get('frais_r') is not None else 'n/d'} R{comm} · "
-                         f"vs témoin {_r(wit.get('ecart_r'))} R (z {wit.get('z') if wit.get('z') is not None else 'n/d'})"
+                         f"{_r(-(it.get('frais_r') or 0)) if it.get('frais_r') is not None else 'n/d'} R{comm}{stake} · "
+                         f"vs témoin {_r(wit.get('ecart_r'))} R (t {_z(wit.get('z'))}, seuil {_z(it.get('seuil_t'))})"
                          + (" · échantillon faible" if it.get("echantillon_faible") else "") + _after_seen(it))
     n6 = rep.get("sorties_gemini")
     if n6:
@@ -626,6 +752,10 @@ def text(rep: dict | None) -> str:
         lines.append(_kill_text(kill))
     for variant, res in (rep.get("confirmation_go") or {}).items():
         lines.append(_go_text(variant, res))
+    if rep.get("killmode_complet"):
+        from app.lab import kill_complet as KC  # import tardif
+
+        lines.append(KC.text(rep["killmode_complet"]))
     diag = (rep.get("diagnostic_v1") or {}).get("stock")
     if diag:
         gaps = " · ".join(f"{k} {_r(v['esperance_r'])} ({v['n']})" for k, v in diag["par_gap"].items())
