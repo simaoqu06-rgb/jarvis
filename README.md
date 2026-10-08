@@ -332,6 +332,10 @@ Liste, seuils et sorties sont déclarés d'avance : [docs/labo-strategies.md](do
   tirages) : une stratégie qui ne bat pas son témoin n'a pas d'avantage d'entrée.
 - Classement à l'espérance nette en R (intervalle en grappes par jour), jamais au taux de réussite ; en
   actions, après la commission IBKR Fixe estimée (0,005 $ par action), avec les frais par tranche.
+  « Candidate » exige aussi de tenir sous les tests de robustesse et sur chaque moitié des jours (n° 6).
+- Killmode décomposé (n° 6, sans essai) : tranches de gap, d'ATR, de volume des 15 premières minutes et de
+  stop touché avant l'entrée, trois comparaisons avec `orb15`, part des gappers présents dans l'univers.
+  Killmode et la n° 4 sont jugées sur les jours qui suivent ceux déjà lus quand elles ont été choisies.
 - Diagnostic de v1 : espérance par gap d'ouverture, mode d'entrée, raison de sortie, brut contre net.
 - **Bloc scellé** : le rejeu du 6 avril au 5 octobre 2026 est calculé mais rangé à part, invisible des
   statistiques, du brief, du grade et du validateur (`app/lab/seal.py`). Il sert une seule fois.

@@ -21,7 +21,11 @@ LIMITATIONS = [
     "Actions : seules les valeurs retirées de la cote encore connues d'Alpaca sont dans l'univers.",
     "Catalyseur (actus, résultats) non rejoué : note composite sans sa part catalyseur.",
     "Univers actions approché (volume, variation et volume relatif de la veille) : le screener Alpaca "
-    "du direct ne se rejoue pas.",
+    "du direct ne se rejoue pas. Killmode n'y voit qu'une partie des actions en gap ≥ 4 % : la part est "
+    "comptée dans le tableau des stratégies (couverture).",
+    "Actions : bougies ajustées des splits connus aujourd'hui ; avant un regroupement d'actions, le prix "
+    "paraît plus élevé, d'où un glissement, une commission en R et un pas de cotation sous-estimés sur les "
+    "petites valeurs (l'inverse avant une division).",
 ]
 
 

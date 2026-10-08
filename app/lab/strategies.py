@@ -85,6 +85,10 @@ sur la gestion de référence (r_net), une règle de plus, une variable à la fo
 Le filtre d'entrée VWAP proposé par GPT (pas d'entrée avant 10 h 30, puis seulement au-dessus du VWAP) n'est
 pas un essai : la position de la décision par rapport au VWAP est gardée (sur_vwap) et le tableau donne
 l'espérance par tranche horaire et VWAP, sans rien filtrer.
+La n° 6 rend aussi Killmode mesurable pièce par pièce, sans essai de plus (fil « JARVIS Killmode ») : chaque
+ligne actions garde atr_pct, vol15_adv (stratégies v2) et stop_avant_entree (kill_context, stop_before_entry) ;
+le témoin de killmode tire ses entrées entre 9 h 45 et 11 h, pendant la vie de son ordre ; killmode et la n° 4
+(POST_SEEN) ne sont jugées que sur les jours après SEEN_UNTIL, déjà lus quand elles ont été choisies.
 Objectifs : 1, 2 et 3 R. Fenêtre des signaux : actions de 9 h 45 à 15 h New York (soldé à la
 clôture) ; crypto de 0 h à 20 h UTC (soldé 24 h après le signal).
 v1 est rejouée avec les mêmes sorties et tests, sur ses propres objectifs : c'est la référence.
@@ -97,6 +101,9 @@ Pour chaque déclenchement, une seule ligne (db.STRAT_COLUMNS) avec :
 - témoin aléatoire : même jour, même fenêtre, même stop en %, mêmes objectifs en R, entrée au marché
   à des bougies tirées au hasard (graine fixe, moyenne de WITNESS_DRAWS tirages). Une stratégie qui ne
   bat pas son témoin n'a pas d'avantage d'entrée.
+- n° 6, actions : atr_pct (ATR 14 jours de la veille en %), vol15_adv (volume des 15 premières minutes sur
+  le volume journalier moyen, None pour v1 décidée à 9 h 10) et stop_avant_entree (1 si le stop est touché
+  entre la décision et l'exécution d'un ordre stop, qui n'est pas annulé). Rien ne filtre sur ces colonnes.
 """
 import hashlib
 import random
@@ -191,6 +198,11 @@ KILL_RANGE_MIN = 15         # range d'ouverture
 KILL_UNTIL = time(11, 0)    # ordre stop d'achat valable jusqu'à 11 h New York (17 h Paris)
 VWAP_EXIT_FROM = time(10, 30)  # n° 6 : bougies closes à partir de 10 h 30 New York
 TIME_STOP_AT = time(14, 30)    # n° 6
+KILL_ADV_DAYS = 20             # n° 6 : volume journalier moyen des 20 séances d'avant (vol15_adv)
+# n° 6, mesure de Killmode : dernier jour rejoué déjà lu quand Killmode et la n° 4 ont été choisis ; ces
+# stratégies ne sont jugées que sur les jours suivants (strat_stats, « jours_suivants »).
+SEEN_UNTIL = {"stock": "2025-01-27", "crypto": "2025-03-03"}
+POST_SEEN = ("killmode", "cassure_zone_retest_15m", "cassure_zone_retest_1h")
 
 
 def progress_job(market: str) -> str:
@@ -296,6 +308,7 @@ class Day:
         self._swing_highs: list[tuple[int, float]] | None = None
         self._frames: dict[int, "Day"] = {}
         self.index_down: list[int] | None = None  # n° 6 : clôtures des avalements baissiers de SPY (stock_day)
+        self._kill_ctx: dict | None = None
 
     def frame(self, tf: int | None) -> "Day":
         """Le même jour lu sur des bougies de `tf` minutes (déclaration n° 4) ; lui-même en 5 min."""
@@ -540,13 +553,22 @@ def rebond_confirme(d: Day) -> list[dict]:
 
 def kill_context(d: Day) -> dict:
     """Ce que Killmode connaît à l'ouverture : gap (ouverture de la séance contre la clôture de la veille) et
-    ATR 14 jours de la veille en % ; None quand la donnée manque."""
-    gap = atr_pct = None
-    if d.prev_close and d.d1 > d.d0 and d.t[d.d0] == d.start_ts:
+    ATR 14 jours de la veille en % ; à 9 h 45, vol15_adv (n° 6) : volume des 15 premières minutes rapporté
+    au volume journalier moyen des 20 séances d'avant. None quand la donnée manque. Calculé une fois par Day."""
+    if d._kill_ctx is not None:
+        return d._kill_ctx
+    gap = atr_pct = vol15 = None
+    opened = d.d1 > d.d0 and d.t[d.d0] == d.start_ts
+    if d.prev_close and opened:
         gap = (d.o[d.d0] / d.prev_close - 1) * 100
     if len(d.daily) > ATR_LEN and d.daily[-1]["c"] > 0:
         atr_pct = atr(d.daily)[-1] / d.daily[-1]["c"] * 100
-    return {"gap_pct": gap, "atr_pct": atr_pct}
+    n = KILL_RANGE_MIN // CO.BASE_TF
+    adv = sum(b.get("v") or 0 for b in d.daily[-KILL_ADV_DAYS:]) / KILL_ADV_DAYS
+    if opened and d.d1 - d.d0 >= n and len(d.daily) >= KILL_ADV_DAYS and adv > 0:
+        vol15 = sum(b.get("v") or 0 for b in d.bars[d.d0:d.d0 + n]) / adv
+    d._kill_ctx = {"gap_pct": gap, "atr_pct": atr_pct, "vol15_adv": vol15}
+    return d._kill_ctx
 
 
 def _pct_fr(x: float) -> str:
@@ -780,12 +802,30 @@ def above_vwap(d: Day, decided_at: int) -> int | None:
     return int(d.c[k] > d.vwap[k])
 
 
+def stop_before_entry(d: Day, plan: dict, decided_at: int, m: dict) -> int | None:
+    """n° 6 : 1 si le stop du plan est touché entre la décision et la bougie d'exécution (exclue : l'ordre des
+    prix y est inconnu) d'un ordre déclenché. L'ordre n'est pas annulé, au labo comme en direct : la colonne
+    compte les « stop balayé puis cassure ». None sans exécution."""
+    if not m.get("triggered") or m.get("filled_at") is None:
+        return None
+    k0, f = bisect_left(d.t, decided_at), bisect_left(d.t, m["filled_at"])
+    return int(any(low <= plan["stop"] for low in d.l[k0:f]))
+
+
 def _row(d: Day, symbol: str, strategy: str, slot: int, plan: dict, decided_at: int, m: dict, wit: dict,
          gap: float | None, rank) -> dict:
     entry, stop = plan["entry"], plan["stop"]
+    ctx = kill_context(d) if d.market == "stock" else {}
+    v2 = strategy != REFERENCE  # v1 décide à 9 h 10, avant le volume des 15 premières minutes
     return {"symbol": symbol, "strategy": strategy, "slot": slot, "signal_at": decided_at,
             "entry": round(entry, 8), "stop": round(stop, 8), "risk_pct": round((entry - stop) / entry * 100, 4),
-            **m, **wit, "gap_open_pct": gap, "rank": rank, "sur_vwap": above_vwap(d, decided_at)}
+            **m, **wit, "gap_open_pct": gap, "rank": rank, "sur_vwap": above_vwap(d, decided_at),
+            "atr_pct": _round(ctx.get("atr_pct")), "vol15_adv": _round(ctx.get("vol15_adv")) if v2 else None,
+            "stop_avant_entree": stop_before_entry(d, plan, decided_at, m) if v2 else None}
+
+
+def _round(x: float | None) -> float | None:
+    return None if x is None else round(x, 3)
 
 
 def strategy_rows(d: Day, symbol: str, rank=None, gap: float | None = None, names=None) -> list[dict]:
@@ -819,8 +859,10 @@ def strategy_rows(d: Day, symbol: str, rank=None, gap: float | None = None, name
         emp = _plan(cand["entry"], cand["stop"], emperor_targets(sd, cand["entry"], cand["stop"]))
         m = measure(d, plan, cand["decided_at"], cand["entry_until"], cost, "stop", sd.c[cand["i"]], res, emp)
         risk_pct = (plan["entry"] - plan["stop"]) / plan["entry"] * 100
+        # n° 6 : le témoin de Killmode tire ses entrées pendant la vie de son ordre (9 h 45-11 h), pas l'après-midi
+        window = (d.first, bisect_left(d.t, cand["entry_until"]) if name == "killmode" else d.last)
         wit = witness(d, (d.market, symbol, d.day, name), risk_pct, list(TARGETS_R),
-                      lambda p: SIM.costs(d.market, p, rank), (d.first, d.last)) if m["triggered"] else NO_WITNESS
+                      lambda p: SIM.costs(d.market, p, rank), window) if m["triggered"] else NO_WITNESS
         rows.append(_row(d, symbol, name, 0, plan, cand["decided_at"], m, wit, gap, rank))
     return rows
 
