@@ -341,6 +341,11 @@ Liste, seuils et sorties sont déclarés d'avance : [docs/labo-strategies.md](do
   à stop fixe ; avec le stop d'origine et avec le plancher du direct (plan refait par le code du direct,
   sur les jours rejoués depuis la n° 7). Écart « confirmé ou rien » − brut GO par GO, et brut par statut.
 - Diagnostic de v1 : espérance par gap d'ouverture, mode d'entrée, raison de sortie, brut contre net.
+- Archive des actus des gappers (préparation de la n° 8, `app/lab/archive.py`) : Finnhub gratuit ne garde
+  qu'un an d'actus. Pour chaque séance non scellée encore dans cette profondeur, la plus ancienne d'abord, les
+  actions de toute la base ouvertes en gap ≥ 3,5 % avec un ATR ≥ 4 %, leurs actus publiées avant 9 h 45 New York
+  (7 jours, comme le direct), le calendrier des résultats de J − 10 à J + 30 et le profil de la société. Rien
+  n'est lu avant que la déclaration n° 8 écrive le critère ; `!labo` n'en montre que l'avancement.
 - **Bloc scellé** : le rejeu du 6 avril au 5 octobre 2026 est calculé mais rangé à part, invisible des
   statistiques, du brief, du grade et du validateur (`app/lab/seal.py`). Il sert une seule fois.
 - Les jours traités avant le labo v2 sont rattrapés hors séance (bougies relues à la source, rien stocké).
