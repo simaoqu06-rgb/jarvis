@@ -1,5 +1,6 @@
 """JARVIS Killmode : règle de prix du labo (déclaration n° 5), piliers, interrupteur, journal et bilan."""
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -71,6 +72,13 @@ def test_killmode_au_labo():
 def paths(tmp_path, monkeypatch):
     monkeypatch.setattr(K, "STATE_PATH", str(tmp_path / "killmode.json"))
     monkeypatch.setattr(K, "CALLS_PATH", str(tmp_path / "calls.json"))
+    monkeypatch.setattr(K, "SCANS_PATH", str(tmp_path / "scans.json"))
+    monkeypatch.setattr(K.T, "TRADES_PATH", str(tmp_path / "trades.json"))
+
+    async def eurusd():
+        return 1.15
+
+    monkeypatch.setattr(K, "eurusd", eurusd)
     return tmp_path
 
 
@@ -148,7 +156,7 @@ async def test_analyse_setup_complet(paths, monkeypatch):
     assert plan["declenche_a"] == OPEN + 15 * 60
     txt = K.text(a)
     assert "🔪 **KILL" in txt and "Ordre stop d'achat 106,51" in txt and "stop 104,49" in txt
-    assert "Aerospace" in txt and "Acme wins" in txt and "!prends ACME 106.51 stop 104.49" in txt
+    assert "Aerospace" in txt and "Acme wins" in txt and "!prends ACME <ton prix d'exécution> stop 104.49 kill" in txt
     assert K.record(a, NOW) and K.record(a, NOW) is None  # une fois par séance
 
 
@@ -222,6 +230,7 @@ async def test_temoin_catalyseur(paths, monkeypatch):
     assert a["verdict"] == "non" and K.group(a) == "temoin_catalyseur"
     call = K.record(a, NOW)
     assert call["groupe"] == "temoin_catalyseur" and "aucune actu positive" in call["catalyseur"][0]
+    assert call["codes"] == ["pas_de_positive"] and K.clean(call)
     assert K.record(a, NOW) is None  # une fois par séance et par groupe
     other = K.record(a | {"symbol": "BETA"}, NOW)  # un autre témoin, sans KILL ce jour-là
     sources(monkeypatch, catalyst=cat(news=[]), price=108.5)  # graphique raté (déjà parti) : ni l'un ni l'autre
@@ -236,16 +245,18 @@ async def test_temoin_catalyseur(paths, monkeypatch):
     monkeypatch.setattr(K, "lab_item", lambda: None)
     assert await K.settle_due(datetime.fromtimestamp(call["close_ts"] + 3600, timezone.utc)) == 2
     txt = K.bilan_text(K.calls())
-    assert "Témoin catalyseur (tout réuni sauf le catalyseur) : 2 déclenchés" in txt
-    assert "ACME (témoin)" in txt and "BETA (témoin)" in txt and "rien n'est jugé avant 30 KILL" in txt
-    # L'actu arrive : ACME devient KILL dans la même séance. Le KILL l'emporte, ACME n'est plus un témoin.
+    assert "Témoin propre (ni actu positive ni veto) : 2 soldés, 2 déclenchés (100 %)" in txt
+    assert "ACME (témoin propre)" in txt and "BETA (témoin propre)" in txt and "rien n'est lu avant 30 KILL" in txt
+    # L'actu arrive : ACME devient KILL dans la même séance. Le témoin reste un témoin (groupe figé à l'écriture,
+    # jamais retiré sur une info postérieure) ; la comparaison prend le premier appel de chaque action et séance.
     sources(monkeypatch)
     kill = K.record(await K.analyze("ACME", NOW), NOW)
     assert kill["groupe"] == "kill" and other["symbol"] == "BETA"
-    assert K.stats(K.calls(), "temoin_catalyseur")["appels"] == 1
+    assert K.stats(K.calls(), "temoin_catalyseur")["appels"] == 2
+    assert [c["groupe"] for c in K.first_calls(K.calls())] == ["temoin_catalyseur", "temoin_catalyseur"]
     assert K.record(a, NOW) is None  # ni témoin après un KILL de la même séance
     txt = K.bilan_text(K.calls())
-    assert "1 KILL proposé, 1 témoin catalyseur" in txt and "ACME (témoin)" not in txt
+    assert "1 KILL proposé, 2 témoins catalyseur dont 2 propres" in txt and "ACME (témoin propre)" in txt
 
 
 async def test_scan_note_les_temoins_ecartes(paths, monkeypatch):
@@ -263,45 +274,94 @@ async def test_scan_note_les_temoins_ecartes(paths, monkeypatch):
 
 
 def book(rs, groupe="kill"):
+    """Appels de la version en vigueur, soldés : r = résultat brut (une seule sortie, prix = entrée + r)."""
     return [{"symbol": f"S{i}", "day": f"2026-09-{1 + i % 25:02d}", "at": i, "groupe": groupe, "entry": 10.0,
-             "stop": 9.0,
-             "resultat": {"declenche": True, "r_ibkr": r, "tp": [r > 0, False, False], "sortie": "x"}}
+             "stop": 9.0, "targets": [11.0, 12.0, 13.0], "regle": K.RULE, "seuils": K.seuils(),
+             "codes": [] if groupe == "kill" else ["pas_de_positive"],
+             "resultat": {"declenche": True, "r_ibkr": r, "tp": [r > 0, False, False], "sortie": "x",
+                          "remplissage": 10.0, "sorties": [{"prix": 10.0 + r, "part": 1.0,
+                                                            "raison": "tp3" if r > 0 else "stop"}],
+                          "eurusd": 1.15, "plan_ibkr": "fixe"}}
             for i, r in enumerate(rs)]
 
 
-def test_regle_de_lecture():
+@pytest.fixture
+def gross(monkeypatch):
+    """La règle de lecture jugée sur le R brut du helper `book` (les frais réels ont leur propre test)."""
+    monkeypatch.setitem(K.KEYS, "r_20e", lambda c, res: res["r_ibkr"])
+
+
+def test_regle_de_lecture(gross):
     few = K.reading(book([1.0] * 29), None)
-    assert "rien n'est jugé avant 30" in few[0]
+    assert "rien n'est lu avant 30" in few[0] and "indicatif" in few[0]
     bad = K.reading(book([-1.0, -0.8] * 15), None)
     assert "JARVIS recommande d'éteindre Killmode ; à toi de décider" in bad[0] and "30 premiers KILL" in bad[0]
+    assert "Lecture finale à 100 KILL" in bad[0]
+    # Au 30e, jamais de verdict positif : un audit.
     good = K.reading(book([1.2, 0.8] * 15), None)
-    assert "on continue" in good[0] and "positive" in good[0]
+    assert "pas d'alerte" in good[0] and "audit, pas une validation" in good[0] and "positive" not in good[0]
     unsure = K.reading(book([1.0, -1.0] * 15), None)
-    assert "prochaine lecture à 100 KILL" in unsure[0]
-    # Deux regards fixes seulement : des pertes après le 30e KILL ne déclenchent rien avant le 100e.
-    later = K.reading(book([1.0, -1.0] * 15 + [-1.0] * 30), None)
-    assert "prochaine lecture à 100 KILL (60 pour l'instant)" in later[0]
-    frozen = K.reading(book([1.2, 0.8] * 15 + [-1.0] * 30), None)
-    assert "positive" in frozen[0] and "30 premiers KILL" in frozen[0]
-    done = K.reading(book([1.0, -1.0] * 50), None)
-    assert "ne voit pas d'avantage" in done[0] and "100 premiers KILL" in done[0]
+    assert "pas d'alerte" in unsure[0]
+    # Deux regards fixes : des pertes après le 30e KILL ne changent pas la lecture du 30e avant le 100e.
+    later = K.reading(book([1.0, -1.0] * 15 + [-1.0, 1.0, -1.0] * 10), None)
+    assert "pas d'alerte" in later[0] and "(60 pour l'instant)" in later[0]
+    done = K.reading(book([1.0, -1.0, 0.2] * 33 + [1.0]), None)
+    assert "JARVIS ne voit pas d'avantage démontré" in done[0] and "100 premiers KILL" in done[0]
+    assert "seul un écart d'au moins ≈" in done[0]
+    win = K.reading(book([1.2, 0.8, 1.1] * 33 + [1.0]), None)
+    assert "avantage démontré" in win[0] and "semaine par semaine" in win[0]
+    one_week = [c | {"day": f"2026-09-0{1 + i % 4}"} for i, c in enumerate(book([1.2, 0.8, 1.1] * 33 + [1.0]))]
+    assert "pas une validation : concentré sur 1 semaine" in K.reading(one_week, None)[0]
+    # L'alerte du 30e écartée : la lecture finale reste faite au 100e, et le pari se mesure sur les KILL 31 à 100.
+    bet = K.reading(book([-1.0, -0.8] * 15 + [1.0, -0.5] * 35), None)
+    assert "Lecture finale" in bet[0] and "Le pari contre l'avis de JARVIS (KILL 31 à 100" in bet[1]
     lab = {"esperance_ibkr_r": 0.15, "ic95_ibkr": [0.05, 0.25]}
     far = K.reading(book([-1.0, -0.8] * 15), lab)
-    assert len(far) == 2 and "Écart labo/direct" in far[1]
+    assert "Écart labo/direct" in far[-1]
     noisy = K.reading(book([1.0, -1.2] * 15), {"esperance_ibkr_r": -0.02, "ic95_ibkr": [-0.06, 0.02]})
-    assert len(noisy) == 1  # −0,10 R [−0,43 ; +0,23] contre le labo : dans le bruit, pas d'alerte
+    assert len(noisy) == 1  # −0,10 R contre le labo : dans le bruit, pas d'alerte
     assert K.stats(book([1.0] * 3, "temoin_catalyseur"))["declenches"] == 0  # les groupes ne se mélangent pas
 
 
-def test_bilan_par_regle(paths, monkeypatch):
+def test_borne_de_degat(gross):
+    assert not any("Borne de dégât" in x for x in K.reading(book([-1.0, 0.5] * 5), None))  # −0,25 R : rien
+    crash = K.reading(book([-1.0, -1.1, -0.9] * 4), None)  # un bug ou une catastrophe : vu avant le 30e
+    assert "Borne de dégât franchie" in crash[-1] and "à toi de décider" in crash[-1]
+    assert K.harm(book([-1.0] * 9)) is None  # pas avant 10 KILL déclenchés
+
+
+def test_lot_fige_et_insoldable(gross):
+    b = book([1.0] * 31)
+    b[0]["resultat"] = None  # le plus ancien attend son solde : le lot des 30 n'est pas figé
+    assert K.judged(b, 30) == []
+    b[0]["insoldable"] = True  # sans bougies 7 jours après : hors du lot, compté à part
+    assert len(K.judged(b, 30)) == 30 and K.stats(b)["insoldables"] == 1
+
+
+def test_quantile_de_student():
+    assert K.t_quantile(0.975, 1) == 12.706 and K.t_quantile(0.9995, 8) == 5.041
+    assert K.t_quantile(0.975, 9) == pytest.approx(2.262, abs=0.005)
+    assert K.t_quantile(0.9995, 9) == pytest.approx(4.781, abs=0.01)
+    assert K.t_quantile(0.975, 24) == pytest.approx(2.064, abs=0.005)
+    assert K.t_quantile(0.975, 10_000) == pytest.approx(1.96, abs=0.001)
+
+
+def test_bilan_par_regle(paths, monkeypatch, gross):
     monkeypatch.setattr(K, "lab_item", lambda: None)
-    assert K.LEGACY_VERSION == K._current()  # les appels de la PR #32 sont de la règle en vigueur aujourd'hui
-    old = [c | {"regle": 5, "seuils": K.seuils() | {"gap": 3.0}} for c in book([1.0])]
+    assert K.LEGACY_VERSION != K._current()  # les appels de la PR #32 sont d'une version précédente du direct
+    old = [c | {"seuils": c["seuils"] | {"gap": 3.0}} for c in book([1.0])]
     txt = K.bilan_text(old + book([-1.0]))
     assert "Ancienne règle n° 5 (gap ≥ +3 %, ATR ≥ 4 %, range 15 min, ordre jusqu'à 11 h New York" in txt
-    assert "🔪 KILL · règle en vigueur : 1 déclenché · espérance −1,00 R" in txt.replace("-1,00", "−1,00")
+    assert "🔪 KILL : 1 soldé, 1 déclenché (100 %), 0 expiré · espérance −1,00 R" in txt.replace("-1,00", "−1,00")
+    olds = book([-1.0] * 30)
     monkeypatch.setattr(K, "RULE", 7)  # une déclaration change la règle : les anciens appels n'en sont pas
-    assert "rien n'est jugé avant 30 KILL déclenchés et soldés (0 pour l'instant)" in K.bilan_text(book([-1.0] * 30))
+    assert "rien n'est lu avant 30 KILL déclenchés et soldés (0 pour l'instant)" in K.bilan_text(olds)
+
+
+def test_empreinte_du_catalyseur(monkeypatch):
+    assert K.seuils()["catalyseur_code"] == K.CATALYST_CODE == K.catalyst_fingerprint()
+    monkeypatch.setattr(K.C, "POSITIVE", K.C.POSITIVE + [r"\bmoon"])
+    assert K.catalyst_fingerprint() != K.CATALYST_CODE  # un mot de plus dans catalyst.py : une nouvelle version
 
 
 def test_ligne_du_labo(monkeypatch):
@@ -333,7 +393,8 @@ async def test_affichage_honnete(paths, monkeypatch):
                    "score": {"composite": 6.5, "decision": "GO"}, "resistances": []}
     txt = K.text(a, "🧪 Labo, ligne")
     assert "note v1 6,5/10 GO, non prédictive au labo" in txt and "🧪 Labo, ligne" in txt
-    assert "Frais estimés ≈" in txt and "minimum IBKR par ordre n'est pas compté" in txt
+    assert "Un trade stoppé coûte ≈" in txt and "minimum par ordre compris" in txt
+    assert "3 c de glissement par côté (hypothèse de Gemini, non mesurée)" in txt
     a["verdict"] = "non"
     assert "🧪 Labo, ligne" not in K.text(a, "🧪 Labo, ligne")
 
@@ -442,3 +503,167 @@ def test_historique_court_seulement_s_il_l_est():
          "piliers": {k: {"ok": False, "raisons": ["x"]} for k, _ in K.PILLARS}, "graphique": {"status": "non"}}
     assert "historique court" not in K.text(a)
     assert "historique court (20 séances)" in K.text(a | {"societe": co | {"seances": 20}})
+
+
+# --- Avis de GPT et Gemini (8 octobre) : défauts du direct, solde, frais réels ---------------------------
+
+async def test_trade_du_labo_deja_fini(paths, monkeypatch):
+    """Cassure à 9 h 50 puis stop touché à 9 h 55 : le trade du labo est fini, pas de seconde entrée."""
+    sources(monkeypatch)
+    stopped = RANGE + [(106.3, 106.6, 106.2, 106.5), (106.5, 106.6, 104.0, 104.2), (104.2, 104.6, 104.1, 104.5)]
+
+    async def candles(symbol, market, interval, source=None, max_age=None, outputsize=None):
+        return CO.regular_hours(hist()) + bars_from(OPEN, stopped)
+
+    monkeypatch.setattr(K.T, "candles", candles)
+    a = await K.analyze("ACME", NOW)
+    assert a["graphique"]["status"] == "fini" and a["verdict"] == "non"
+    assert "stop touché" in a["graphique"]["raisons"][0] and K.record(a, NOW) is None
+
+
+async def test_bougies_closes_et_cache(paths, monkeypatch):
+    sources(monkeypatch)
+    seen = {}
+
+    async def candles(symbol, market, interval, source=None, max_age=None, outputsize=None):
+        seen["max_age"] = max_age
+        return CO.regular_hours(hist()) + bars_from(OPEN, RANGE + RUN)
+
+    monkeypatch.setattr(K.T, "candles", candles)
+    await K.analyze("ACME", NOW + timedelta(seconds=90))
+    assert seen["max_age"] == 90  # le cache ne sert que s'il a été lu pendant la bougie en cours
+    # Alpaca (16 min de retard) : la bougie qui chevauche la fin des données n'est pas close.
+    bars5 = CO.regular_hours(hist()) + bars_from(OPEN, RANGE + RUN)
+    d = K.live_day(bars5, daily(), NOW, NOW - timedelta(minutes=16))
+    assert d.t[-1] + 300 <= (NOW - timedelta(minutes=16)).timestamp()
+    assert len(K.live_day(bars5, daily(), NOW).t) > len(d.t)
+
+
+def test_actus_comptees_et_motif():
+    assert not K.catalyst_pillar(cat(news=[news(hours=-1)]), NOW)[0]  # publiée après l'analyse : ignorée
+    assert K.catalyst_codes(cat(), NOW) == []
+    assert K.catalyst_codes(cat(news=[]), NOW) == ["pas_de_positive"]
+    assert K.catalyst_codes(cat(dilution=True, hours_to_earnings=5), NOW) == ["dilution", "resultats_24h"]
+    assert K.catalyst_codes(cat(available=False), NOW) == ["finnhub_muet"]
+    assert K.motif("Acme shares jump 25% premarket") == "mouvement"
+    assert K.motif("Acme wins $2B defense contract") == "fond"
+    assert K.call_motif(cat(news=[news(title="Acme stock soars")]), NOW) == "mouvement"
+    assert K.call_motif(cat(news=[news(title="Acme stock soars"), news()]), NOW) == "fond"
+
+
+async def test_journal_garde_le_contexte(paths, monkeypatch):
+    sources(monkeypatch)
+    call = K.record(await K.analyze("ACME", NOW), NOW)
+    assert call["decided_at"] == OPEN + 15 * 60 and call["declenche_a"] == OPEN + 15 * 60
+    assert call["prev_close"] == 100.0 and call["adv20"] == 1e6 and call["gap_type"] == "d'ouverture"
+    assert call["secteur"] == "Aerospace & Defense" and call["motif"] == "fond" and call["codes"] == []
+    assert call["actus"][0]["titre"].startswith("Acme wins") and call["actu"].startswith("Acme wins")
+
+
+def _call(at, price=106.7):
+    return {"symbol": "ACME", "day": DAY.isoformat(), "at": at, "price": price, "entry": 106.51, "stop": 104.49,
+            "targets": [108.53, 110.55, 112.57], "until": OPEN + 90 * 60, "close_ts": CO.session_ts(DAY)[1],
+            "prev_close": 100.0, "adv20": 1e6}
+
+
+def test_entree_minute_par_minute():
+    """Appel à 10 h 02, prix déjà au-dessus de l'entrée : rempli à l'ouverture de la minute suivante, jamais sous
+    l'entrée même si la bougie de 5 min suivante ouvre plus bas."""
+    at = OPEN + 32 * 60
+    minutes = [{"t": at + 60 * i, "o": 107.0, "h": 107.1, "l": 106.9, "c": 107.0, "v": 1e3} for i in range(3)]
+    bars = bars_from(OPEN, RANGE + RUN[:3] + [(106.0, 106.1, 104.0, 104.1)] + [(104.1, 104.2, 104.0, 104.1)] * 70)
+    res = K.settle(_call(at), bars, minutes)
+    assert res["remplissage"] == 107.0 and res["sortie"] == "stop" and res["r_ibkr"] < -1
+    assert res["entree_r"] == pytest.approx((107.0 - 106.51) / 2.02, abs=1e-3) and res["minutes"]
+    # La minute ouvre sous l'entrée et n'y remonte pas : l'ordre stop attend, rien n'est acheté sous l'entrée.
+    low = [b | {"o": 106.3, "h": 106.4, "c": 106.3} for b in minutes]
+    res = K.settle(_call(at, price=106.4), bars, low)
+    assert not res["declenche"] and res["remplissage"] is None
+
+
+def test_concordance_sip():
+    bars = bars_from(OPEN, RANGE + RUN)
+    v = K.sip_view(_call(OPEN + 30 * 60), bars)
+    assert v["signal"] and v["meme_ordre"] and v["vol15_adv"] == pytest.approx(3000 / 1e6)
+    shifted = bars_from(OPEN, [(r[0], r[1] + 0.3, r[2], r[3]) for r in RANGE] + RUN)
+    assert not K.sip_view(_call(OPEN + 30 * 60), shifted)["meme_ordre"]  # le SIP a vu un plus haut plus haut
+    assert K.sip_view(_call(OPEN + 30 * 60) | {"prev_close": None}, bars) is None
+
+
+async def test_solde_non_ajuste_et_insoldable(paths, monkeypatch):
+    sources(monkeypatch)
+    call = K.record(await K.analyze("ACME", NOW), NOW)
+    asked = []
+
+    async def bars_range(symbols, interval, start, end, **kw):
+        asked.append(kw.get("adjustment"))
+        return {"ACME": []}
+
+    monkeypatch.setattr(K.alpaca, "bars_range", bars_range)
+    close = datetime.fromtimestamp(call["close_ts"], timezone.utc)
+    assert await K.settle_due(close + timedelta(hours=1)) == 0 and asked == ["raw"]  # jamais ajusté des splits
+    assert await K.settle_due(close + timedelta(days=8)) == 1 and K.calls()[0]["insoldable"]
+    assert K.stats(K.calls())["insoldables"] == 1 and await K.settle_due(close + timedelta(days=9)) == 0
+
+
+def test_frais_reels_a_20_euros():
+    c = {"entry": 10.0, "stop": 9.0, "targets": [11.0, 12.0, 13.0]}
+    stopped = {"declenche": True, "remplissage": 10.0, "sorties": [{"prix": 9.0, "part": 1.0, "raison": "stop"}],
+               "eurusd": 1.15, "plan_ibkr": "fixe"}
+    # 23 actions en 3 brackets (8, 8, 7) : 6 ordres plafonnés à 1 % de leur valeur (0,80 $ pour 8 actions à
+    # 10 $) ; glissement du labo de 6 pb par côté (0,6 c à l'entrée, 0,54 c au stop, au-dessus du demi-pas).
+    fees = (0.8 + 0.72) + (0.8 + 0.72) + (0.7 + 0.63)
+    assert K.real_r(c, stopped) == pytest.approx(-1 - 0.0114 - fees / 23, abs=1e-4)
+    cheap = {"entry": 2.0, "stop": 1.9, "targets": [2.1, 2.2, 2.3]}  # 15 pb de 2 $ = 0,3 c < demi-pas 0,5 c
+    flat = {"declenche": True, "remplissage": 2.0, "sorties": [{"prix": 2.0, "part": 1.0, "raison": "cloture"}]}
+    assert K.real_r(cheap, flat) == pytest.approx(-0.1 - 6 / 23, abs=1e-3)  # 2 demi-pas + 6 minimums de 1 $
+    assert K.stressed_r(c, stopped) == pytest.approx(-1 - 0.06 - 0.01, abs=1e-4)
+    assert K.real_r(c, stopped | {"plan_ibkr": "degressif"}) > K.real_r(c, stopped)
+    cost = K.stop_cost(10.0, 9.0)
+    assert cost["actions"] == 23 and cost["reel"] > cost["labo"]
+    assert K.value({"resultat": stopped} | c) == K.real_r(c, stopped)
+
+
+async def test_bilan_permis_eteint(paths, monkeypatch):
+    monkeypatch.setattr(K, "lab_item", lambda: None)
+    assert not K.active()
+    txt = await K.command(["bilan"], NOW)
+    assert "Killmode · bilan" in txt and "Killmode est éteint : le bilan solde" in txt
+
+
+async def test_prends_un_kill(paths, monkeypatch):
+    assert bot.parse_trade(["acme", "106.6", "stop", "104.49", "kill"])["killmode"] is True
+    assert "killmode" not in bot.parse_trade(["acme", "106.6", "stop", "104.49"])
+    nogo = {"score": {"go": False, "reasons": ["x"]}, "status": "closed", "side": "long", "entry": 10.0, "stop": 9.0,
+            "targets": [{"price": 11.0}], "targets_hit": 1, "events": []}
+    assert T.against_jarvis(nogo) and not T.against_jarvis(nogo | {"killmode": True})
+
+    assert T.disagreements(SimpleNamespace(trades=[nogo | {"killmode": True}]))["contre"]["total"] == 0  # mesuré par le journal de Killmode, pas ici
+    kills = book([1.0])
+    kills[0] |= {"symbol": "ACME", "day": "2026-09-01"}
+    trades = [{"symbol": "ACME", "killmode": True, "entry": 10.2, "created_at": "2026-09-01T14:00:00+00:00",
+               "status": "open"}]
+    assert "Tes exécutions : 1 KILL pris, entrée +0,20 R" in K.fills_line(kills, trades)
+
+
+async def test_garde_fou_regroupement(paths, monkeypatch):
+    sources(monkeypatch, price=1000.0)
+
+    async def quotes(symbols):
+        return [{"symbol": "ACME", "previous_close": 1000.0}]
+
+    monkeypatch.setattr(K.finnhub, "stock_quotes", quotes)
+    a = await K.analyze("ACME", datetime.fromtimestamp(OPEN - 3600, timezone.utc))  # pré-ouverture : +900 %
+    assert "regroupement d'actions possible" in " ".join(a["piliers"]["donnees"]["raisons"])
+
+
+async def test_scan_garde_les_valeurs_coupees(paths, monkeypatch):
+    K.set_active(True, NOW)
+
+    async def scan(now=None):
+        return {"at": NOW.isoformat(), "examined": 9, "movers": 8, "analysed": 0, "setups": [], "dropped": [],
+                "coupees": [{"symbol": "ZZZ", "gap_ouverture": 9.0, "gap_moment": 7.0, "atr_pct": 8.0}]}
+
+    monkeypatch.setattr(K, "scan", scan)
+    await K.command(["scan"], NOW)
+    assert K._read(K.SCANS_PATH, [])[0]["coupees"][0]["symbol"] == "ZZZ"

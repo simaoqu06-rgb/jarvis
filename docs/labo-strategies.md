@@ -330,6 +330,22 @@ réalité, d'où le journal des appels en direct pour juger le mode complet.
   décide. Les appels sont comptés par règle (`killmode.RULE` et seuils) : une déclaration qui change la règle
   de Killmode passe `killmode.RULE` à son numéro. Le journal tient aussi un groupe « témoin catalyseur »
   (mêmes piliers sauf le catalyseur), seule mesure possible de l'apport du catalyseur, qui ne se rejoue pas.
+- Règle de lecture revue le 8 octobre (avis de GPT et Gemini passés au council, fil « JARVIS Killmode »),
+  avant tout KILL soldé (aucun ne pouvait l'être avant 16 h 20 New York ce jour-là) :
+  - le chiffre qui décide est le R aux frais réels de Simão : 20 € de risque, un bracket IBKR par objectif
+    (une entrée et une sortie, chacune avec son minimum), glissement du labo d'au moins un demi-pas par côté ;
+  - au 30e KILL déclenché, un audit : borne haute de l'IC 95 % sous zéro → « JARVIS recommande d'éteindre » ;
+    sinon « pas d'alerte », jamais un verdict positif ;
+  - au 100e, la lecture finale, toujours faite : avantage démontré seulement si la borne basse tient en grappes
+    par jour, par semaine et avec 3 c de glissement par côté ; si l'alerte du 30e a été écartée, le pari se
+    mesure sur les KILL 31 à 100 ;
+  - une borne de dégât à chaque bilan dès 10 KILL : IC 99,9 % entièrement sous zéro → « JARVIS recommande
+    d'éteindre » (environ 2 % de fausse alerte sur la vie du journal à espérance nulle, simulé) ;
+  - IC en t à G − 1 degrés de liberté (G = séances) ; lots figés (les premiers KILL dans l'ordre des appels) ;
+  - le journal ne voit qu'une catastrophe ou un gros écart (à 100 KILL, environ ±0,3 R en absolu et ±0,5 R
+    pour l'écart au témoin) : l'apport du catalyseur se juge au labo, le journal juge l'exécution ;
+  - les appels notés avant ce changement sont d'une version à part du direct, affichés et jamais lus par la
+    règle.
 
 ## Déclaration n° 6 (8 octobre 2026) : trois règles de sortie de Gemini, actions
 
