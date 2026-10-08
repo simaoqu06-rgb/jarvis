@@ -46,10 +46,11 @@ from app.lab import status as lab_status
 from app.lab import potentiel as lab_potentiel
 from app.lab import strat_stats as lab_strategies
 from app.notify.discord import split_message
-from app.trading import advice, killmode, paper, scanner
+from app.trading import advice, paper, scanner
 from app.trading import proposals as PR
 from app.trading import service as trading
 from app.trading.settings import settings
+from app.trading import killmode  # JARVIS Killmode (!kill), éteint par défaut
 
 log = logging.getLogger(__name__)
 TOKEN_NAME = "DISCORD_BOT_TOKEN"
@@ -322,7 +323,9 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
             return PR.decision_text(PR.proposals.decide(int(args[0]), cmd == "oui"))
     except (ValueError, KeyError) as exc:
         return f"⚠️ {exc}"
-    except (trading.PlanError, scanner.ScanError, killmode.KillError) as exc:
+    except (trading.PlanError, scanner.ScanError) as exc:
+        return f"⚠️ {exc}"
+    except killmode.KillError as exc:
         return f"⚠️ {exc}"
     return None
 
