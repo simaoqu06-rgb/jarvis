@@ -237,6 +237,7 @@ def text(result: dict) -> str:
             + (f", ~{T.duration_fr(t['minutes_median'])})" if t["minutes_median"] else ")")
             for t in plan["targets"])
         lines.append(f"entrée {T._num(plan['entry'])} · SL {T._num(plan['stop'])} ({plan['stop_pct']:+.1f} %) · {tps}")
+        lines += T.confirmation_lines(plan)
         if p.get("potentiel"):
             lines.append(p["potentiel"])
         news = (plan.get("catalyst") or {}).get("news") or []
@@ -249,6 +250,9 @@ def text(result: dict) -> str:
             f"{e['symbol']} ({', '.join(f'« {n} »' for n in e['regles'])})" for e in result["ecartees_methode"]))
     if result["rejected"]:
         lines.append("-# Filtres : " + ", ".join(f"{k} {v}" for k, v in sorted(result["rejected"].items(), key=lambda x: -x[1])))
+    if go:
+        lines.append("-# Chaque GO est relu toutes les 5 min, de 15 min après l'ouverture à 11 h 30 New York : "
+                     "✅ confirmé (ordre exact) ou ❌ annulé, en MP. `!confirmations` pour le bilan.")
     lines.append("-# Données Alpaca (pré-ouverture, bougies avec 16 min de retard) et Finnhub. "
                  "`!plan TICKER` pour un plan à jour en temps réel.")
     return "\n".join(lines)

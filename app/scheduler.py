@@ -12,13 +12,15 @@ from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from app import alerts, config
+from app.config import env_float
 from app.core.outbox import Outbox
 from app.lab import grade as lab_grade
 from app.lab import morning as lab_morning
 from app.notify import bot, discord
-from app.sources import alpaca
+from app.sources import alpaca, twelvedata
 from app.trading import calendar as CAL
 from app.trading import advice, paper, scanner
+from app.trading import confirm as CONFIRM
 from app.trading import proposals as PR
 from app.trading.proposals import proposals
 from app.trading import service as trading
@@ -36,6 +38,7 @@ state = alerts.State(config.ALERTS_STATE_PATH)
 book = trading.Book()
 trading.taken_trades = lambda: book.trades  # le grade tient compte du risque déjà ouvert et du jour
 paper_book = paper.PaperBook()
+confirm_state = CONFIRM.load()
 outbox = Outbox(config.OUTBOX_PATH, discord.split_message)
 _background: set[asyncio.Task] = set()
 _lock = asyncio.Lock()  # un seul job modifie l'état à la fois
@@ -222,12 +225,88 @@ async def tick_scan() -> None:
         _queue(scanner.text(result), "scanner", expires_at=bounds[1] if bounds else None)
         state.data["scan_date"] = today
         state.save()
+        confirm_state.clear()  # GO du jour, relus après l'ouverture par tick_confirm
+        CONFIRM.register(confirm_state, result, today)
+        CONFIRM.save(confirm_state)
         for pick in result["picks"]:
             try:
                 await paper.submit(paper_book, pick["plan"], pick["features"])
             except Exception:
                 log.exception("Forward-test : envoi de %s en échec", pick["symbol"])
         _kick_outbox()
+
+
+async def _usd_per_eur() -> float | None:
+    try:
+        from app import needs  # import tardif : needs tire tout le serveur de données
+
+        return (await needs.fx_rates("EUR", ["USD"])).data["rates"]["USD"]
+    except Exception as exc:
+        log.warning("Taux EUR/USD indisponible pour la taille des GO confirmés : %s", exc)
+        return None
+
+
+async def _bars_5min(symbol: str) -> list[dict] | None:
+    try:
+        return await twelvedata.candles(symbol, 5, outputsize=100)
+    except Exception as exc:
+        log.warning("Contrôle des GO : bougies 5 min de %s indisponibles : %s", symbol, exc)
+        return None
+
+
+async def tick_confirm(now: datetime | None = None) -> None:
+    """GO du scanner relus toutes les 5 min, de 15 min après l'ouverture à 11 h 30 New York :
+    confirmé (ordre exact en MP), annulé ou expiré ; puis mesure brut/confirmé après la clôture.
+    Bougies lues hors du verrou global, qui n'est pris que pour écrire."""
+    now = now or datetime.now(timezone.utc)
+    if not confirm_state.get("gos") or confirm_state.get("closed"):
+        return
+    day = datetime.fromisoformat(confirm_state["day"]).date()
+    bounds = CAL.session_bounds(day)
+    if not bounds or now < bounds[0] + CONFIRM.WAIT:
+        return
+    day_open, close = bounds
+    if now >= close + timedelta(minutes=2):
+        bars = {s: CONFIRM.session_bars(b, day_open, now) for s in confirm_state["gos"]
+                if (b := await _bars_5min(s))}
+        async with _lock:
+            CONFIRM.close_day(confirm_state, bars)
+            CONFIRM.save(confirm_state)
+        return
+    pending = [s for s, g in confirm_state["gos"].items() if g["status"] in CONFIRM.PENDING]
+    if not pending:
+        return
+    if CONFIRM.expire_due(now, day_open):
+        async with _lock:
+            for s in pending:
+                confirm_state["gos"][s]["status"] = "expiré"
+            CONFIRM.save(confirm_state)
+            text = CONFIRM.expired_text(pending)
+            _queue(text, "scanner", expires_at=close)
+            _dm_trades(text)
+            _kick_outbox()
+        return
+    last_closed = int(now.timestamp()) // CONFIRM.BAR * CONFIRM.BAR - CONFIRM.BAR
+    if all((confirm_state["gos"][s]["last_bar"] or 0) >= last_closed for s in pending):
+        return  # pas de nouvelle bougie 5 min close : rien à relire (un crédit Twelve Data par lecture)
+    texts, rate = [], None
+    for s in pending:
+        raw = await _bars_5min(s)
+        if not raw:
+            continue
+        go = confirm_state["gos"][s]
+        ev = CONFIRM.evaluate(go, CONFIRM.session_bars(raw, day_open, now), day_open)
+        if ev:
+            go["events"].append(ev)
+            if ev["kind"] == "confirmé" and rate is None:
+                rate = await _usd_per_eur()
+            texts.append(CONFIRM.event_text(s, go, ev, now, env_float("JARVIS_RISK_EUR", 20.0), rate))
+    async with _lock:
+        CONFIRM.save(confirm_state)
+        if texts:
+            _queue(texts, "scanner", expires_at=close)
+            _dm_trades(texts)
+            _kick_outbox()
 
 
 def report_due(now: datetime) -> bool:
@@ -298,6 +377,7 @@ CORE_JOBS = [
     ("scanner pré-ouverture", tick_scan, MINUTE, False),  # prend le verrou lui-même, seulement pour l'état
     ("conseil avant la clôture", tick_closing, MINUTE, False),  # idem
     ("forward-test sur le compte fictif", tick_paper, 2 * MINUTE, True),
+    ("contrôle des GO après l'ouverture", tick_confirm, MINUTE, False),  # prend le verrou lui-même pour écrire
 ]
 # Seulement avec les notifications actives.
 JOBS = [

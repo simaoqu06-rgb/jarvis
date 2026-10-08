@@ -39,6 +39,14 @@ minutes, de place pour 2 R et de stop touché avant l'entrée (TRANCHES, bornes 
 séparent sa sélection, ses conditions de prix et sa limite de 11 h (_kill_compare) ; part des actions en gap
 ≥ 4 % et ATR ≥ 4 % présentes dans l'univers du labo (universe.killmode_coverage).
 
+Déclaration n° 7 (confirmation des GO du scanner, PR #37) : les bras go_* sont jugés sur leur seule sortie déclarée
+(strategies.ref_exit : r_sans_be, stop fixe), comme les autres stratégies (IC, témoin, robustesse). Par stop (origine,
+plancher du direct), GO par GO (_go_compare) : statut de la confirmation (confirmé, annulé, expiré) avec ce qu'aurait
+fait le brut dans chaque groupe, et écart « confirmé ou rien » − brut (0 pour un bras sans trade) en grappes par jour ;
+la confirmation « aide » si cet écart est positif avec z ≥ candidate_z() et au moins MIN_N GO. Le taux de réussite
+est affiché, jamais utilisé pour conclure. Les mesures groupées de la n° 6 (sorties de Gemini, VWAP, tranches de
+Killmode) restent sur les stratégies d'avant la n° 7.
+
 Diagnostic v1 (Lot 1 du plan) : espérance par gap d'ouverture, par mode d'entrée, par raison de sortie,
 et brut contre net de frais, pour vérifier « v1 achète la faiblesse » et « les frais expliquent la perte ».
 """
@@ -82,6 +90,8 @@ TRANCHES = {
     "place_2r": ((-1e9, 0.5, "2 R < 0,5 ATR"), (0.5, 1.0, "2 R entre 0,5 et 1 ATR"), (1.0, 1e9, "2 R ≥ 1 ATR")),
     "stop_avant_entree": ((0, 1, "stop intact avant l'entrée"), (1, 2, "stop touché avant l'entrée")),
 }
+GO_STATUS_FR = {"confirme": "confirmé", "annule": "annulé", "expire": "expiré"}  # n° 7
+GO_VARIANTS_FR = {"origine": "stop d'origine", "plancher": "stop plancher du direct"}
 _vwap_from: dict[str, int] = {}
 
 
@@ -170,7 +180,7 @@ def _feed(a: dict, r: dict) -> None:
     """Ajoute une ligne déclenchée aux accumulateurs d'une stratégie (`r` : champs préparés par _strategies)."""
     day, values, ref, comm = r["day"], r["values"], r["ref"], r["comm"]
     a["declenches"] += 1
-    a["gagnants"] += (values["r_net"] or 0) > 0
+    a["gagnants"] += (values[r["refc"]] or 0) > 0
     a["tp1"] += bool(r["tp1"])
     for c in COLUMNS:
         a["sorties"][c].add(day, values[c])
@@ -212,7 +222,8 @@ def _halves(mean: Mean) -> tuple[float | None, float | None]:
 
 def _item(market: str, name: str, a: dict, z_min: float) -> dict:
     n = a["declenches"]
-    main = a["sorties"]["r_net"].result()
+    go = name in ST.GO_STRATEGIES  # n° 7 : une seule sortie déclarée, pas de mesures de la n° 6
+    main = a["sorties"][ST.ref_exit(name)].result()
     brut = a["sorties"]["r_gross"].result()["esperance_r"]
     ecart = a["ecart"].result()
     ibkr = a["ibkr"].result() if market == "stock" else None
@@ -225,7 +236,7 @@ def _item(market: str, name: str, a: dict, z_min: float) -> dict:
         "taux_declenchement": round(n / a["signaux"], 4) if a["signaux"] else None,
         "jours": main["jours"], **{k: main[k] for k in ("esperance_r", "ic95")},
         "reussite": round(a["gagnants"] / n, 4) if n else None, "tp1": round(a["tp1"] / n, 4) if n else None,
-        "sorties": {c: a["sorties"][c].result() for c in ST.exits(market)},
+        "sorties": {c: a["sorties"][c].result() for c in ST.strategy_exits(market, name)},
         "brut_r": brut,
         "frais_r": round(brut - main["esperance_r"], 4) if brut is not None and main["esperance_r"] is not None
         else None,
@@ -242,10 +253,10 @@ def _item(market: str, name: str, a: dict, z_min: float) -> dict:
         "par_oi": {k: a["oi"][k].result() for _, _, k in (*DER.OI_BUCKETS, (0, 0, "inconnu"))
                    if k in a["oi"]} if market == "crypto" else None,
         "ecarts_sorties": {c: _helps(a["ecarts"][c].result(), z_min) for c in ST.STOCK_EXITS}
-        if market == "stock" else None,
+        if market == "stock" and not go else None,
         "par_vwap": {k: a["vwap"][k].result() for k in VWAP_BUCKETS if k in a["vwap"]}
-        if market == "stock" else None,
-        "tranches": _tranches(a["tranches"]) if market == "stock" and name != ST.REFERENCE else None,
+        if market == "stock" and not go else None,
+        "tranches": _tranches(a["tranches"]) if market == "stock" and name != ST.REFERENCE and not go else None,
         "robustesse": {c: a["sorties"][c].result() for c in ("r_glisse_x2", "r_glisse_x3", "r_retard", "r_manque")},
         "robuste": {**rob, "moitie_1": halves[0], "moitie_2": halves[1], "tient": holds},
         "ordres_limites_retires": a["manques"],
@@ -279,7 +290,7 @@ def _strategies(conn: sqlite3.Connection) -> dict:
     out: dict = {}
     sql = (f"SELECT s.market, s.strategy, s.day, s.triggered, s.tp1_hit, s.temoin_r, s.temoin_triggered, s.rank, "
            f"s.entry, s.stop, s.symbol, s.signal_at, s.sur_vwap, s.gap_open_pct, s.atr_pct, s.vol15_adv, "
-           f"s.stop_avant_entree, s.risk_pct, {', '.join('s.' + c for c in COLUMNS)}, r.label "
+           f"s.stop_avant_entree, s.risk_pct, s.confirmation, {', '.join('s.' + c for c in COLUMNS)}, r.label "
            "FROM strat_trades s LEFT JOIN regimes r ON r.market = s.market AND r.day = s.day")
     acc: dict = {}
     z_min = candidate_z()
@@ -287,17 +298,22 @@ def _strategies(conn: sqlite3.Connection) -> dict:
     pooled = {"ecarts": defaultdict(Mean), "par_vwap": defaultdict(Mean)}  # n° 6, toutes stratégies actions
     pooled_bands: dict = defaultdict(lambda: defaultdict(Mean))           # n° 6, stratégies v2 actions
     sessions: dict = defaultdict(dict)                                      # n° 6 : orb15 et killmode par séance
+    gos: dict = defaultdict(dict)                                           # n° 7 : bras de chaque GO, par stop
     for row in conn.execute(sql):
         (market, name, day, trig, tp1, wit, wit_trig, rank, entry, stop, symbol, signal_at, above, gap, atr_pct,
-         vol15, stop_before, risk_pct) = row[:18]
-        values = dict(zip(COLUMNS, row[18:18 + len(COLUMNS)]))
+         vol15, stop_before, risk_pct, status) = row[:19]
+        values = dict(zip(COLUMNS, row[19:19 + len(COLUMNS)]))
+        refc = ST.ref_exit(name)
         keys = [(market, name)]
         if name in ST.POST_SEEN and day > ST.SEEN_UNTIL[market]:
             keys.append((market, name, "suivants"))
         for key in keys:
             acc.setdefault(key, _acc())["signaux"] += 1
         comm = (ibkr_commission_r(entry, stop) or 0.0) if market == "stock" else 0.0
-        ref = values["r_net"] - comm if values["r_net"] is not None else None
+        ref = values[refc] - comm if values[refc] is not None else None
+        spec = ST.STRATEGIES.get(name, {})
+        if "go" in spec:
+            gos[(spec["go"], symbol, day)][spec["arm"]] = {"ref": ref, "status": status}
         if market == "stock" and name in ("orb15", "killmode"):
             sessions[(symbol, day)][name] = {"trig": bool(trig), "ref": ref, "gap": gap, "atr": atr_pct,
                                              "ecart": values["r_net"] - wit
@@ -306,11 +322,11 @@ def _strategies(conn: sqlite3.Connection) -> dict:
         if not trig:
             continue
         r = {"market": market, "day": day, "tp1": tp1, "rank": rank, "values": values, "label": row[-1] or "inconnu",
-             "ref": ref, "comm": comm, "frais": _cost_bucket(expected_cost_r(market, entry, stop, rank)),
+             "ref": ref, "refc": refc, "comm": comm, "frais": _cost_bucket(expected_cost_r(market, entry, stop, rank)),
              "ecarts": {}, "vwap": None, "bandes": {}, "temoin": wit,
-             "ecart_temoin": values["r_net"] - wit if wit_trig and wit is not None and values["r_net"] is not None
+             "ecart_temoin": values[refc] - wit if wit_trig and wit is not None and values[refc] is not None
              else None}
-        if market == "stock":  # n° 6 : sorties de Gemini contre la référence, VWAP et mesures de Killmode
+        if market == "stock" and "go" not in spec:  # n° 6 : sorties de Gemini, VWAP et mesures de Killmode
             r["ecarts"] = {c: values[c] - values["r_net"] for c in ST.STOCK_EXITS
                            if values[c] is not None and values["r_net"] is not None}
             r["vwap"] = _vwap_bucket(day, signal_at, above)
@@ -348,6 +364,36 @@ def _strategies(conn: sqlite3.Connection) -> dict:
     if pooled_bands or sessions:
         out["_kill"] = {"tranches": _tranches(pooled_bands), **_kill_compare(sessions),
                         "couverture": coverage(conn)}
+    if gos:
+        out["_n7"] = _go_compare(gos, z_min)
+    return out
+
+
+def _go_compare(gos: dict, z_min: float) -> dict:
+    """n° 7, par stop : statut de la confirmation de chaque GO, ce qu'a fait le brut dans chaque groupe (et le
+    confirmé, quand son ordre est exécuté), et écart « confirmé ou rien » − brut par GO (0 pour un bras sans trade,
+    après commission IBKR), en grappes par jour."""
+    out = {}
+    for variant in [v for v in GO_VARIANTS_FR if any(k[0] == v for k in gos)]:
+        groups = {st: {"go": 0, "executes": 0, "brut": Mean(), "confirme": Mean()} for st in GO_STATUS_FR}
+        diff = Mean()
+        for (v, _, day), arms in gos.items():
+            b, c = arms.get("brut"), arms.get("confirme")
+            if v != variant or not b or not c or c["status"] not in groups:
+                continue
+            g = groups[c["status"]]
+            g["go"] += 1
+            g["brut"].add(day, b["ref"])
+            if c["ref"] is not None:
+                g["executes"] += 1
+                g["confirme"].add(day, c["ref"])
+            diff.add(day, (c["ref"] or 0.0) - (b["ref"] or 0.0))
+        out[variant] = {
+            "go": sum(g["go"] for g in groups.values()),
+            "par_statut": {GO_STATUS_FR[st]: {"go": g["go"], "executes": g["executes"], "brut": g["brut"].result(),
+                                              "confirme": g["confirme"].result() if st == "confirme" else None}
+                           for st, g in groups.items() if g["go"]},
+            "ecart_par_go": _helps(diff.result(), z_min)}
     return out
 
 
@@ -457,11 +503,13 @@ def report(conn: sqlite3.Connection) -> dict:
     out = {"declaration": {"numero": ST.DECLARATION, "le": ST.REGISTERED_ON, "essais": len(ST.trials()),
                            "z_candidate": candidate_z(), "sorties": ST.EXITS, "sorties_actions": ST.STOCK_EXITS,
                            "robustesse": ST.STRESS, "doc": "docs/labo-strategies.md"},
-           "scelle": SEAL.describe(), "strategies": {}, "sorties_gemini": None, "killmode": None, "diagnostic_v1": {}}
+           "scelle": SEAL.describe(), "strategies": {}, "sorties_gemini": None, "killmode": None,
+           "confirmation_go": None, "diagnostic_v1": {}}
     try:  # base pas encore migrée par le worker (lecture seule) : tableau vide plutôt qu'une erreur
         out["strategies"] = _strategies(conn)
         out["sorties_gemini"] = out["strategies"].pop("_n6", None)
         out["killmode"] = out["strategies"].pop("_kill", None)
+        out["confirmation_go"] = out["strategies"].pop("_n7", None)
         out["diagnostic_v1"] = diagnostic_v1(conn)
     except sqlite3.Error as exc:
         out["erreur"] = f"base pas encore prête : {exc}"
@@ -521,6 +569,19 @@ def _kill_text(kill: dict) -> str:
     return "Killmode décomposé (n° 6, mesure) : " + " · ".join(parts)
 
 
+def _go_text(variant: str, res: dict) -> str:
+    """n° 7 : une ligne par stop, la confirmation contre le brut, GO par GO."""
+    diff = res["ecart_par_go"]
+    parts = [f"{res['go']} GO · confirmé ou rien − brut {_r(diff['esperance_r'])} R par GO (z {_z(diff['z'])}"
+             + (", ✅ la confirmation aide" if diff.get("aide") else "") + ")"]
+    for label, g in res["par_statut"].items():
+        part = f"{label}s {g['go']} : brut {_r(g['brut']['esperance_r'])} R"
+        if g["confirme"] is not None:
+            part += f", confirmé {_r(g['confirme']['esperance_r'])} R sur {g['executes']} exécutés"
+        parts.append(part)
+    return f"Confirmation des GO (n° 7, {GO_VARIANTS_FR.get(variant, variant)}) : " + " · ".join(parts)
+
+
 def text(rep: dict | None) -> str:
     if not rep:
         return "🧪 **Stratégies du labo v2** : pas encore de mesure (le rejeu n'a pas encore traité de jour avec elles)."
@@ -563,6 +624,8 @@ def text(rep: dict | None) -> str:
     kill = rep.get("killmode")
     if kill:
         lines.append(_kill_text(kill))
+    for variant, res in (rep.get("confirmation_go") or {}).items():
+        lines.append(_go_text(variant, res))
     diag = (rep.get("diagnostic_v1") or {}).get("stock")
     if diag:
         gaps = " · ".join(f"{k} {_r(v['esperance_r'])} ({v['n']})" for k, v in diag["par_gap"].items())
