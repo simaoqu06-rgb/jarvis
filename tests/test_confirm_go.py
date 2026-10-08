@@ -111,3 +111,12 @@ async def test_tick_confirm_bout_en_bout(monkeypatch, tmp_path):
     assert SCH.confirm_state["closed"]
     rows = C.read_log()
     assert rows[0]["symbol"] == "FRSH" and rows[0]["status"] == "confirmé"
+
+
+def test_ordre_non_declenche_annule_a_11h30():
+    g = go(status="confirmé", trigger=13.81, confirm_bar=T0 + 900)
+    late = 24  # bougie de 11 h 30 New York
+    bars = [bar(0, 13.7, 13.75, 13.58, 13.6), bar(3, 13.64, 13.80, 13.63, 13.78),
+            bar(10, 13.7, 13.79, 13.65, 13.7), bar(late, 13.78, 14.4, 13.78, 14.3)]
+    out = C.outcome(g, bars)
+    assert out["rempli"] is None and out["confirme_r"] is None and out["brut_r"] is not None
