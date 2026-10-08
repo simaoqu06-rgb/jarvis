@@ -20,6 +20,7 @@ qu'aux comptes listés dans JARVIS_DISCORD_OWNER_ID et ignore tout le reste sans
   !lecons               carnet des leçons du labo (confirmées, à confirmer, démenties)
   !grade                grade de JARVIS (F- à S+), de quoi il est fait et le risque qu'il permet
   !strategies           labo v2 : stratégies à déclencheur contre v1 et leur témoin aléatoire
+  !potentiel            potentiel +10 : part des séances qui touchent +8 % selon le gap, types de catalyseurs
   !aide                 cette liste
 
 Les alertes des trades suivis (TP, stop, sortie anticipée, objectif en retard, conseil avant la clôture)
@@ -41,6 +42,7 @@ from app.lab import grade as lab_grade
 from app.lab import lessons as lab_lessons
 from app.lab import morning as lab_morning
 from app.lab import status as lab_status
+from app.lab import potentiel as lab_potentiel
 from app.lab import strat_stats as lab_strategies
 from app.notify.discord import split_message
 from app.trading import advice, paper, scanner
@@ -203,6 +205,16 @@ def grade_text() -> str:
     return lab_grade.text(lab_grade.current(), hist)
 
 
+def potentiel_text() -> str:
+    conn = lab_db.open_readonly()
+    if conn is None:
+        return "🎯 Base du labo absente : le service jarvis-lab n'a pas encore démarré."
+    try:
+        return lab_potentiel.text(lab_potentiel.cached(conn))
+    finally:
+        conn.close()
+
+
 def strategies_text() -> str:
     conn = lab_db.open_readonly()
     if conn is None:
@@ -292,6 +304,8 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
             return await asyncio.to_thread(grade_text)
         if cmd in ("strategies", "stratégies", "strats"):
             return await asyncio.to_thread(strategies_text)
+        if cmd in ("potentiel", "potentiel10", "plus10"):
+            return await asyncio.to_thread(potentiel_text)
         if cmd == "propositions":
             pending = PR.proposals.pending()
             if not pending:

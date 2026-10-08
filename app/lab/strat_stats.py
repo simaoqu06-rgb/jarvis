@@ -34,6 +34,7 @@ import sqlite3
 from collections import defaultdict
 from statistics import NormalDist
 
+from app.lab import derivs as DER
 from app.lab import seal as SEAL
 from app.lab import simulator as SIM
 from app.lab import stats as STATS
@@ -115,18 +116,20 @@ class Mean:
 def _strategies(conn: sqlite3.Connection) -> dict:
     out: dict = {}
     sql = (f"SELECT s.market, s.strategy, s.day, s.triggered, s.tp1_hit, s.temoin_r, s.temoin_triggered, s.rank, "
-           f"s.entry, s.stop, {', '.join('s.' + c for c in COLUMNS)}, r.label FROM strat_trades s "
-           "LEFT JOIN regimes r ON r.market = s.market AND r.day = s.day")
+           f"s.entry, s.stop, s.symbol, s.signal_at, {', '.join('s.' + c for c in COLUMNS)}, r.label "
+           "FROM strat_trades s LEFT JOIN regimes r ON r.market = s.market AND r.day = s.day")
     acc: dict = {}
     z_min = candidate_z()
+    derivs = DER.load(conn)
     for row in conn.execute(sql):
-        market, name, day, trig, tp1, wit, wit_trig, rank, entry, stop = row[:10]
-        values = dict(zip(COLUMNS, row[10:10 + len(COLUMNS)]))
+        market, name, day, trig, tp1, wit, wit_trig, rank, entry, stop, symbol, signal_at = row[:12]
+        values = dict(zip(COLUMNS, row[12:12 + len(COLUMNS)]))
         label = row[-1] or "inconnu"
         a = acc.setdefault((market, name), {"signaux": 0, "declenches": 0, "gagnants": 0, "tp1": 0,
                                             "sorties": defaultdict(Mean), "temoin": Mean(), "ecart": Mean(),
                                             "regimes": defaultdict(Mean), "rangs": defaultdict(Mean), "manques": 0,
-                                            "ibkr": Mean(), "commission": Mean(), "frais": defaultdict(Mean)})
+                                            "ibkr": Mean(), "commission": Mean(), "frais": defaultdict(Mean),
+                                            "funding": defaultdict(Mean), "oi": defaultdict(Mean)})
         a["signaux"] += 1
         if not trig:
             continue
@@ -144,6 +147,10 @@ def _strategies(conn: sqlite3.Connection) -> dict:
         if market == "stock":
             a["commission"].add(day, comm)
         a["frais"][_cost_bucket(expected_cost_r(market, entry, stop, rank))].add(day, ref)
+        if market == "crypto":  # lot B : positionnement des dérivés au signal, sans rien filtrer
+            funding, oi_chg = DER.context(derivs, symbol, signal_at)
+            a["funding"][DER.bucket(funding, DER.FUNDING_BUCKETS)].add(day, ref)
+            a["oi"][DER.bucket(oi_chg, DER.OI_BUCKETS)].add(day, ref)
         if wit_trig and wit is not None and values["r_net"] is not None:
             a["temoin"].add(day, wit)
             a["ecart"].add(day, values["r_net"] - wit)
@@ -171,6 +178,10 @@ def _strategies(conn: sqlite3.Connection) -> dict:
             "esperance_ref_r": ref["esperance_r"],
             "par_frais": {k: a["frais"][k].result() for _, _, k in (*COST_BUCKETS, (0, 0, "frais inconnus"))
                           if k in a["frais"]},
+            "par_funding": {k: a["funding"][k].result() for _, _, k in (*DER.FUNDING_BUCKETS, (0, 0, "inconnu"))
+                            if k in a["funding"]} if market == "crypto" else None,
+            "par_oi": {k: a["oi"][k].result() for _, _, k in (*DER.OI_BUCKETS, (0, 0, "inconnu"))
+                       if k in a["oi"]} if market == "crypto" else None,
             "robustesse": {c: a["sorties"][c].result() for c in ("r_glisse_x2", "r_glisse_x3", "r_retard", "r_manque")},
             "ordres_limites_retires": a["manques"],
             "temoin": {"esperance_r": a["temoin"].result()["esperance_r"], "ecart_r": ecart["esperance_r"],

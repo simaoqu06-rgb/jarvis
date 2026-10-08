@@ -80,6 +80,21 @@ async def okx_depth(now: datetime, transport=None) -> list[str]:
     return lines
 
 
+async def bybit_depth(now: datetime, transport=None) -> list[str]:
+    """Lot B : funding et open interest du perpétuel BTCUSDT chez Bybit, il y a 1 et 2 ans."""
+    found = []
+    for years in (1, 2):
+        t = int(_years_ago(now, years).timestamp())
+        try:
+            funding = await SRC.bybit_funding("BTCUSDT", t, t + 3 * 86400, transport)
+            oi = await SRC.bybit_open_interest("BTCUSDT", t, t + 3 * 86400, transport=transport)
+            found.append(f"{years} an{'s' if years > 1 else ''} : funding {len(funding)} points, open interest "
+                         f"{len(oi)} points")
+        except SourceError as exc:
+            found.append(f"{years} an{'s' if years > 1 else ''} : erreur {exc}")
+    return ["Bybit dérivés BTCUSDT (sur 3 jours) : " + " ; ".join(found)]
+
+
 async def finnhub_depth(now: datetime) -> list[str]:
     key = secret(finnhub.KEY_NAME)
     if not key:
@@ -112,6 +127,7 @@ async def report(now: datetime | None = None, transport=None) -> str:
     lines = ["Vérification des sources du labo"]
     lines += await alpaca_depth(now, transport)
     lines += await okx_depth(now, transport)
+    lines += await bybit_depth(now, transport)
     lines += await finnhub_depth(now)
     folder = Path(db_path()).resolve().parent
     folder.mkdir(parents=True, exist_ok=True)

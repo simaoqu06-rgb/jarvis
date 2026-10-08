@@ -288,6 +288,38 @@ def test_cassure_zone_annulee_par_une_cloture_sous_la_zone():
     assert ST.cassure_zone_retest(d) == []
 
 
+def test_cassure_zone_retest_en_15_min():
+    """Déclaration n° 4 : la même cassure de zone lue sur des bougies de 15 min ; décision à la clôture de la
+    bougie de 15 min, stop sous la bougie de retest de 15 min avec l'ATR de 15 min ; simulation en 5 min."""
+    rows = [(109.6, 109.7, 109.5, 109.6)] * 3 + [
+        (109.6, 109.9, 109.55, 109.85), (109.85, 110.4, 109.8, 110.3),
+        (110.3, 110.6, 110.25, 110.5), (110.5, 110.55, 110.0, 110.2),
+        (110.2, 110.9, 110.15, 110.8)]
+    d = zone_day([r for r in rows for _ in range(3)])   # chaque bougie de 15 min = 3 bougies de 5 min identiques
+    f = d.frame(15)
+    assert d.frame(None) is d and d.frame(5) is d and f is d.frame(15) and f.bar == 900
+    assert f.t[f.first] == OPEN + 15 * 60                # première bougie close après 9 h 45 + 5 min : 10 h
+    (cand,) = ST.cassure_zone_retest(f)
+    assert cand["decided_at"] == OPEN + 105 * 60 and (cand["decided_at"] - OPEN) % 900 == 0
+    assert cand["entry"] == pytest.approx(110.56)
+    assert cand["stop"] == pytest.approx(110.0 - 0.1 * f.atr[cand["i"]])
+    assert cand["entry_until"] == cand["decided_at"] + ST.VALID_BARS * 900
+    rows_ = {r["strategy"]: r for r in ST.strategy_rows(d, "AAA", 3, 0.5)}
+    r15 = rows_["cassure_zone_retest_15m"]
+    assert r15["signal_at"] == cand["decided_at"] and r15["triggered"] == 1 and r15["filled_at"] >= r15["signal_at"]
+    assert "cassure_zone_retest_1h" not in rows_        # 1 h : crypto seulement
+
+
+def test_bougies_de_1_h_en_crypto_fenetre_des_signaux():
+    start = CO.utc_midnight(DAY)
+    rows, _ = drift(3 * 288, 100.0, 0.01)
+    d = ST.Day("crypto", DAY, bars_from(start - 86400, rows), [])
+    f = d.frame(60)
+    assert f.bar == 3600 and f.usable
+    assert f.t[f.first] == start and f.t[f.last - 1] == start + 19 * 3600   # décisions de 1 h à 20 h UTC
+    assert d.t[d.first] == start and d.t[d.last - 1] == start + 20 * 3600 - 300
+
+
 def test_contacts_distincts_et_reaction_minimale():
     assert ST._contacts([(0, 300), (300, 600), (600, 900)]) == 1           # congestion : un seul contact
     assert ST._contacts([(0, 300), (7200, 7500)]) == 2
@@ -357,7 +389,7 @@ def test_nouvelle_declaration_relance_le_rattrapage(tmp_path, monkeypatch):
 
 def test_seuil_candidate_corrige_du_nombre_d_essais():
     assert SS.candidate_z(32) == pytest.approx(2.96, abs=0.01) and SS.candidate_z(60) == pytest.approx(3.14, abs=0.01)
-    assert SS.candidate_z() == pytest.approx(3.24, abs=0.01)   # 84 essais (déclaration n° 3)
+    assert SS.candidate_z() == pytest.approx(3.30, abs=0.01)   # 105 essais (déclaration n° 4)
     db = LabDB(":memory:")
     _rows(db, "pullback", 0.3, 0.2, days=40)   # bat son témoin (z ≈ 2,5), mais trop peu pour 60 essais
     db.conn.execute("UPDATE strat_trades SET temoin_r = r_net - (0.1 + CASE WHEN CAST(substr(day, 9, 2) AS INTEGER) "
@@ -433,8 +465,9 @@ def test_v1_rejouee_avec_ses_objectifs():
 def test_essais_declares():
     t = ST.trials()
     # Déclaration n° 1 : 32 essais ; n° 2 : + 2 stratégies sur deux marchés et la sortie EmperorBTC partout ;
-    # n° 3 : la sortie EmperorBTC en trois variantes.
-    assert len(t) == 84 and {x["exit"] for x in t} == set(ST.EXITS) and len(ST.EXITS) == 7
+    # n° 3 : la sortie EmperorBTC en trois variantes ; n° 4 : la cassure de zone en 15 min (deux marchés)
+    # et en 1 h (crypto), soit 3 couples de plus.
+    assert len(t) == 105 and {x["exit"] for x in t} == set(ST.EXITS) and len(ST.EXITS) == 7
 
 
 # --- Bloc scellé --------------------------------------------------------------------------
@@ -591,4 +624,4 @@ def test_route_api_des_strategies(tmp_path, monkeypatch):
     _rows(db, "pullback", 0.3, -0.2)
     r = TestClient(main.app).get("/api/lab/strategies", headers={"X-Lab-Key": "cle"})
     assert r.status_code == 200 and "pullback" in r.json()["strategies"]["stock"]
-    assert r.json()["declaration"]["essais"] == 84 and r.json()["declaration"]["z_candidate"] == 3.24
+    assert r.json()["declaration"]["essais"] == 105 and r.json()["declaration"]["z_candidate"] == 3.3

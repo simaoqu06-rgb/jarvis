@@ -17,6 +17,12 @@ async def test_rapport_sans_cles_avec_okx_simule(monkeypatch, tmp_path):
             data = [{"instId": f"{b}-USDT", "baseCcy": b, "quoteCcy": "USDT", "state": "live"}
                     for b in ("BTC", "ZIL", "USDC")]
             return httpx.Response(200, json={"code": "0", "data": data})
+        if request.url.host == "api.bybit.com":
+            start = int(request.url.params["startTime"])
+            key = "fundingRateTimestamp" if "funding" in request.url.path else "timestamp"
+            rows = [{key: str(start + k * 8 * 3600 * 1000), "fundingRate": "0.0001", "openInterest": "5"}
+                    for k in range(9)]
+            return httpx.Response(200, json={"retCode": 0, "retMsg": "OK", "result": {"list": rows[::-1]}})
         after = int(request.url.params["after"])
         ts = after - 86400 * 1000
         old = ts < (now.timestamp() - 2.5 * 365 * 86400) * 1000  # rien avant 2 ans et demi
@@ -27,6 +33,7 @@ async def test_rapport_sans_cles_avec_okx_simule(monkeypatch, tmp_path):
     assert "OKX : 2 paires USDT retenues sur 3" in text
     assert "OKX 5 min BTC-USDT : 1 an oui, 2 ans oui, 3 ans non" in text and "ZIL-USDT" in text
     assert "Go libres" in text and "Base estimée pour" in text
+    assert "Bybit dérivés BTCUSDT (sur 3 jours) : 1 an : funding 9 points, open interest 9 points" in text
 
 
 def test_taille_estimee_croit_avec_le_rejeu():

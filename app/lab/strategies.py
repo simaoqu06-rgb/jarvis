@@ -61,6 +61,12 @@ Déclaration n° 3 (même soir, avis de GPT et Gemini, avant tout résultat de l
   qu'un avertissement : sortie si une clôture passe sous le plus bas de la bougie du signe dans les
   EXIT_CONFIRM_BARS bougies, exécutée à la bougie suivante) ;
 - témoin : moyenne de WITNESS_DRAWS tirages au lieu d'un seul.
+Déclaration n° 4 (8 octobre 2026, lot B du plan, après le premier tableau de la n° 3) : les frais tuent les
+stops serrés de 5 min (74 % des cassures de zone crypto paient au moins 0,4 R de frais). cassure_zone_retest,
+la solution 1 du manuel, est rejouée telle quelle sur des bougies de 15 min (actions, crypto) et de 1 h
+(crypto ; en actions, deux séances d'historique ne donnent pas assez de bougies de 1 h) : zones, cassure,
+retest, ordre et stop se lisent sur ces bougies (Day.frame), donc stops plus larges en R ; la simulation, les
+sorties et le témoin restent sur les bougies de 5 min, comme pour les autres.
 Objectifs : 1, 2 et 3 R. Fenêtre des signaux : actions de 9 h 45 à 15 h New York (soldé à la
 clôture) ; crypto de 0 h à 20 h UTC (soldé 24 h après le signal).
 v1 est rejouée avec les mêmes sorties et tests, sur ses propres objectifs : c'est la référence.
@@ -84,10 +90,10 @@ from app.lab import simulator as SIM
 from app.trading import indicators as I
 from app.trading import signals as S
 
-REGISTERED_ON = "2026-10-07"
+REGISTERED_ON = "2026-10-08"
 # Déclaration en vigueur (docs/labo-strategies.md). En changer relance le rattrapage de tous les jours déjà
 # traités (progress_job), pour que chaque stratégie soit mesurée sur les mêmes jours.
-DECLARATION = 3
+DECLARATION = 4
 BAR = CO.BASE_TF * 60
 REFERENCE = "v1"
 STRATEGIES = {
@@ -99,6 +105,11 @@ STRATEGIES = {
     "cassure_zone_retest": {"label": "Cassure d'une zone S/R puis retest (EmperorBTC)", "markets": ("stock", "crypto")},
     "rebond_confirme": {"label": "Rebond sur une zone S/R puis cassure de la résistance (EmperorBTC)",
                         "markets": ("stock", "crypto")},
+    # Déclaration n° 4 : la même solution 1, lue sur des bougies plus longues (stops plus larges en R).
+    "cassure_zone_retest_15m": {"label": "Cassure d'une zone S/R puis retest, bougies de 15 min",
+                                "markets": ("stock", "crypto"), "base": "cassure_zone_retest", "tf": 15},
+    "cassure_zone_retest_1h": {"label": "Cassure d'une zone S/R puis retest, bougies de 1 h",
+                               "markets": ("crypto",), "base": "cassure_zone_retest", "tf": 60},
 }
 LABELS = {REFERENCE: "v1 (achat à heure fixe, référence)", **{k: v["label"] for k, v in STRATEGIES.items()}}
 EXITS = {
@@ -205,8 +216,8 @@ def vwap_from(bars: list[dict], start: int) -> list[float | None]:
 class Day:
     """Bougies d'un actif autour d'un jour, indicateurs et bornes des fenêtres (indices)."""
 
-    def __init__(self, market: str, day: date, bars: list[dict], daily_before: list[dict]):
-        self.market, self.day, self.bars = market, day, bars
+    def __init__(self, market: str, day: date, bars: list[dict], daily_before: list[dict], bar: int = BAR):
+        self.market, self.day, self.bars, self.bar = market, day, bars, bar
         self.t = [b["t"] for b in bars]
         self.o = [b["o"] for b in bars]
         self.h = [b["h"] for b in bars]
@@ -227,8 +238,10 @@ class Day:
             self.orb_until_ts = self.signal_until_ts
         self.d0 = bisect_left(self.t, self.start_ts)
         self.d1 = bisect_left(self.t, self.close_ts)
-        self.first = bisect_left(self.t, self.signal_from_ts)
-        self.last = bisect_left(self.t, self.signal_until_ts)  # exclu
+        # Bougies du signal : celles qui se ferment entre signal_from + 5 min et signal_until (en 5 min :
+        # celles qui commencent dans la fenêtre ; en 15 min ou 1 h, mêmes heures de décision au plus tard).
+        self.first = bisect_left(self.t, self.signal_from_ts - bar + BAR)
+        self.last = bisect_left(self.t, self.signal_until_ts - bar + BAR)  # exclu
         self.ema = ema(self.c, EMA_LEN)
         self.atr = atr(bars)
         self.vwap = vwap_from(bars, self.d0)
@@ -240,6 +253,16 @@ class Day:
         self._zones: list[tuple[float, float, int]] | None = None
         self._exit_signal: dict[int, bool] = {}
         self._swing_highs: list[tuple[int, float]] | None = None
+        self._frames: dict[int, "Day"] = {}
+
+    def frame(self, tf: int | None) -> "Day":
+        """Le même jour lu sur des bougies de `tf` minutes (déclaration n° 4) ; lui-même en 5 min."""
+        if not tf or tf == CO.BASE_TF:
+            return self
+        if tf not in self._frames:
+            self._frames[tf] = Day(self.market, self.day, CO.aggregate(self.bars, tf, self.market), self.daily,
+                                   bar=tf * 60)
+        return self._frames[tf]
 
     @property
     def zone_atr(self) -> float | None:
@@ -286,9 +309,9 @@ class Day:
 def _cand(d: Day, i: int, entry: float, stop: float, valid_until: int | None = None) -> dict | None:
     if stop >= entry or stop <= 0:
         return None
-    decided = d.t[i] + BAR
+    decided = d.t[i] + d.bar
     return {"i": i, "decided_at": decided, "entry": entry, "stop": stop,
-            "entry_until": valid_until or decided + VALID_BARS * BAR}
+            "entry_until": valid_until or decided + VALID_BARS * d.bar}
 
 
 def pullback(d: Day) -> list[dict]:
@@ -380,13 +403,14 @@ def zones(d: Day) -> list[tuple[float, float, int]]:
     a = d.zone_atr
     if not a:
         return []
-    known = d.bars[max(0, d.first - ZONE_5M_BARS[d.market]):d.first]
+    # Même durée d'historique quelle que soit la bougie (n° 4) : 150 bougies de 5 min = 50 de 15 min.
+    known = d.bars[max(0, d.first - ZONE_5M_BARS[d.market] * BAR // d.bar):d.first]
     highs, lows = I.swings(known, side=ZONE_SWING_SIDE)
     levels = []  # (prix, début, fin) de chaque contact
     for points, high in ((highs, True), (lows, False)):
         for j, p in points:
             if _reacted(known[j + 1:j + 1 + ZONE_REACTION_BARS], p, high, ZONE_REACTION_ATR * a):
-                levels.append((p, known[j]["t"], known[j]["t"] + BAR))
+                levels.append((p, known[j]["t"], known[j]["t"] + d.bar))
     daily = d.daily[-ZONE_DAILY_BARS:]
     dh, dl = I.swings(daily, side=ZONE_SWING_SIDE)
     levels += [(p, daily[j]["t"], daily[j]["t"] + 86400) for j, p in dh + dl]
@@ -451,7 +475,8 @@ def rebond_confirme(d: Day) -> list[dict]:
             continue
         # Cassure de structure (n° 3) : le dernier sommet de réaction confirmé à la clôture du contact.
         k = bisect_left(highs, (i - ZONE_SWING_SIDE + 1,))
-        level = next((p for j, p in reversed(highs[:k]) if j >= i - ZONE_5M_BARS[d.market] and p > d.c[i]), None)
+        level = next((p for j, p in reversed(highs[:k]) if j >= i - ZONE_5M_BARS[d.market] * BAR // d.bar
+                      and p > d.c[i]), None)
         if level is None:
             continue
         entry = level + d.tick(level)
@@ -629,14 +654,17 @@ def strategy_rows(d: Day, symbol: str, rank=None, gap: float | None = None, name
     for name, spec in STRATEGIES.items():
         if d.market not in spec["markets"] or (names and name not in names):
             continue
+        sd = d.frame(spec.get("tf"))  # bougies du signal (n° 4) ; simulation toujours en 5 min sur d
+        if not sd.usable:
+            continue
         chosen, busy_until = None, 0
-        for cand in SIGNALS[name](d):
+        for cand in SIGNALS[spec.get("base", name)](sd):
             if cand["decided_at"] < busy_until:
                 continue  # un ordre précédent était encore posé
             plan = _plan(cand["entry"], cand["stop"], _r_targets(cand["entry"], cand["stop"]))
             cost = SIM.costs(d.market, cand["entry"], rank)
             res = _sim(d, plan, cand["decided_at"], cand["entry_until"], d.exit_at(cand["decided_at"]), cost, "stop",
-                       d.c[cand["i"]])
+                       sd.c[cand["i"]])
             if chosen is None or res["triggered"]:
                 chosen = (cand, plan, cost, res)
             if res["triggered"]:
@@ -645,8 +673,8 @@ def strategy_rows(d: Day, symbol: str, rank=None, gap: float | None = None, name
         if not chosen:
             continue
         cand, plan, cost, res = chosen
-        emp = _plan(cand["entry"], cand["stop"], emperor_targets(d, cand["entry"], cand["stop"]))
-        m = measure(d, plan, cand["decided_at"], cand["entry_until"], cost, "stop", d.c[cand["i"]], res, emp)
+        emp = _plan(cand["entry"], cand["stop"], emperor_targets(sd, cand["entry"], cand["stop"]))
+        m = measure(d, plan, cand["decided_at"], cand["entry_until"], cost, "stop", sd.c[cand["i"]], res, emp)
         risk_pct = (plan["entry"] - plan["stop"]) / plan["entry"] * 100
         wit = witness(d, (d.market, symbol, d.day, name), risk_pct, list(TARGETS_R),
                       lambda p: SIM.costs(d.market, p, rank), (d.first, d.last)) if m["triggered"] else NO_WITNESS

@@ -142,6 +142,75 @@ async def okx_candles(inst_id: str, tf: int, start: int, end: int, transport=Non
     return [out[t] for t in sorted(out)]
 
 
+# --- Bybit (dérivés crypto, lot B) ----------------------------------------------------------
+# https://bybit-exchange.github.io/docs/v5/market/history-fund-rate et /open-interest : historiques
+# publics sans clé (OKX ne garde que ~3 mois de funding). Données seulement : JARVIS ne trade pas chez Bybit.
+
+BYBIT = "https://api.bybit.com"
+BYBIT_LIMIT = RateLimiter(8, 1.0)
+BYBIT_PAGE = 200
+
+
+async def bybit_get(path: str, params: dict, transport: httpx.AsyncBaseTransport | None = None) -> list:
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=TIMEOUT_SECONDS, headers=headers, transport=transport) as client:
+            response = await client.get(f"{BYBIT}{path}", params=params)
+    except httpx.TimeoutException as exc:
+        raise SourceError(f"délai de {TIMEOUT_SECONDS:.0f} s dépassé") from exc
+    except httpx.HTTPError as exc:
+        raise SourceError(f"erreur réseau ({type(exc).__name__})") from exc
+    if response.status_code != 200:
+        raise SourceError(f"HTTP {response.status_code}")
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise SourceError("réponse qui n'est pas du JSON") from exc
+    if payload.get("retCode") != 0:
+        code = payload.get("retCode")
+        raise SourceError(f"Bybit {'429 ' if code in (10006, 10018) else ''}{code} {payload.get('retMsg', '')}".strip())
+    return (payload.get("result") or {}).get("list") or []
+
+
+async def _bybit_series(path: str, params: dict, ts_key: str, value_key: str, start: int, end: int,
+                        transport=None, max_calls: int = 50) -> list[tuple[int, float]]:
+    """Points (epoch s, valeur) de début dans [start, end[, du plus ancien au plus récent ; Bybit renvoie les
+    plus récents d'abord, 200 au plus : on recule `endTime` page par page."""
+    out: dict[int, float] = {}
+    hi = end * 1000 - 1
+    for _ in range(max_calls):
+        rows = await with_retry(bybit_get, path, params | {"startTime": str(start * 1000), "endTime": str(hi),
+                                                             "limit": str(BYBIT_PAGE)},
+                                limiter=BYBIT_LIMIT, transport=transport)
+        if not rows:
+            break
+        stamps = []
+        for r in rows:
+            t = int(r[ts_key])
+            stamps.append(t)
+            if start * 1000 <= t < end * 1000:
+                out[t // 1000] = float(r[value_key])
+        oldest = min(stamps)
+        if len(rows) < BYBIT_PAGE or oldest <= start * 1000 or oldest - 1 >= hi:
+            break
+        hi = oldest - 1
+    return sorted(out.items())
+
+
+async def bybit_funding(symbol: str, start: int, end: int, transport=None) -> list[tuple[int, float]]:
+    """Taux de funding réglés (fraction par période, souvent 8 h) du contrat perpétuel USDT `symbol`."""
+    return await _bybit_series("/v5/market/funding/history", {"category": "linear", "symbol": symbol},
+                               "fundingRateTimestamp", "fundingRate", start, end, transport)
+
+
+async def bybit_open_interest(symbol: str, start: int, end: int, interval: str = "4h",
+                              transport=None) -> list[tuple[int, float]]:
+    """Open interest (en contrats) du perpétuel USDT `symbol`, un point par `interval`."""
+    return await _bybit_series("/v5/market/open-interest", {"category": "linear", "symbol": symbol,
+                                                             "intervalTime": interval},
+                               "timestamp", "openInterest", start, end, transport)
+
+
 # --- Alpaca -------------------------------------------------------------------------------
 
 async def alpaca_assets(include_inactive: bool = True, transport=None) -> list[dict]:

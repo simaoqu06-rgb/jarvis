@@ -218,6 +218,58 @@ le seuil à 3,24. Pragmatique : surcoût mesuré d'environ 5 % par jour rejoué 
 pour les n° 2 et 3. Critique : la commission IBKR rend la barre plus haute pour les actions, et c'est
 voulu : un avantage qui ne survit pas aux frais réels de Simão n'en est pas un.
 
+## Déclaration n° 4 (8 octobre 2026) : stops plus larges, lot B du plan
+
+Contrairement aux n° 2 et 3, celle-ci vient **après** un premier résultat : le tableau de la n° 3 au
+8 octobre (oct.-déc. 2024 seulement, 64 jours d'actions, 62 de crypto, régime haussier). Aucune candidate ;
+avant frais tout est proche de 0 R ; l'espérance baisse avec la tranche de frais (≥ 0,4 R de frais : −0,5 à
+−0,96 R), et 74 % des cassures de zone crypto paient au moins 0,4 R de frais, parce qu'un stop de 5 min est
+étroit. La cassure de zone crypto est la seule stratégie qui bat son témoin (+0,16 R, z 2,9, sous le seuil
+3,24). Le choix de la stratégie rejouée ci-dessous s'appuie donc sur ces trois mois : c'est un biais assumé,
+que corrigent le reste du rejeu (encore 21 mois), la règle « au moins un an et deux régimes » et le bloc
+scellé, toujours fermé. Simão a choisi ce lot sur la carte du 8 octobre (« Lot B réduit »).
+
+| Nom | Marchés | Ce qui change |
+|---|---|---|
+| `cassure_zone_retest_15m` | actions, crypto | `cassure_zone_retest` (règles de la n° 3, inchangées) lue sur des bougies de 15 min |
+| `cassure_zone_retest_1h` | crypto | la même sur des bougies de 1 h |
+
+- Zones, cassure, fausse cassure, retest, ordre stop d'achat et stop se calculent sur les bougies longues
+  (agrégées depuis les 5 min, alignées sur 9 h 30 pour les actions, sur l'heure UTC pour la crypto) : ATR,
+  12 bougies de retest, ordre valable 3 bougies, tout en bougies de 15 min ou 1 h. Le stop se place donc
+  sous la bougie de retest de 15 min ou 1 h : plus large, moins de frais en R. L'historique des zones couvre
+  la même durée qu'en 5 min (150 bougies de 5 min = 50 de 15 min).
+- Une bougie longue n'est utilisée qu'une fois close : la décision tombe à sa clôture, entre 9 h 50 et 15 h
+  New York (actions) et entre 0 h 05 et 20 h UTC (crypto), comme en 5 min.
+- Simulation, sorties, robustesse et témoin restent sur les bougies de 5 min, identiques aux autres
+  stratégies ; le test « entrée retardée » garde un retard de 5 min (le délai d'un ordre passé à la main).
+- Pas de 1 h en actions : le labo garde deux séances d'historique de 5 min, soit 13 bougies de 1 h, trop
+  peu pour l'EMA 20 et les zones.
+
+**Essais déclarés : 105** (84 + 3 couples × 7 sorties) ; seuil « candidate » : **z ≥ 3,30**.
+
+**Mesures sans essai en plus** (rien n'est filtré ni noté, comme les tranches de frais) :
+
+- crypto : espérance de chaque stratégie par tranche de **funding** (dernier taux réglé avant le signal) et
+  de **variation d'open interest sur 24 h** (dernier point de 4 h clos avant le signal), lus sur le
+  perpétuel USDT de Bybit (`app/lab/derivs.py` ; historique public sans clé, OKX n'en garde que 3 mois). Une
+  tranche qui tiendrait deviendrait un challenger déclaré, à faire valider par Simão ;
+- actions : **potentiel +10** (`app/lab/potentiel.py`, `!potentiel`) : part des séances de l'univers du labo
+  qui touchent +8 % (et +10 %) depuis l'ouverture, par tranche de gap d'ouverture, et fiches catalyseurs
+  classées par type. Le scanner affiche la ligne de son gap sous chaque plan. Limite au 8 octobre : Finnhub
+  gratuit ne remonte qu'environ 12 mois et le rejeu en est au début 2025 : presque toutes les fiches sont
+  « hors profondeur » et une trentaine seulement sont classées ; les types se rempliront quand le rejeu atteindra les 12 derniers mois.
+
+Les jours déjà traités sont recalculés par le rattrapage (`progress_job` change avec le numéro).
+
+**Council** (Sceptique, Pragmatique, Critique : GO modifié). Sceptique : choisir la stratégie sur trois mois
+de résultats, c'est chercher le gagnant après coup ; accepté parce qu'on n'ajoute qu'une stratégie, payée
+par le seuil (3,30) et jugée sur 21 mois qu'elle n'a pas vus, et parce que les filtres funding et open
+interest restent des mesures, pas des essais. Pragmatique : deux stratégies de plus coûtent peu (les
+bougies longues viennent des 5 min déjà chargées) ; le rattrapage refait les jours déjà traités, comme à la
+n° 3. Critique : pas de 1 h en actions plutôt que de rallonger l'historique (et les appels Alpaca) du rejeu ;
+le témoin reste celui des autres stratégies, pour que l'écart mesure bien l'entrée.
+
 ## Bloc scellé
 
 Le rejeu du **6 avril au 5 octobre 2026** est calculé mais rangé à part (`trades_sealed`,
