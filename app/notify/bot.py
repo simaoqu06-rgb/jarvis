@@ -21,6 +21,7 @@ qu'aux comptes listés dans JARVIS_DISCORD_OWNER_ID et ignore tout le reste sans
   !grade                grade de JARVIS (F- à S+), de quoi il est fait et le risque qu'il permet
   !strategies           labo v2 : stratégies à déclencheur contre v1 et leur témoin aléatoire
   !potentiel            potentiel +10 : part des séances qui touchent +8 % selon le gap, types de catalyseurs
+  !kill                 JARVIS Killmode, désactivé par défaut : `!kill on`, `!kill NVDA`, `!kill scan`, `!kill bilan`
   !aide                 cette liste
 
 Les alertes des trades suivis (TP, stop, sortie anticipée, objectif en retard, conseil avant la clôture)
@@ -45,7 +46,7 @@ from app.lab import status as lab_status
 from app.lab import potentiel as lab_potentiel
 from app.lab import strat_stats as lab_strategies
 from app.notify.discord import split_message
-from app.trading import advice, paper, scanner
+from app.trading import advice, killmode, paper, scanner
 from app.trading import proposals as PR
 from app.trading import service as trading
 from app.trading.settings import settings
@@ -306,6 +307,10 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
             return await asyncio.to_thread(strategies_text)
         if cmd in ("potentiel", "potentiel10", "plus10"):
             return await asyncio.to_thread(potentiel_text)
+        if cmd == "kill":
+            if args and args[0].upper().removesuffix("USD") in CRYPTO:
+                return "🔪 Killmode ne traite que les actions US (la fiche société et le catalyseur en font partie)."
+            return await killmode.command(args)
         if cmd == "propositions":
             pending = PR.proposals.pending()
             if not pending:
@@ -317,7 +322,7 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
             return PR.decision_text(PR.proposals.decide(int(args[0]), cmd == "oui"))
     except (ValueError, KeyError) as exc:
         return f"⚠️ {exc}"
-    except (trading.PlanError, scanner.ScanError) as exc:
+    except (trading.PlanError, scanner.ScanError, killmode.KillError) as exc:
         return f"⚠️ {exc}"
     return None
 

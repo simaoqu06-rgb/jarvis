@@ -67,6 +67,14 @@ la solution 1 du manuel, est rejouée telle quelle sur des bougies de 15 min (ac
 (crypto ; en actions, deux séances d'historique ne donnent pas assez de bougies de 1 h) : zones, cassure,
 retest, ordre et stop se lisent sur ces bougies (Day.frame), donc stops plus larges en R ; la simulation, les
 sorties et le témoin restent sur les bougies de 5 min, comme pour les autres.
+Déclaration n° 5 (8 octobre 2026, demande de Simão : « JARVIS Killmode », trades à haute volatilité sur des setups
+complets) : killmode (actions) est le squelette prix de Killmode, la partie qui se rejoue sans voir l'avenir.
+Jour retenu seulement si le gap à l'ouverture est d'au moins KILL_GAP_PCT % et l'ATR 14 jours de la veille
+d'au moins KILL_ATR_PCT % du cours ; range des 15 premières minutes clôturé au-dessus du VWAP sans combler le
+gap (plus bas du range au-dessus de la clôture de la veille) ; stop d'achat 1 pas au-dessus du plus haut du
+range, valable jusqu'à 11 h New York ; stop 1 pas sous son plus bas. Le catalyseur et la fiche société ne se
+rejouent pas (Finnhub gratuit ne remonte qu'un an) : ils sont mesurés sur les appels de Killmode en direct
+(app/trading/killmode.py, journal des appels), la même règle de prix servant aux deux.
 Objectifs : 1, 2 et 3 R. Fenêtre des signaux : actions de 9 h 45 à 15 h New York (soldé à la
 clôture) ; crypto de 0 h à 20 h UTC (soldé 24 h après le signal).
 v1 est rejouée avec les mêmes sorties et tests, sur ses propres objectifs : c'est la référence.
@@ -93,7 +101,7 @@ from app.trading import signals as S
 REGISTERED_ON = "2026-10-08"
 # Déclaration en vigueur (docs/labo-strategies.md). En changer relance le rattrapage de tous les jours déjà
 # traités (progress_job), pour que chaque stratégie soit mesurée sur les mêmes jours.
-DECLARATION = 4
+DECLARATION = 5
 BAR = CO.BASE_TF * 60
 REFERENCE = "v1"
 STRATEGIES = {
@@ -110,6 +118,8 @@ STRATEGIES = {
                                 "markets": ("stock", "crypto"), "base": "cassure_zone_retest", "tf": 15},
     "cassure_zone_retest_1h": {"label": "Cassure d'une zone S/R puis retest, bougies de 1 h",
                                "markets": ("crypto",), "base": "cassure_zone_retest", "tf": 60},
+    # Déclaration n° 5 : Killmode, sa partie prix (gap et volatilité forts, range d'ouverture tenu).
+    "killmode": {"label": "Killmode : gap ≥ 4 % et ATR ≥ 4 %, cassure du range 15 min tenu", "markets": ("stock",)},
 }
 LABELS = {REFERENCE: "v1 (achat à heure fixe, référence)", **{k: v["label"] for k, v in STRATEGIES.items()}}
 EXITS = {
@@ -157,6 +167,11 @@ STOCK_SIGNAL_UNTIL = time(15, 0)
 ORB_UNTIL = time(12, 0)
 CRYPTO_SIGNAL_HOURS = 20    # crypto : signaux de 0 h à 20 h UTC, soldés 24 h après
 CRYPTO_HORIZON = 86400
+# Déclaration n° 5 : Killmode (figé avant le premier résultat).
+KILL_GAP_PCT = 4.0          # gap à l'ouverture, en % de la clôture de la veille
+KILL_ATR_PCT = 4.0          # ATR 14 jours connu la veille, en % de la clôture
+KILL_RANGE_MIN = 15         # range d'ouverture
+KILL_UNTIL = time(11, 0)    # ordre stop d'achat valable jusqu'à 11 h New York (17 h Paris)
 
 
 def progress_job(market: str) -> str:
@@ -496,9 +511,60 @@ def rebond_confirme(d: Day) -> list[dict]:
     return out
 
 
+def kill_context(d: Day) -> dict:
+    """Ce que Killmode connaît à l'ouverture : gap (ouverture de la séance contre la clôture de la veille) et
+    ATR 14 jours de la veille en % ; None quand la donnée manque."""
+    gap = atr_pct = None
+    if d.prev_close and d.d1 > d.d0 and d.t[d.d0] == d.start_ts:
+        gap = (d.o[d.d0] / d.prev_close - 1) * 100
+    if len(d.daily) > ATR_LEN and d.daily[-1]["c"] > 0:
+        atr_pct = atr(d.daily)[-1] / d.daily[-1]["c"] * 100
+    return {"gap_pct": gap, "atr_pct": atr_pct}
+
+
+def _pct_fr(x: float) -> str:
+    return f"{x:+.1f}".replace(".", ",")
+
+
+def killmode_check(d: Day) -> tuple[dict | None, list[str]]:
+    """Déclaration n° 5 : gap ≥ KILL_GAP_PCT, ATR ≥ KILL_ATR_PCT, range de 15 min clôturé au-dessus du VWAP et
+    au-dessus de la clôture de la veille ; stop d'achat au-dessus du range jusqu'à 11 h, stop sous le range.
+    Renvoie le signal (ou None) et, sans signal, ce qui manque (Killmode en direct l'affiche tel quel)."""
+    if d.market != "stock":
+        return None, ["actions seulement"]
+    ctx = kill_context(d)
+    reasons = []
+    if ctx["gap_pct"] is not None and ctx["gap_pct"] < KILL_GAP_PCT:
+        reasons.append(f"gap {_pct_fr(ctx['gap_pct'])} % (il faut au moins +{KILL_GAP_PCT:g} %)")
+    if ctx["atr_pct"] is None:
+        reasons.append("ATR journalier inconnu (historique trop court)")
+    elif ctx["atr_pct"] < KILL_ATR_PCT:
+        reasons.append(f"ATR {ctx['atr_pct']:.1f} % (il faut au moins {KILL_ATR_PCT:g} %) : pas assez volatil".replace(".", ","))
+    n = KILL_RANGE_MIN // CO.BASE_TF
+    if ctx["gap_pct"] is None or d.d1 - d.d0 < n:
+        return None, reasons + ["range des 15 premières minutes pas encore complet"]
+    if reasons:
+        return None, reasons
+    k = d.d0 + n - 1
+    hi, lo = max(d.h[d.d0:k + 1]), min(d.l[d.d0:k + 1])
+    v = d.vwap[k]
+    if v is None or d.c[k] <= v:
+        return None, ["range clôturé sous le VWAP : les vendeurs tiennent l'ouverture"]
+    if lo <= d.prev_close:
+        return None, [f"gap comblé pendant le range (plus bas {lo:g} ≤ clôture de la veille {d.prev_close:g})"]
+    until = int(datetime.combine(d.day, KILL_UNTIL, CO.NEW_YORK).timestamp())
+    c = _cand(d, k, hi + d.tick(hi), lo - d.tick(lo), valid_until=until)
+    return (c, []) if c else (None, ["range sans hauteur"])
+
+
+def killmode(d: Day) -> list[dict]:
+    c, _ = killmode_check(d)
+    return [c] if c else []
+
+
 SIGNALS = {"pullback": pullback, "orb15": lambda d: orb(d, 15), "orb30": lambda d: orb(d, 30),
            "cassure_retest": cassure_retest, "cassure_zone_retest": cassure_zone_retest,
-           "rebond_confirme": rebond_confirme}
+           "rebond_confirme": rebond_confirme, "killmode": killmode}
 
 
 # --- Simulation : sortie de référence, variantes, robustesse et témoin ---------------------
