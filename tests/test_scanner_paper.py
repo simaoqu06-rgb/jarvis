@@ -85,9 +85,9 @@ def test_seance_reguliere_seulement():
 
 def test_commande_discord_lit_le_ticker():
     assert bot.parse_trade(["nvda"]) == {"symbol": "NVDA", "market": "stock", "side": "long",
-                                           "entry": None, "stop": None}
+                                           "entry": None, "stop": None, "targets": None}
     assert bot.parse_trade(["BTCUSD", "short"]) == {"symbol": "BTC", "market": "crypto", "side": "short",
-                                                          "entry": None, "stop": None}
+                                                          "entry": None, "stop": None, "targets": None}
     assert bot.parse_trade(["coin", "crypto"])["market"] == "crypto"
     with pytest.raises(ValueError):
         bot.parse_trade([])

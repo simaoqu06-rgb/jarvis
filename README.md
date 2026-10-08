@@ -336,35 +336,70 @@ Liste, seuils et sorties sont déclarés d'avance : [docs/labo-strategies.md](do
 - Les jours traités avant le labo v2 sont rattrapés hors séance (bougies relues à la source, rien stocké).
 - `!strategies`, `GET /api/lab/strategies`, ligne « Labo v2 » et ligne 🔒 de `!labo`.
 
-## Avis sur un actif et conseil avant la clôture
+## Avis sur un actif et conseil avant la clôture, en prix
 
-`!avis NVDA` (ou `GET /api/trading/opinion?symbol=NVDA`) calcule le plan long et le plan short, prend
-le côté GO (la meilleure note s'il y en a deux) et le ramène à « attendre » si aucun objectif n'a une
-espérance positive une fois rejoué sur l'historique de l'actif. L'avis affiche ce que le labo a mesuré
-(plans v1 rejoués, hors bloc scellé) : tant que le GO ne fait pas nettement mieux que le NO GO, il le dit.
+Pas de moyennes : des prix, chacun avec son origine (demande de Simão, 2026-10-08). Ils viennent de la
+**carte des niveaux** (`app/trading/levels.py`) : sommets et creux de swing des bougies du plan (15 min, ou
+1 h en crypto) qui ont fait réagir le prix d'au moins 1 ATR, swings journaliers sur un an, plus haut et plus
+bas du jour, de la veille et sur 52 semaines, gaps non comblés ; des niveaux à moins de 0,5 ATR forment une
+zone. Seules les zones « solides » (au moins deux contacts, ou un niveau journalier) décident d'un prix ; le
+VWAP et le range d'ouverture sont affichés comme niveaux sans décider (council du 2026-10-08 : le labo ne
+les a pas mesurés).
 
-30 min avant la clôture US (`JARVIS_CLOSE_ADVICE_MINUTES`), chaque action suivie encore ouverte reçoit
-un conseil (aussi `!positions`, bouton « Que faire ? » du cockpit, `GET /api/trading/advice`) :
+`!avis NVDA` (ou `GET /api/trading/opinion?symbol=NVDA`) donne pour chaque côté trois entrées avec stop, trois
+objectifs et R/R : maintenant (stop du plan), **sur repli** (achat limite juste au-dessus du support solide le
+plus proche) et **sur cassure** (achat stop juste au-dessus de la résistance solide la plus proche, stop sous la
+zone cassée), stops entre 1 et 3 ATR. JARVIS entre maintenant si le plan est GO et que le R/R sur le 2e objectif
+tient (`rr_min` moins la tolérance), sinon il donne les ordres conditionnels qui tiennent (en groupe OCA chez
+IBKR), sinon il attend. Jamais contre la tendance de fond, jamais à moins de 48 h de résultats, pas de long
+avec une augmentation de capital dans les actus. La commande `!prends` à taper une fois l'ordre exécuté est
+jointe.
 
-1. résultats trimestriels avant la fin de la prochaine séance → **SORTIR** ;
-2. garder jusqu'au prochain objectif perd en moyenne (rejoué depuis le prix actuel avec le stop suivi) → **SORTIR** ;
-3. objectif en retard et position qui ne gagne pas → **SORTIR** ;
-4. signe de retournement sur une position gagnante → **ALLÉGER** (moitié dehors, stop à l'entrée) ;
-5. le gap de nuit a sauté le stop dans au moins 10 % des 250 dernières nuits (`JARVIS_GAP_LIMIT`) → **ALLÉGER** ;
-6. sinon **GARDER**, avec le stop à laisser.
+`!position NVDA 132.5` (ou `GET /api/trading/position?symbol=NVDA&entry=132.5`), `!positions`, le bouton
+« Que faire ? » du cockpit, `GET /api/trading/advice` et le message 30 min avant la clôture US
+(`JARVIS_CLOSE_ADVICE_MINUTES`) donnent pour chaque position les **ordres à poser** :
 
-Règles fixes, pas encore validées : chaque conseil est gardé sur le trade (un par jour) et, une fois le
-trade terminé, comparé à une sortie au moment du conseil (ligne « Bilan des conseils »).
+- une vente par part (un tiers par défaut) juste avant chacune des prochaines résistances solides, espacées
+  d'au moins un quart d'ATR journalier, avec la source de chaque prix ;
+- le **stop suiveur** EmperorBTC : sous le dernier creux de 15 min (et sous toute sa zone), à au moins 1 ATR
+  du prix ; il ne redescend jamais, et sur un trade suivi, JARVIS suit ensuite ce stop (alertes et bilan) ;
+- si la position gagne, les **renforts** EmperorBTC (« ajout sur un retest, ajout lors de la rupture swing ») :
+  sur repli vers un support au-dessus du stop et du prix d'entrée (jamais pour baisser son prix moyen), ou
+  sur cassure de la prochaine résistance, le stop de toute la position passant alors sous la zone cassée ;
+
+et la décision du moment :
+
+1. le prix a passé le stop → **SORTIR** ;
+2. résultats trimestriels avant la fin de la prochaine séance → **SORTIR** ;
+3. augmentation de capital dans les actus → **SORTIR** ;
+4. objectif en retard et position qui ne gagne pas → **SORTIR** ;
+5. signe de retournement sur une position gagnante → **ALLÉGER** (la moitié tout de suite) ;
+6. en séance, le gap de nuit a sauté le stop dans au moins 10 % des 250 dernières nuits (`JARVIS_GAP_LIMIT`)
+   → **ALLÉGER** (ne garder que la moitié la nuit) ; le nombre de nuits est toujours affiché, avec le rappel
+   qu'IBKR ne déclenche pas un stop hors séance ;
+7. sinon **GARDER**, avec ces ordres.
+
+La règle « garder jusqu'au prochain objectif perd en moyenne → SORTIR » de la première version est retirée.
+Règles fixes, pas encore validées : chaque conseil (et ses ordres) est gardé sur le trade (un par jour) et,
+une fois le trade terminé, comparé à une sortie au moment du conseil (ligne « Bilan des conseils », en
+nombre de conseils justes).
+
+`!societe NVDA` (ou `GET /api/trading/company?symbol=NVDA`) : la fiche société, faite de faits datés (Finnhub
+gratuit et bougies journalières) : prochains résultats et BPA des derniers trimestres, record et plus bas sur
+52 semaines, moyennes mobiles, ATR journalier, bêta, les plus fortes séances de l'année avec le titre d'actu
+du jour, croissance et marges, analystes, ventes et achats des dirigeants sur 90 jours, dépôts SEC d'émission
+de titres (S-1, S-3, 424B) sur 30 jours, actus de la semaine et ce qui, dans tout ça, change un trade.
 
 ## Commandes Discord
 
 | Commande | Effet |
 |---|---|
 | `!plan NVDA` | plan complet en temps réel (ajoute `short`, `crypto` ou `action` si besoin) |
-| `!avis NVDA` | avis de JARVIS : entrer long, entrer short ou attendre, pourquoi, ce qui invaliderait, et ce que le labo a mesuré |
-| `!prends NVDA` | calcule le plan et suit le trade (TP/SL annoncés, cockpit) ; `!prends NVDA 132.5 stop 128` = ton entrée et ton stop réels |
-| `!positions` | trades suivis : sortir, alléger ou garder, avec les faits (aussi envoyé seul 30 min avant la clôture US) |
-| `!position NVDA 132.5` | même conseil pour une position prise hors de JARVIS (`short`, `stop 128` en plus) |
+| `!avis NVDA` | avis de JARVIS en prix : entrer maintenant, sur repli (limite) ou sur cassure (stop), avec stop, objectifs et R/R, ou attendre, et pourquoi |
+| `!societe NVDA` | fiche société : résultats, plus fortes séances de l'année et leur actu, chiffres, analystes, dirigeants, dépôts SEC, actus |
+| `!prends NVDA` | calcule le plan et suit le trade (TP/SL annoncés, cockpit) ; `!prends NVDA 132.5 stop 128 tp 140 145 150` = ton entrée, ton stop et tes objectifs réels |
+| `!positions` | trades suivis : ventes, stop suiveur et renforts en prix, et sortir, alléger ou garder (aussi envoyé seul 30 min avant la clôture US) |
+| `!position NVDA 132.5` | la même chose pour une position prise hors de JARVIS (`short`, `stop 128` en plus), avec la commande `!prends` pour qu'il la suive |
 | `!scan` | scanner tout de suite |
 | `!bilan` | bilan du forward-test |
 | `!desaccords` | trades pris contre l'avis de JARVIS (NO GO) comparés aux plans GO : qui avait raison |

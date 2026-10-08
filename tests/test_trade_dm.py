@@ -56,8 +56,8 @@ async def test_conseil_de_cloture_copie_en_prive(dm, monkeypatch):
     monkeypatch.setattr(scheduler.state, "save", lambda: None)
 
     async def fake(trades, now):
-        return [{"id": "t1", "symbol": "NVDA", "side": "long", "decision": "SORTIR", "why": "résultats", "facts": [],
-                 "price": 100.0, "exit_r": 0.0, "at": now.isoformat()}]
+        return [{"id": "t1", "symbol": "NVDA", "side": "long", "entry": 100.0, "decision": "SORTIR", "why": "résultats",
+                 "facts": [], "price": 100.0, "exit_r": 0.0, "at": now.isoformat(), "orders": "vends tout (résultats)"}]
 
     monkeypatch.setattr(A, "advise_book", fake)
     await scheduler.tick_closing(NOW)

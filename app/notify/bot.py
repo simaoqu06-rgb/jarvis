@@ -5,11 +5,15 @@ l'intention « Message Content » activée. Leçon d'OpenClaw (bot ouvert à tou
 qu'aux comptes listés dans JARVIS_DISCORD_OWNER_ID et ignore tout le reste sans rien dire.
 
   !plan NVDA            plan complet (long, action ; « short », « crypto » ou « action » en plus)
-  !avis NVDA            avis de JARVIS : long, short ou attendre, pourquoi, et ce que le labo a mesuré
+  !avis NVDA            avis de JARVIS en prix : entrer maintenant, sur repli (limite) ou sur cassure (stop),
+                        avec stop, objectifs et R/R, ou attendre, et pourquoi
+  !societe NVDA         fiche société : résultats, plus fortes séances de l'année et leur actu, chiffres,
+                        analystes, dirigeants, dépôts SEC, actus
   !prends NVDA          calcule le plan et suit le trade (TP/SL annoncés, cockpit) ; `!prends NVDA 132.5`
-                        = ton prix d'entrée réel, `stop 128` en plus pour ton stop
-  !positions            que faire des trades suivis avant la clôture : sortir, alléger ou garder
-  !position NVDA 132.5  même conseil pour une position prise hors de JARVIS (« short », `stop 128` en plus)
+                        = ton prix d'entrée réel, `stop 128` pour ton stop, `tp 140 145 150` pour tes objectifs
+  !positions            les ordres à poser sur les trades suivis (ventes, stop suiveur, renforts) et
+                        sortir, alléger ou garder
+  !position NVDA 132.5  même chose pour une position prise hors de JARVIS (« short », `stop 128` en plus)
   !scan                 scanner pré-ouverture tout de suite
   !bilan                bilan du forward-test sur le compte fictif
   !desaccords           trades pris contre l'avis de JARVIS (plans NO GO) comparés aux autres
@@ -44,8 +48,9 @@ from app.lab import morning as lab_morning
 from app.lab import status as lab_status
 from app.lab import potentiel as lab_potentiel
 from app.lab import strat_stats as lab_strategies
+from app.core.http import SourceError
 from app.notify.discord import split_message
-from app.trading import advice, paper, scanner
+from app.trading import advice, company, paper, scanner
 from app.trading import proposals as PR
 from app.trading import service as trading
 from app.trading.settings import settings
@@ -159,19 +164,36 @@ def _price(word: str) -> float | None:
 
 
 def parse_trade(args: list[str]) -> dict:
-    """« NVDA short », « eth », « SOL crypto long », « NVDA 132.5 stop 128 » → symbole, marché, sens,
-    prix d'entrée et stop (None quand ils ne sont pas donnés)."""
+    """« NVDA short », « eth », « SOL crypto long », « NVDA 132.5 stop 128 tp 140 145 150 » → symbole, marché,
+    sens, prix d'entrée, stop et objectifs (None quand ils ne sont pas donnés). Le premier nombre libre est
+    l'entrée ; `stop` (ou `sl`) prend le nombre suivant, `tp` (ou `objectifs`) tous les nombres qui suivent."""
     if not args:
         raise ValueError("donne un ticker, ex. `!plan NVDA`")
     words = [a.lower() for a in args[1:]]
-    entry = stop = None
-    for i, w in enumerate(words):
-        if w == "stop" and i + 1 < len(words):
-            stop = _price(words[i + 1])
-            if stop is None:
-                raise ValueError(f"stop illisible : `{words[i + 1]}`")
-        elif _price(w) is not None and (i == 0 or words[i - 1] != "stop") and entry is None:
-            entry = _price(w)
+    entry = stop = targets = None
+    mode = None  # "stop" : le prochain nombre est le stop ; "tp" : les nombres qui suivent sont des objectifs
+    for w in words:
+        if w in ("stop", "sl"):
+            mode = "stop"
+            continue
+        if w in ("tp", "tps", "objectif", "objectifs"):
+            mode, targets = "tp", targets or []
+            continue
+        x = _price(w)
+        if mode == "stop":
+            if x is None:
+                raise ValueError(f"stop illisible : `{w}`")
+            stop, mode = x, None
+        elif mode == "tp" and x is not None:
+            targets.append(x)
+        elif x is not None and entry is None:
+            entry = x
+        elif mode == "tp":
+            mode = None  # un mot (« short », « crypto ») termine la liste des objectifs
+    if mode == "stop":
+        raise ValueError("stop sans prix, ex. `stop 128`")
+    if targets == []:
+        raise ValueError("objectifs sans prix, ex. `tp 140 145 150`")
     symbol = args[0].upper()
     if symbol.endswith("USD") and len(symbol) > 4:  # « BTCUSD » → BTC
         symbol = symbol[:-3]
@@ -182,7 +204,7 @@ def parse_trade(args: list[str]) -> dict:
     else:
         market = "crypto" if symbol in CRYPTO | set(config.WATCHLIST_CRYPTO) else "stock"
     side = "short" if "short" in words else "long"
-    return {"symbol": symbol, "market": market, "side": side, "entry": entry, "stop": stop}
+    return {"symbol": symbol, "market": market, "side": side, "entry": entry, "stop": stop, "targets": targets}
 
 
 def settings_text() -> str:
@@ -249,10 +271,15 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
         if cmd == "plan":
             req = parse_trade(args)
             return trading.plan_text(await trading.build_plan(req["symbol"], req["market"], req["side"],
-                                                              req["entry"], req["stop"]))
+                                                              req["entry"], req["stop"], req["targets"]))
         if cmd == "avis":
             req = parse_trade(args)
             return advice.opinion_text(await advice.opinion(req["symbol"], req["market"]))
+        if cmd in ("societe", "société"):
+            req = parse_trade(args)
+            if req["market"] != "stock":
+                return f"La fiche société ne concerne que les actions (`!societe NVDA`) : {req['symbol']} est une crypto."
+            return company.sheet_text(await company.sheet(req["symbol"]))
         if cmd == "positions":
             from app import scheduler
             trades = scheduler.book.open_trades()
@@ -274,12 +301,15 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
             if req["entry"] is None:
                 return "Donne ton prix d'entrée, ex. `!position NVDA 132.5` (`short`, `stop 128` en plus si besoin)."
             a = await advice.advise_position(req["symbol"], req["market"], req["side"], req["entry"], req["stop"])
-            return (advice.advice_text(a) + f"\n-# Plan recalculé sur ton entrée {trading._num(req['entry'])} : stop "
-                    f"{trading._num(a['plan']['stop'])}, objectifs {', '.join(trading._num(t['price']) for t in a['plan']['targets'])}. "
-                    f"`!prends {a['symbol']} {req['entry']:g}{' short' if req['side'] == 'short' else ''}` pour que JARVIS la suive.")
+            text = advice.advice_text(a)
+            if a["decision"] != "SORTIR":
+                follow = {"side": a["side"], "entry": req["entry"], "stop": a["stop"], "targets": a["sales"]}
+                text += f"\n-# Pour que JARVIS la suive avec ces prix : {advice.take_command(a['symbol'], follow)}"
+            return text
         if cmd == "prends":
             req = parse_trade(args)
-            plan = await trading.build_plan(req["symbol"], req["market"], req["side"], req["entry"], req["stop"])
+            plan = await trading.build_plan(req["symbol"], req["market"], req["side"], req["entry"], req["stop"],
+                                            req["targets"])
             async with lock or asyncio.Lock():
                 from app import scheduler  # import tardif : scheduler importe ce module
                 scheduler.book.add(plan, "via Discord")
@@ -317,7 +347,7 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
             return PR.decision_text(PR.proposals.decide(int(args[0]), cmd == "oui"))
     except (ValueError, KeyError) as exc:
         return f"⚠️ {exc}"
-    except (trading.PlanError, scanner.ScanError) as exc:
+    except (trading.PlanError, scanner.ScanError, SourceError) as exc:
         return f"⚠️ {exc}"
     return None
 
