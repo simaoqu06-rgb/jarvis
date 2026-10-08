@@ -632,8 +632,12 @@ CACHE_KEY = "strategies"
 def signature(conn: sqlite3.Connection) -> list:  # worker seulement (base migrée)
     sig = list(conn.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM strat_trades").fetchone())
     sig.append(conn.execute("SELECT COUNT(*) FROM progress WHERE job = ?", (U.COVERAGE_JOB,)).fetchone()[0])
-    # n° 8 : Killmode complet et calendrier des résultats archivé (GO selon les résultats publiés)
-    sig.append(conn.execute("SELECT COUNT(*) FROM kill_complet").fetchone()[0])
+    # n° 8 : Killmode complet (lignes au coût en vigueur) et calendrier des résultats archivé (GO selon les
+    # résultats publiés) ; import tardif : kill_complet importe ce module
+    from app.lab import kill_complet as KC
+
+    cost = KC.cost_fingerprint()
+    sig += [cost, conn.execute("SELECT COUNT(*) FROM kill_complet WHERE cout = ?", (cost,)).fetchone()[0]]
     return sig + [conn.execute("SELECT COUNT(*) FROM earnings_days WHERE status = 'ok'").fetchone()[0]]
 
 

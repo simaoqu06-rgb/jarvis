@@ -19,8 +19,12 @@ Mesure principale (essai killmode_complet) : espérance de r_20e des KILL décle
 Mesure secondaire (essai killmode_complet_ecart_temoin) : écart KILL − témoin propre apparié par jour, une valeur
 par séance où les deux groupes ont un trade déclenché (moyenne des KILL − moyenne des témoins propres).
 Mesure sans essai : les KILL par motif (killmode.call_motif : résultats, fond, mouvement).
+r_20e et r_3c suivent killmode.real_r et stressed_r en vigueur : chaque ligne garde l'empreinte de cette méthode de
+coût (cost_fingerprint) ; quand elle change (PR #44 : gain compté en actions entières), les séances déjà calculées
+sont recalculées et ne comptent pas en attendant, pour que toutes les séances aient le même coût.
 Le direct relit le catalyseur pendant toute la vie de l'ordre ; le labo le lit une fois, à 9 h 45.
 """
+import hashlib
 import json
 import logging
 import sqlite3
@@ -54,11 +58,28 @@ READY_SCAN = 50
 EARNINGS_KEYS = ("date", "hour", "eps_estimate", "eps_actual", "revenue_estimate", "revenue_actual")
 NEWS_KEYS = ("title", "url", "published_at", "source", "summary")
 COLUMNS = ("day", "symbol", "groupe", "codes", "motif", "empreinte", "gap_pct", "atr_pct", "entry", "stop",
-           "signal_at", "triggered", "exit_reason", "r_net", "r_20e", "r_3c", "actus")
+           "signal_at", "triggered", "exit_reason", "r_net", "r_20e", "r_3c", "actus", "cout")
+# Trades types (sorties du simulateur, actions) qui fixent la méthode de coût : leurs r_20e et r_3c changent dès
+# que killmode.real_r ou stressed_r changent. Gros et petit nombre d'actions, sous 1 $, TP, stop, stop à
+# l'entrée, clôture.
+COST_PROBES = tuple(
+    {"triggered": True, "fill_price": fill, "order_prices": {"entry": e, "stop": s, "targets": t},
+     "exits": [{"part": part, "price": price, "reason": reason} for part, price, reason in exits]}
+    for fill, e, s, t, exits in (
+        (10.0, 10.0, 9.7, [10.3, 10.6, 10.9], ((1 / 3, 10.3, "tp1"), (1 / 3, 10.6, "tp2"), (1 / 3, 10.75, "cloture"))),
+        (4.01, 4.0, 3.88, [4.12, 4.24, 4.36], ((1 / 3, 4.12, "tp1"), (2 / 3, 4.0, "stop_be"))),
+        (0.8, 0.8, 0.76, [0.84, 0.88, 0.92], ((1.0, 0.76, "stop"),)),
+        (120.0, 120.0, 112.0, [128.0, 136.0, 144.0], ((1 / 3, 128.0, "tp1"), (2 / 3, 120.0, "stop_be")))))
 
 
 def frozen() -> bool:
     return K.CATALYST_CODE == CATALYST_CODE_N8
+
+
+def cost_fingerprint() -> str:
+    """Empreinte de la méthode de coût en vigueur (r_20e et r_3c des COST_PROBES)."""
+    values = [ST.cost_variants("stock", p) for p in COST_PROBES]
+    return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()[:10]
 
 
 class ArchiveFinnhub:
@@ -171,7 +192,7 @@ def price_rule(day: date, symbol: str, hist5: list[dict], session: list[dict], d
 
 async def day_rows(db: LabDB, day: date, transport=None) -> tuple[list[dict], dict]:
     """Lignes d'une séance prête et ses comptes (gappers listés, archivés, signaux de la règle de prix)."""
-    key = day.isoformat()
+    key, cost = day.isoformat(), cost_fingerprint()
     listed = db.conn.execute("SELECT COUNT(*) FROM gap_news WHERE day = ?", (key,)).fetchone()[0]
     gappers = db.conn.execute("SELECT symbol, news, news_from FROM gap_news WHERE day = ? AND status = 'ok' "
                               "ORDER BY symbol", (key,)).fetchall()
@@ -214,7 +235,7 @@ async def day_rows(db: LabDB, day: date, transport=None) -> tuple[list[dict], di
                          "motif": K.call_motif(cat, now), "empreinte": K.CATALYST_CODE, "gap_pct": r["gap_open_pct"],
                          "atr_pct": r["atr_pct"], "entry": r["entry"], "stop": r["stop"], "signal_at": r["signal_at"],
                          "triggered": int(bool(r["triggered"])), "exit_reason": r["exit_reason"], "r_net": r["r_net"],
-                         "r_20e": r.get("r_20e"), "r_3c": r.get("r_3c"), "actus": len(news)})
+                         "r_20e": r.get("r_20e"), "r_3c": r.get("r_3c"), "actus": len(news), "cout": cost})
     stats["signaux"] = len(rows)
     return rows, stats
 
@@ -226,6 +247,12 @@ async def step(db: LabDB, max_seconds: float, transport=None) -> int | str:
         return 0
     if not frozen():
         return f"arrêté : empreinte du catalyseur {K.CATALYST_CODE} ≠ {CATALYST_CODE_N8} (déclaration n° 8)"
+    stale = [d for (d,) in db.conn.execute("SELECT DISTINCT day FROM kill_complet WHERE cout IS NOT ?",
+                                           (cost_fingerprint(),))]
+    if stale:  # méthode de coût changée : ces séances repassent (lignes gardées, hors mesure, jusque-là)
+        with db.transaction():
+            db.conn.executemany("DELETE FROM progress WHERE job = ? AND key = ?", [(JOB, d) for d in stale])
+        log.info("Labo : Killmode complet, %d séances à recalculer (méthode de coût changée)", len(stale))
     started, done = time.monotonic(), 0
     for day in ready_days(db):
         if done and time.monotonic() - started >= max_seconds:
@@ -245,21 +272,27 @@ async def step(db: LabDB, max_seconds: float, transport=None) -> int | str:
 # --- Tableau (lecture seule) -----------------------------------------------------------------------
 
 def report(conn: sqlite3.Connection, trials: int) -> dict | None:
-    """Mesures de la déclaration n° 8 sur les lignes de l'empreinte déclarée ; None avant la première séance."""
+    """Mesures de la déclaration n° 8 sur les lignes de l'empreinte déclarée et du coût en vigueur ; None avant la
+    première séance."""
+    cost = cost_fingerprint()
     try:
-        days = conn.execute("SELECT COUNT(*), MIN(key), MAX(key) FROM progress WHERE job = ?", (JOB,)).fetchone()
-        rows = conn.execute("SELECT day, groupe, motif, empreinte, triggered, r_20e, r_3c, r_net FROM kill_complet "
-                            "ORDER BY day").fetchall()
+        days = conn.execute("SELECT COUNT(*), MIN(key), MAX(key) FROM progress WHERE job = ? AND key NOT IN "
+                            "(SELECT day FROM kill_complet WHERE cout IS NOT ?)", (JOB, cost)).fetchone()
+        rows = conn.execute("SELECT day, groupe, motif, empreinte, triggered, r_20e, r_3c, r_net, cout "
+                            "FROM kill_complet ORDER BY day").fetchall()
     except sqlite3.Error:
         return None
-    if not days[0] and frozen():
+    stale = sum(1 for r in rows if r[8] != cost)
+    if not days[0] and frozen() and not stale:
         return None
     groups = {g: {"signaux": 0, "declenches": 0, "r_20e": SS.Mean(), "r_3c": SS.Mean(), "r_net": SS.Mean()}
               for g in GROUPS}
     per_day: dict = defaultdict(lambda: {g: [0.0, 0] for g in PAIRED})
     motifs: dict = defaultdict(SS.Mean)
     other = 0
-    for day, groupe, motif, fp, trig, r20, r3, rn in rows:
+    for day, groupe, motif, fp, trig, r20, r3, rn, row_cost in rows:
+        if row_cost != cost:
+            continue  # à recalculer au coût en vigueur
         if fp != CATALYST_CODE_N8:
             other += 1
             continue
@@ -291,6 +324,7 @@ def report(conn: sqlite3.Connection, trials: int) -> dict | None:
     return {
         "empreinte": CATALYST_CODE_N8, "empreinte_du_code": K.CATALYST_CODE, "figee": frozen(),
         "seances": days[0], "du": days[1], "au": days[2], "autre_empreinte": other,
+        "cout": cost, "a_recalculer": stale,
         "groupes": {g: {"signaux": a["signaux"], "declenches": a["declenches"], "r_20e": a["r_20e"].result(),
                         "r_3c": a["r_3c"].result(), "r_net": a["r_net"].result()} for g, a in groups.items()},
         "principal": main | {"seuil_t": seuil, "r_3c": stress, "moitie_1": halves[0], "moitie_2": halves[1],
@@ -323,5 +357,8 @@ def text(rep: dict | None) -> str | None:
     if g["donnees"]["signaux"] or g["fenetre_coupee"]["signaux"]:
         parts.append(f"écartés : {g['donnees']['signaux']} sans données complètes, "
                      f"{g['fenetre_coupee']['signaux']} aux actus coupées")
-    return (f"Killmode complet (n° 8, catalyseur rejoué sur l'archive, {rep['seances']} séances "
-            f"{rep['du']} → {rep['au']}) : " + " · ".join(parts))
+    if rep.get("a_recalculer"):
+        parts.append(f"{rep['a_recalculer']} signaux à recalculer (méthode de coût changée)")
+    span = f" {rep['du']} → {rep['au']}" if rep["du"] else ""
+    return (f"Killmode complet (n° 8, catalyseur rejoué sur l'archive, {rep['seances']} séances{span}) : "
+            + " · ".join(parts))

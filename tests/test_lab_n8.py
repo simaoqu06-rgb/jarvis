@@ -362,6 +362,22 @@ async def test_mesure_arretee_si_le_catalyseur_change(kill_db, monkeypatch):
     assert rep["figee"] is False and "mesure arrêtée" in KC.text(rep)
 
 
+async def test_seances_recalculees_quand_le_cout_change(kill_db, monkeypatch):
+    assert await KC.step(kill_db, 60) == 1
+    before = KC.report(kill_db.conn, 148)
+    assert before["a_recalculer"] == 0 and before["groupes"]["kill"]["declenches"] == 1
+    real_r = K.real_r
+    monkeypatch.setattr(K, "real_r", lambda call, res: None if real_r(call, res) is None else real_r(call, res) - 0.1)
+    rep = KC.report(kill_db.conn, 148)                      # ex. PR #44 : gain compté en actions entières
+    assert rep["cout"] != before["cout"] and rep["a_recalculer"] == 5 and rep["seances"] == 0
+    assert rep["groupes"]["kill"]["declenches"] == 0 and "5 signaux à recalculer" in KC.text(rep)
+    assert await KC.step(kill_db, 60) == 1                  # la séance repasse au coût en vigueur
+    after = KC.report(kill_db.conn, 148)
+    assert after["a_recalculer"] == 0 and after["seances"] == 1
+    assert after["groupes"]["kill"]["r_20e"]["esperance_r"] == pytest.approx(
+        before["groupes"]["kill"]["r_20e"]["esperance_r"] - 0.1, abs=1e-4)
+
+
 def _kill_rows(db, days, kill_r=0.5, stress=0.4, other_fp=False):
     for k, day in enumerate(days):
         noise = 0.05 * (k % 3 - 1)
@@ -369,9 +385,10 @@ def _kill_rows(db, days, kill_r=0.5, stress=0.4, other_fp=False):
                 ("A1", "temoin_autre", -0.3)]
         for symbol, groupe, r in rows:
             db.conn.execute("INSERT INTO kill_complet (day, symbol, groupe, empreinte, triggered, r_20e, r_3c, r_net, "
-                            "motif) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)",
+                            "motif, cout) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)",
                             (day, symbol, groupe, "autre" if other_fp else KC.CATALYST_CODE_N8, r,
-                             stress if groupe == "kill" else r, r, "fond" if groupe == "kill" else None))
+                             stress if groupe == "kill" else r, r, "fond" if groupe == "kill" else None,
+                             KC.cost_fingerprint()))
         db.set(KC.JOB, day, {"gappers": 4, "archives": 4, "signaux": 4})
 
 
@@ -398,6 +415,6 @@ def test_worker_branche_les_etapes_de_la_n8():
     assert {p: b["kill_complet_seconds"] for p, b in W.LAB2_BUDGET.items()} == {"nuit": 600, "jour": 120, "seance": 0}
     assert W.KC is KC and W.COUT is COUT
     db = LabDB(":memory:")
-    assert SS.signature(db.conn)[3:] == [0, 0]
+    assert SS.signature(db.conn)[3:] == [KC.cost_fingerprint(), 0, 0]
     _kill_rows(db, ["2025-11-03"])
-    assert SS.signature(db.conn)[3] == 4
+    assert SS.signature(db.conn)[4] == 4

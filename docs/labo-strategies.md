@@ -586,6 +586,11 @@ témoin qu'au-delà d'environ 0,5 R, même à 100 KILL. L'archive (section préc
   de l'IC est au-dessus de 0, t ≥ seuil (D4), au moins 30 trades, et si l'espérance reste positive sous le stress
   de 3 cents et sur chaque moitié chronologique des jours. Le coût réel décide ici parce que Killmode est ce que
   Simão trade, à cette taille.
+- `r_20e` et `r_3c` sont ceux de `killmode.real_r` et `stressed_r` **en vigueur** (depuis la PR #44 : gain compté
+  bracket par bracket en actions entières, reste vendu en un seul ordre à la clôture). Chaque ligne garde
+  l'empreinte de cette méthode de coût (`kill_complet.cost_fingerprint`, calculée sur des trades types) : si elle
+  change, les séances déjà calculées sont recalculées et ne comptent pas en attendant (`!strategies` dit combien),
+  pour que toutes les séances aient le même coût. Un changement de méthode après une première lecture se note ici.
 - **Mesure secondaire (essai `killmode_complet_ecart_temoin`)** : écart KILL − témoin propre **apparié par jour** :
   une valeur par séance où les deux groupes ont au moins un trade déclenché (moyenne des KILL − moyenne des témoins
   propres, en `r_20e`). Le catalyseur « aide » si cet écart est positif avec t ≥ seuil sur ces séances et au moins
@@ -620,7 +625,9 @@ commission IBKR par action comprise) et `r_20e` (mise de Simão, comme Killmode)
 stratégie n'est « candidate » que si sa référence reste positive sous le stress de 3 cents**, en plus du glissement
 ×2 et ×3, du retard, des ordres manqués et des deux moitiés. `r_20e` est affiché (« à 20 € ») avec un drapeau
 « rentable à 20 € » qui ne décide pas : il dépend de la taille du compte (6 minimums de 1 $ pèsent 0,1 à 0,3 R sur
-~23 $ de risque), pas de l'avantage de la règle.
+~23 $ de risque), pas de l'avantage de la règle. Ce chiffre affiché suit `killmode.real_r` au moment du rejeu : si
+la méthode change en cours de rattrapage, l'affichage mélange deux versions jusqu'au rattrapage suivant (seul
+Killmode complet, où il décide, est recalculé).
 
 ### D3 : plancher d'un demi-pas
 

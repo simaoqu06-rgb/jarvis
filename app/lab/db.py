@@ -155,7 +155,7 @@ CREATE TABLE IF NOT EXISTS earnings_days (
 CREATE TABLE IF NOT EXISTS kill_complet (
     day TEXT NOT NULL, symbol TEXT NOT NULL, groupe TEXT NOT NULL, codes TEXT, motif TEXT, empreinte TEXT NOT NULL,
     gap_pct REAL, atr_pct REAL, entry REAL, stop REAL, signal_at INTEGER, triggered INTEGER NOT NULL,
-    exit_reason TEXT, r_net REAL, r_20e REAL, r_3c REAL, actus INTEGER,
+    exit_reason TEXT, r_net REAL, r_20e REAL, r_3c REAL, actus INTEGER, cout TEXT,
     PRIMARY KEY (day, symbol)
 );
 -- Bloc scellé (seal.py) : mêmes tables, jamais lues par les statistiques, la routine ni le grade.
