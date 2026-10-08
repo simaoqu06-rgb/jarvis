@@ -1078,14 +1078,14 @@ def stats(book: list[dict], groupe: str = "kill", key: str = "r_20e") -> dict:
             "tp1": sum(1 for c in trig if c["resultat"]["tp"][:1] == [True])}
 
 
-def call_gap(book: list[dict], scan_only: bool = False) -> dict:
+def call_gap(book: list[dict], scan_only: bool = False, key: str = "r_20e") -> dict:
     """Écart par appel KILL − témoin propre (0 R pour un ordre expiré), chaque action et séance comptée une fois
     selon son premier appel ; `scan_only` : les appels du scan seulement (même source, même retard, actions que
     Simão n'a pas choisies). Descriptif, il ne décide rien : il faudrait des centaines de séances pour voir 0,3 R.
     C'est la valeur prédictive du filtre catalyseur à règle de prix égale, pas l'effet causal d'une actu ; elle se
     mesure au labo."""
     first = [c for c in first_calls(book) if not scan_only or (c.get("source") or "").startswith("alpaca")]
-    k, w = stats(first, "kill"), stats(first, "temoin_propre")
+    k, w = stats(first, "kill", key), stats(first, "temoin_propre", key)
     if k["par_appel_r"] is None or w["par_appel_r"] is None:
         return {"m": None, "ci": None, "n": (k["soldes"], w["soldes"])}
     m = k["par_appel_r"] - w["par_appel_r"]
@@ -1580,6 +1580,9 @@ def _call_gap_line(cur: list[dict]) -> str | None:
             lines.append(f"{label} {SS._r(g['m'])} R{ci} ({g['n'][0]} KILL, {_n(g['n'][1], 'témoin')})")
     if not lines:
         return None
+    fav = call_gap(cur, False, "r_fav")
+    if fav["m"] is not None:  # GPT : l'écart apparié dans les deux ordres des minutes ambiguës
+        lines.append(f"meilleur ordre des minutes ambiguës {SS._r(fav['m'])} R toutes sources")
     return ("-# Écart par appel KILL − témoin propre : " + " · ".join(lines) + ". Descriptif, il ne décide rien : "
             "même à 100 KILL seul un écart de plus de ~0,5 R se verrait. C'est la valeur prédictive du filtre "
             "catalyseur, pas l'effet causal d'une actu.")

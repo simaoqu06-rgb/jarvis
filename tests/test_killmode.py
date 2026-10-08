@@ -753,6 +753,9 @@ def test_pire_et_meilleur_ordre(paths, monkeypatch):
     assert K.value(c) < -1 < 0 < K.value(c, "r_fav")
     line = K.ambiguous_line([c])
     assert "1/1 KILL changent selon l'ordre" in line and "pire ordre (celui qui compte)" in line
+    w = c | {"groupe": "temoin_catalyseur", "codes": ["pas_de_positive"], "symbol": "WIT"}
+    gap = K._call_gap_line([c, w])
+    assert "toutes sources +0,00 R" in gap and "meilleur ordre des minutes ambiguës +0,00 R" in gap
 
 
 async def test_bilan_permis_eteint(paths, monkeypatch):
