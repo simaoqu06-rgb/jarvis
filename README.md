@@ -336,12 +336,35 @@ Liste, seuils et sorties sont déclarés d'avance : [docs/labo-strategies.md](do
 - Les jours traités avant le labo v2 sont rattrapés hors séance (bougies relues à la source, rien stocké).
 - `!strategies`, `GET /api/lab/strategies`, ligne « Labo v2 » et ligne 🔒 de `!labo`.
 
+## Avis sur un actif et conseil avant la clôture
+
+`!avis NVDA` (ou `GET /api/trading/opinion?symbol=NVDA`) calcule le plan long et le plan short, prend
+le côté GO (la meilleure note s'il y en a deux) et le ramène à « attendre » si aucun objectif n'a une
+espérance positive une fois rejoué sur l'historique de l'actif. L'avis affiche ce que le labo a mesuré
+(plans v1 rejoués, hors bloc scellé) : tant que le GO ne fait pas nettement mieux que le NO GO, il le dit.
+
+30 min avant la clôture US (`JARVIS_CLOSE_ADVICE_MINUTES`), chaque action suivie encore ouverte reçoit
+un conseil (aussi `!positions`, bouton « Que faire ? » du cockpit, `GET /api/trading/advice`) :
+
+1. résultats trimestriels avant la fin de la prochaine séance → **SORTIR** ;
+2. garder jusqu'au prochain objectif perd en moyenne (rejoué depuis le prix actuel avec le stop suivi) → **SORTIR** ;
+3. objectif en retard et position qui ne gagne pas → **SORTIR** ;
+4. signe de retournement sur une position gagnante → **ALLÉGER** (moitié dehors, stop à l'entrée) ;
+5. le gap de nuit a sauté le stop dans au moins 10 % des 250 dernières nuits (`JARVIS_GAP_LIMIT`) → **ALLÉGER** ;
+6. sinon **GARDER**, avec le stop à laisser.
+
+Règles fixes, pas encore validées : chaque conseil est gardé sur le trade (un par jour) et, une fois le
+trade terminé, comparé à une sortie au moment du conseil (ligne « Bilan des conseils »).
+
 ## Commandes Discord
 
 | Commande | Effet |
 |---|---|
 | `!plan NVDA` | plan complet en temps réel (ajoute `short`, `crypto` ou `action` si besoin) |
-| `!prends NVDA` | calcule le plan et suit le trade (TP/SL annoncés, cockpit) |
+| `!avis NVDA` | avis de JARVIS : entrer long, entrer short ou attendre, pourquoi, ce qui invaliderait, et ce que le labo a mesuré |
+| `!prends NVDA` | calcule le plan et suit le trade (TP/SL annoncés, cockpit) ; `!prends NVDA 132.5 stop 128` = ton entrée et ton stop réels |
+| `!positions` | trades suivis : sortir, alléger ou garder, avec les faits (aussi envoyé seul 30 min avant la clôture US) |
+| `!position NVDA 132.5` | même conseil pour une position prise hors de JARVIS (`short`, `stop 128` en plus) |
 | `!scan` | scanner tout de suite |
 | `!bilan` | bilan du forward-test |
 | `!desaccords` | trades pris contre l'avis de JARVIS (NO GO) comparés aux plans GO : qui avait raison |
