@@ -284,6 +284,33 @@ def test_autre_ordre_dans_une_minute_choisie():
     assert other["exits"][0]["price"] == 96.0 and other["r_gross"] == -2.0  # le plus bas avant : gap plus tard
 
 
+def test_objectif_depasse_a_l_ouverture_est_certain():
+    """Une minute qui ouvre au-delà d'un objectif l'exécute avant tout le reste : ce qui suit ne peut plus le défaire
+    (relecture du troisième avis). Avant, l'objectif comptait comme ambigu, voire comme un stop."""
+    flat = [(96.0,) * 4] * 3
+    rows = [(99.5, 100.2, 99.4, 100.1), (102.5, 102.6, 99.9, 100.5), (96.0, 96.2, 95.8, 96.0)] + flat
+    r = run_stop(rows, "prudente")
+    assert [(e["reason"], e["price"]) for e in r["exits"]] == [("tp1", 102.0), ("stop_be", 100.0)]
+    assert r["ambigus"] == [] and r["r_gross"] == pytest.approx(1 / 3, abs=1e-3)
+    r = run_stop([(99.5, 100.2, 99.4, 100.1), (102.5, 102.6, 97.5, 97.8)] + flat, "prudente")  # puis sous le stop
+    assert [(e["reason"], e["price"]) for e in r["exits"]] == [("tp1", 102.0), ("stop_be", 100.0)]
+    r = run_stop([(106.5, 106.6, 99.9, 100.5)] + flat, "prudente")  # achat à l'ouverture au-delà des trois objectifs
+    assert r["exit_reason"] == "tp3" and r["r_gross"] == 0.0 and {e["price"] for e in r["exits"]} == {106.5}
+    assert run_stop(rows, "v1")["exits"] == SIM.simulate(
+        plan(), minutes(rows), market="stock", decided_at=OPEN, entry_until=CLOSE, exit_at=CLOSE, last_price=99.5,
+        cost=ZERO, entry_order="stop", bar_seconds=60)["exits"]  # le labo : inchangé
+
+
+def test_troisieme_ordre_objectifs_puis_entree():
+    """`("be", t)` dans `flip` : l'achat, tous les objectifs traversés, puis le retour à l'entrée dans la minute."""
+    rows = [(99.5, 104.5, 97.5, 100.5), (95.0, 95.2, 94.8, 95.0)] + [(95.0,) * 4] * 3
+    kw = dict(market="stock", decided_at=OPEN, entry_until=CLOSE, exit_at=CLOSE, last_price=99.5, cost=ZERO,
+              entry_order="stop", bar_seconds=60, resolution="prudente")
+    got = {k: SIM.simulate(plan(), minutes(rows), flip=frozenset(f), **kw)["r_gross"]
+           for k, f in (("pire", ()), ("autre", {OPEN}), ("be", {("be", OPEN)}))}
+    assert got == pytest.approx({"pire": -1.0, "autre": 1 / 6, "be": 1.0}, abs=1e-3)
+
+
 def test_bougie_d_une_transaction_transmet_son_bid_et_son_ask():
     bars = [{"t": OPEN, "o": 99.9, "h": 99.9, "l": 99.9, "c": 99.9, "v": 100.0, "ns": 1, "bid": 99.8, "ask": 99.95},
             {"t": OPEN, "o": 100.2, "h": 100.2, "l": 100.2, "c": 100.2, "v": 100.0, "ns": 2, "bid": 100.1, "ask": 100.3},

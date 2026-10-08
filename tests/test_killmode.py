@@ -862,13 +862,14 @@ def test_transactions_comme_ibkr_les_voit():
                       (3, 100.5, " B", "A", ""),           # prix moyen (CTA)
                       (4, 100.01, "@B", "C", ""),          # transaction groupée (UTP) : éligible
                       (5, 101.0, "@", "C", ""),            # à plus de 0,5 % du NBBO : IBKR l'ignore
-                      (6, 100.02, "@", "C", "canceled"),   # annulée
+                      (6, 100.02, "@", "C", "canceled"),   # annulée après coup : IBKR l'a vue, elle compte
+                      (7, 100.01, "@", "C", "corrected"),  # correction insérée après coup : IBKR ne l'a pas vue
                       (31, 100.04, "@", "C", ""),          # NBBO sans bid : IBKR ne déclenche pas
                       (41, 100.05, "@F", "C", "")],        # balayage intermarchés, sans cotation après
                   quotes=[(10, 100.01, 100.03), (30, 0.0, 100.05), (40, 100.0, 100.06)], q0=(100.0, 100.02))
     bars = K.tick_bars(m, data)
     assert [(b["o"], b["bid"], b["ask"]) for b in bars] == [(100.01, 100.0, 100.03), (100.01, 100.0, 100.03),
-                                                           (100.05, 100.0, 100.06)]
+                                                           (100.02, 100.0, 100.03), (100.05, 100.0, 100.06)]
     assert all(b["t"] == m and b["h"] == b["l"] == b["o"] for b in bars)
     # Sans cotation lue, la transaction compte à son prix.
     assert K.tick_bars(m, _ticks(m, [(1, 100.0, "@", "C", "")]))[0]["bid"] is None
@@ -923,11 +924,41 @@ def test_pire_de_tous_les_ordres():
                                                     (103.0, 103.1, 102.9, 103.0)] + [(103.0,) * 4] * 300)
     res = K.settle(_call(at), minutes(rows))
     assert res["sorties"][0]["prix"] == 103.0 and res["sorties_fav"][0]["prix"] == 104.49
-    assert res["ordres_joues"] == 2 and not res["ordres_tronques"]
+    assert res["ordres_joues"] == 3 and not res["ordres_tronques"]  # pire, autre, objectifs puis entrée
     assert res["ambigus"] == [{"t": OPEN + 31 * 60, "cas": "entree_et_stop"}] and res["a_lire"] == [OPEN + 31 * 60,
                                                                                                     OPEN + 33 * 60]
     c = _call(at) | {"groupe": "kill", "resultat": res | {"eurusd": 1.15, "plan_ibkr": "fixe"}}
     assert K.value(c) < K.value(c, "r_fav") < -1
+
+
+def test_meilleur_ordre_objectifs_puis_entree():
+    """Troisième ordre d'une minute d'entrée touchée des deux côtés : l'achat, les objectifs, puis le plus bas (retour
+    à l'entrée). C'est le meilleur ici ; le pire ordre minute par minute et « le plus bas avant l'achat » non."""
+    at = OPEN + 30 * 60
+    rows = [(106.0, 106.1, 105.9, 106.0)] * 31 + [(106.0, 110.8, 104.3, 106.8)] + [(103.0,) * 4] * 300
+    res = K.settle(_call(at), minutes(rows))
+    assert res["ordres_joues"] == 3 and res["sorties"][0] == {"prix": 104.49, "part": 1.0, "raison": "stop"}
+    assert [(e["raison"], e["prix"]) for e in res["sorties_fav"]] == [("tp1", 108.53), ("tp2", 110.55),
+                                                                     ("stop_be", 106.51)]
+
+
+def test_pire_classe_aux_prix_mesures():
+    """Les chemins sont classés sur le chiffre qui décide, aux prix mesurés : deux ordres au même R du simulateur
+    finissent loin l'un de l'autre quand le stop à l'entrée part au bid mesuré, très bas."""
+    at = OPEN + 30 * 60
+    m = [OPEN + k * 60 for k in range(41)]
+    rows = ([(106.0, 106.1, 105.9, 106.0)] * 31 + [(106.51, 106.6, 106.5, 106.55), (106.6, 108.6, 106.5, 106.7)]
+            + [(106.7, 106.8, 106.6, 106.7)] * 7 + [(106.6, 106.6, 106.51, 106.51)] + [(106.0, 106.1, 105.9, 106.0)] * 300)
+    ticks = {str(m[31]): _ticks(m[31], [(1, 106.51, "@", "C", ""), (2, 106.55, "@", "C", "")],
+                                quotes=[(0, 106.5, 106.52)]),
+             str(m[40]): _ticks(m[40], [(1, 106.55, "@", "C", ""), (3, 106.51, "@", "C", "")],
+                                quotes=[(2, 106.5, 106.56), (4, 100.0, 100.1)], q0=(106.54, 106.56))}
+    res = K.settle(_call(at), minutes(rows), ticks=ticks, eurusd=1.15, plan_ibkr="fixe")
+    assert res["a_lire"] == [m[32]] and res["ambigus"] == [{"t": m[32], "cas": "objectif_puis_entree"}]
+    last = res["sorties"][-1]
+    assert (last["raison"], last["prix"], last.get("mesure")) == ("stop_be", 100.0, True)
+    c = _call(at) | {"groupe": "kill", "resultat": res | {"eurusd": 1.15, "plan_ibkr": "fixe"}}
+    assert K.value(c) < -1 < 0 < K.value(c, "r_fav")
 
 
 async def test_minutes_qui_decident_lues_et_gardees(paths, monkeypatch):
@@ -965,7 +996,7 @@ async def test_minute_refusee_retentee_au_bilan_suivant(paths, monkeypatch):
     res = K.calls()[0]["resultat"]
     assert res["a_lire"] == [fill_m] and not res["remplissage_mesure"]
     monkeypatch.setattr(K, "lab_item", lambda: None)
-    assert "1 minute encore à lire" in K.bilan_text(K.calls())
+    assert "1 minute encore à lire" in K.bilan_text(K.calls(), now=later)
     asked = tick_feed(monkeypatch)
     assert await K.settle_due(later) == 1 and asked == [fill_m]
     c = K.calls()[0]
@@ -975,7 +1006,9 @@ async def test_minute_refusee_retentee_au_bilan_suivant(paths, monkeypatch):
     book = K.calls()
     book[0]["resultat"]["a_lire"] = [fill_m]
     K._write(K.CALLS_PATH, book)
-    assert await K.settle_due(stale) == 0  # au-delà de 7 jours, plus retentée
+    assert await K.settle_due(stale) == 0  # au-delà de 7 jours, plus retentée, et le bilan le dit
+    text = K.bilan_text(K.calls(), now=stale)
+    assert "1 minute jamais lue (plus retentée après 7 jours" in text and "encore à lire" not in text
 
 
 def test_frais_sans_glissement_sur_un_prix_mesure():

@@ -139,6 +139,7 @@ TICKS_DIR = os.getenv("JARVIS_KILLMODE_TICKS_PATH", "data/killmode_ticks")  # tr
 TICK_ROUNDS = 6        # re-soldes par bilan : une minute lue peut déplacer le chemin et en désigner une autre
 TICK_MINUTES_MAX = 30  # minutes lues au plus par appel et par bilan (3 requêtes chacune ; Alpaca gratuit : 200/min)
 ORDERINGS_MAX = 256    # ordres possibles des minutes ambiguës restées sans transactions (au-delà : tronqué, et dit)
+THREE_WAYS = ("entree_et_stop", "objectif_puis_entree")  # minutes à trois ordres : pire, autre, objectifs puis entrée
 IBKR_LEEWAY = 0.005    # méthode « Last » d'IBKR : dernier prix dans le NBBO à 0,5 % du dernier prix près
 QUOTE_LOOKBACK = 3600  # cotation en vigueur au début d'une minute : la dernière de l'heure qui précède
 # Conditions de vente qui ne font pas de dernier cours (spécifications CTS Pillar 2.11b et UTDF 4.1 ; Alpaca les
@@ -147,7 +148,10 @@ QUOTE_LOOKBACK = 3600  # cotation en vigueur au début d'une minute : la derniè
 # groupée éligible en UTP (tape C).
 NOT_LAST = frozenset("ICRNUVHMQGTPWZ479")
 NOT_LAST_CTA = frozenset("B")
-VOID = ("canceled", "incorrect")  # champ u d'Alpaca : transaction annulée, ou remplacée par sa correction
+# Champ u d'Alpaca : une transaction annulée (« canceled ») ou erronée (« incorrect ») a bien été diffusée, et IBKR
+# l'a vue avant l'annulation, qui arrive après : elle compte. Sa correction est insérée après coup, à un prix qu'IBKR
+# n'a pas vu à cet instant : elle ne compte pas.
+AFTER_THE_FACT = ("corrected",)
 # Frais réels de Simão (le chiffre qui décide) : 20 € de risque par trade, un bracket IBKR par objectif (une
 # entrée et une sortie chacun, donc deux minimums de commission), plan Fixe sauf JARVIS_IBKR_PLAN=degressif ;
 # glissement du labo, jamais moins d'un demi-pas par côté.
@@ -786,8 +790,9 @@ def _quote_ok(q: list | None) -> bool:
 
 def tick_bars(m: int, data: dict) -> list[dict]:
     """La minute `m` transaction par transaction, comme IBKR la voit (stop simulé, méthode « Last », le défaut pour
-    les actions US) : ne déclenchent que les transactions qui font un dernier cours (conditions, ni annulées ni
-    remplacées), quand le NBBO en vigueur est valide et les contient à 0,5 % près. Chacune devient une bougie
+    les actions US) : ne déclenchent que les transactions qui font un dernier cours (conditions ; telles que
+    diffusées, annulées après coup comprises, corrections écartées), quand le NBBO en vigueur est valide et les
+    contient à 0,5 % près. Chacune devient une bougie
     o = h = l = c ; `bid` et `ask` sont le pire de la cotation en vigueur et de la suivante : l'ordre au marché part
     après la transaction qui le déclenche. Sans cotation lue, la transaction compte et son prix sert. Une minute
     sans transaction éligible disparaît : rien ne s'y déclenche."""
@@ -799,7 +804,7 @@ def tick_bars(m: int, data: dict) -> list[dict]:
     for ns, p, size, cond, tape, upd in data.get("t") or []:
         while k < len(quotes) and quotes[k][0] <= ns:
             cur, k = quotes[k], k + 1
-        if upd in VOID or any(x in NOT_LAST for x in cond) or (tape in ("A", "B") and any(x in NOT_LAST_CTA
+        if upd in AFTER_THE_FACT or any(x in NOT_LAST for x in cond) or (tape in ("A", "B") and any(x in NOT_LAST_CTA
                                                                                        for x in cond)):
             continue
         if cur is not None and (not _quote_ok(cur) or not cur[1] - IBKR_LEEWAY * p <= p <= cur[2] + IBKR_LEEWAY * p):
@@ -820,22 +825,28 @@ def refine(bars: list[dict], ticks: dict) -> list[dict]:
     return out
 
 
-def orderings(run) -> tuple[dict, dict, list[dict], bool]:
+def orderings(run, score) -> tuple[dict, dict, list[dict], bool]:
     """Tous les ordres possibles des minutes ambiguës : `run(flip)` rejoue la séance avec les minutes de `flip`
-    dans l'autre ordre que le pire. Le pire ordre minute par minute n'est pas le pire résultat (troisième avis de
-    GPT : l'autre ordre peut garder la position ouverte jusqu'à un gap) : le pire et le meilleur sont pris sur
-    tous les chemins (R net), avec la liste des chemins joués et s'il a fallu s'arrêter à ORDERINGS_MAX."""
+    dans l'autre ordre que le pire, et celles de `("be", t)` objectifs d'abord puis retour à l'entrée (troisième
+    ordre d'une minute d'entrée touchée des deux côtés, ou d'un objectif suivi d'un retour à l'entrée). Le pire
+    ordre minute par minute n'est pas le pire résultat (troisième avis de GPT : l'autre ordre peut garder la
+    position ouverte jusqu'à un gap) : le pire et le meilleur sont pris sur tous les chemins par `score` (le
+    chiffre qui décide, aux prix mesurés ; à égalité, le premier joué), avec la liste des chemins joués et s'il a
+    fallu s'arrêter à ORDERINGS_MAX."""
     todo, done = [frozenset()], {}
     while todo and len(done) < ORDERINGS_MAX:
         f = todo.pop()
         if f in done:
             continue
         r = done[f] = run(f)
-        todo += [f | {a["t"]} for a in r.get("ambigus", []) if a["t"] not in f and f | {a["t"]} not in done]
+        for a in r.get("ambigus", []):
+            if a["t"] in f or ("be", a["t"]) in f:
+                continue
+            todo += [g for g in [f | {a["t"]}] + ([f | {("be", a["t"])}] if a["cas"] in THREE_WAYS else [])
+                     if g not in done]
     paths = list(done.values())
-    score = [(r["r_net"] if r["r_net"] is not None else 0.0) for r in paths]
-    return (paths[score.index(min(score))], paths[score.index(max(score))], paths,
-            any(f not in done for f in todo))
+    s = [score(r) for r in paths]
+    return paths[s.index(min(s))], paths[s.index(max(s))], paths, any(f not in done for f in todo)
 
 
 def priced(res: dict) -> dict:
@@ -868,7 +879,8 @@ def to_read(res: dict) -> set[int]:
     return need | {e["at"] for e in res["exits"] if e["reason"].startswith("stop") and "ns" not in e}
 
 
-def settle(call: dict, bars: list[dict], step: int = STEP, ticks: dict | None = None) -> dict:
+def settle(call: dict, bars: list[dict], step: int = STEP, ticks: dict | None = None, eurusd: float | None = None,
+           plan_ibkr: str | None = None) -> dict:
     """Solde un appel sur les bougies de sa séance (`step` secondes, 1 min) : ordre stop d'achat actif à
     `activation` (une bougie qui ouvre au-dessus de l'entrée remplit à son ouverture : l'ordre part au prix du
     moment, jamais sous l'entrée), gestion du labo (un tiers par objectif, stop à l'entrée après TP1), soldé à la
@@ -878,7 +890,8 @@ def settle(call: dict, bars: list[dict], step: int = STEP, ticks: dict | None = 
     vient le chiffre qui décide), le meilleur `sorties_fav` (affiché), `sorties_2t` le pire avec des objectifs
     exigés à 2 pas (stress de Gemini, affiché). `r_ibkr` rejoue l'appel comme le labo (bougies de 5 min dès la
     suivante, résolution et frais du labo), pour la comparaison au labo seulement. Garde le détail (remplissage,
-    sorties, pire excursion) d'où le bilan recalcule les frais réels, et la règle refaite sur les bougies SIP."""
+    sorties, pire excursion) d'où le bilan recalcule les frais réels, et la règle refaite sur les bougies SIP. Les
+    chemins sont classés sur le R aux frais réels (`_at_size`, au change `eurusd` et au plan `plan_ibkr` du solde)."""
     ticks = ticks or {}
     act = activation(call, step)
     plan = {"side": "long", "entry": call["entry"], "stop": call["stop"],
@@ -889,9 +902,13 @@ def settle(call: dict, bars: list[dict], step: int = STEP, ticks: dict | None = 
     after = [b for b in bars if b["t"] >= act]
     fine = refine(after, ticks) if ticks else after
 
+    def score(r: dict) -> float:
+        v = _at_size(call, {"declenche": r["triggered"], "eurusd": eurusd, "plan_ibkr": plan_ibkr} | priced(r))
+        return 0.0 if v is None else v
+
     def run(tp_ticks: int):
         return orderings(lambda f: SIM.simulate(plan, fine, decided_at=act, bar_seconds=step, resolution="prudente",
-                                                flip=f, tp_ticks=tp_ticks, **kw))
+                                                flip=f, tp_ticks=tp_ticks, **kw), score)
 
     res, fav, paths, cut = run(1)
     res2, _, paths2, cut2 = run(2)
@@ -995,14 +1012,16 @@ async def minute_ticks(call: dict, m: int) -> dict:
             "q0": before[0] if before and before[0][0] <= m * 10**9 else None}
 
 
-async def settle_ticks(call: dict, rows: list[dict]) -> dict:
+async def settle_ticks(call: dict, rows: list[dict], eurusd: float | None = None,
+                       plan_ibkr: str | None = None) -> dict:
     """`settle` avec les transactions des minutes qui décident, lues au fil des re-soldes (une minute lue peut
     déplacer le chemin) et gardées dans TICKS_DIR. Une minute illisible ou refusée reste dans `a_lire` : jouée d'ici
-    là dans tous les ordres, comptée au bilan, retentée au bilan suivant."""
+    là dans tous les ordres, comptée au bilan, retentée aux bilans suivants pendant UNSETTLED_DAYS jours après la
+    séance (`retryable`)."""
     ticks = load_ticks(call)
     failed: set[int] = set()
     budget = TICK_MINUTES_MAX
-    res = settle(call, rows, ticks=ticks)
+    res = settle(call, rows, ticks=ticks, eurusd=eurusd, plan_ibkr=plan_ibkr)
     for _ in range(TICK_ROUNDS):
         need = [m for m in res["a_lire"] if m not in failed][:budget]
         if not need:
@@ -1015,7 +1034,7 @@ async def settle_ticks(call: dict, rows: list[dict]) -> dict:
                 failed.add(m)
                 log.info("Killmode : transactions de %s à %s illisibles : %s", call["symbol"], m, exc)
         save_ticks(call, ticks)
-        res = settle(call, rows, ticks=ticks)
+        res = settle(call, rows, ticks=ticks, eurusd=eurusd, plan_ibkr=plan_ibkr)
     return res
 
 
@@ -1043,6 +1062,11 @@ async def session_bars(call: dict) -> list[dict]:
     return rows
 
 
+def retryable(c: dict, now: datetime) -> bool:
+    """Minutes d'un solde encore retentées au bilan : jusqu'à UNSETTLED_DAYS jours après la séance."""
+    return c["close_ts"] > now.timestamp() - UNSETTLED_DAYS * 86400
+
+
 async def settle_due(now: datetime | None = None) -> int:
     """Solde les appels dont la séance est finie, et re-solde sur les mêmes bougies ceux d'une méthode précédente
     (l'ancien solde est gardé dans `soldes_anciens`) ; appelé par `!kill bilan`, jamais planifié. Une erreur sur
@@ -1052,10 +1076,9 @@ async def settle_due(now: datetime | None = None) -> int:
     now = now or datetime.now(timezone.utc)
     book = calls()
     ready = now.timestamp() - SETTLE_DELAY.total_seconds()
-    retry = now.timestamp() - UNSETTLED_DAYS * 86400
     due = [c for c in book if not c.get("insoldable") and c["close_ts"] <= ready
            and (not c.get("resultat") or c["resultat"].get("methode", 1) != SETTLE_METHOD
-                or (c["resultat"].get("a_lire") and c["close_ts"] > retry))]
+                or (c["resultat"].get("a_lire") and retryable(c, now)))]
     rate = await eurusd() if any(not c.get("resultat") for c in due) else None
     changed = done = 0
     for c in due:
@@ -1065,7 +1088,7 @@ async def settle_due(now: datetime | None = None) -> int:
             if rows:
                 kept = ({"eurusd": old.get("eurusd"), "plan_ibkr": old.get("plan_ibkr") or IBKR_PLAN} if old
                         else {"eurusd": rate, "plan_ibkr": IBKR_PLAN})
-                c["resultat"] = await settle_ticks(c, rows) | kept
+                c["resultat"] = await settle_ticks(c, rows, kept["eurusd"], kept["plan_ibkr"]) | kept
                 if old and old.get("methode", 1) != SETTLE_METHOD:  # minutes retentées : même méthode, rien à garder
                     c["soldes_anciens"] = (c.get("soldes_anciens") or []) + [old]
             elif not old and now.timestamp() >= c["close_ts"] + UNSETTLED_DAYS * 86400:
@@ -1491,9 +1514,11 @@ def ambiguous_line(rows: list[dict]) -> str | None:
             + (f" ; {cut} avec plus de {ORDERINGS_MAX} ordres, tous non joués" if cut else "") + ".")
 
 
-def execution_line(rows: list[dict]) -> str | None:
+def execution_line(rows: list[dict], now: datetime | None = None) -> str | None:
     """Les prix mesurés (méthode 3) : KILL dont l'achat et le stop sont pris sur les transactions et le NBBO SIP,
-    glissement moyen au-delà de l'ordre, et minutes qui manquent encore (jouées dans tous les ordres)."""
+    glissement moyen au-delà de l'ordre, et minutes qui manquent encore (jouées dans tous les ordres), retentées
+    ou non selon `retryable`."""
+    now = now or datetime.now(timezone.utc)
     trig = [c for c in rows if value(c) is not None and c["resultat"].get("methode", 1) >= 3]
     if not trig:
         return None
@@ -1501,14 +1526,18 @@ def execution_line(rows: list[dict]) -> str | None:
     ins = [r["entree_r"] for r in res if r.get("remplissage_mesure") and r.get("entree_r") is not None]
     outs = [r["sous_stop_r"] for r in res if r.get("sous_stop_r") is not None
             and any(e.get("mesure") and e["raison"].startswith("stop") for e in r["sorties"])]
-    missing = sum(len(r.get("a_lire") or []) for r in res)
+    missing = sum(len(c["resultat"].get("a_lire") or []) for c in trig if retryable(c, now))
+    lost = sum(len(c["resultat"].get("a_lire") or []) for c in trig if not retryable(c, now))
     return (f"-# Prix mesurés sur les transactions et le NBBO SIP (règle « Last » d'IBKR, pire bid ou ask de l'ordre "
             f"au marché) : achat sur {len(ins)}/{len(trig)} KILL"
             + (f", {SS._r(sum(ins) / len(ins))} R au-dessus de l'ordre en moyenne" if ins else "")
             + f" · {_n(len(outs), 'stop')} mesuré{'s' if len(outs) > 1 else ''}"
             + (f", {SS._r(sum(outs) / len(outs))} R sous le stop actif en moyenne" if outs else "")
             + (f" · {_n(missing, 'minute')} encore à lire, retentée{'s' if missing > 1 else ''} au prochain bilan"
-               if missing else "") + ".")
+               if missing else "")
+            + (f" · {_n(lost, 'minute')} jamais lue{'s' if lost > 1 else ''} (plus retentée{'s' if lost > 1 else ''} "
+               f"après {UNSETTLED_DAYS} jours, jouée{'s' if lost > 1 else ''} dans tous les ordres)" if lost else "")
+            + ".")
 
 
 def errors_line(rows: list[dict]) -> str | None:
@@ -1829,7 +1858,7 @@ def _call_gap_line(cur: list[dict]) -> str | None:
             "catalyseur, pas l'effet causal d'une actu.")
 
 
-def bilan_text(book: list[dict], trades: list[dict] | None = None) -> str:
+def bilan_text(book: list[dict], trades: list[dict] | None = None, now: datetime | None = None) -> str:
     """Le journal de la version en vigueur : KILL, témoin propre (ni actu positive ni veto) et autres témoins,
     aux frais réels de Simão, avec l'écart par appel, l'équilibre des groupes, le risque réel, la concordance
     SIP et tes vraies exécutions (descriptifs) ; les versions précédentes à part ; la ligne du labo ; la règle
@@ -1860,8 +1889,8 @@ def bilan_text(book: list[dict], trades: list[dict] | None = None) -> str:
                      "mesuré ; soldé en bougies d'1 min, minutes qui décident relues transaction par transaction, "
                      "ordre actif une minute pleine après l'appel, minute ambiguë dans le pire de tous les ordres. "
                      f"IC 95 % en t, indicatif avant {READ_AT} KILL.")
-    for line in (errors_line(cur), _call_gap_line(cur), stress_line(cur), execution_line(kills), ambiguous_line(kills),
-                 risk_line(kills), sip_line(kills), fills_line(kills, trades)):
+    for line in (errors_line(cur), _call_gap_line(cur), stress_line(cur), execution_line(kills, now),
+                 ambiguous_line(kills), risk_line(kills), sip_line(kills), fills_line(kills, trades)):
         if line:
             lines.append(line)
     if kills and clean_:
@@ -1926,7 +1955,7 @@ async def command(args: list[str], now: datetime | None = None) -> str:
                 + f" · {_n(sum(_group_of(c) == 'kill' for c in calls()), 'KILL noté')}.")
     if sub == "bilan":  # permis éteint : solder et lire les appels déjà notés n'allume rien
         await settle_due(now)
-        return bilan_text(calls())
+        return bilan_text(calls(), now=now)
     if not active():
         return "Killmode est éteint. `!kill on` pour l'allumer (toi seul peux le faire)."
     if sub == "scan":
