@@ -136,9 +136,10 @@ def _strategies(fn, *args) -> list[dict]:
 
 
 def stock_trade(db: LabDB, symbol: str, day: date, s: dict, meta: dict | None = None,
-                regime: dict | None = None, strat_out: list | None = None) -> dict | None:
+                regime: dict | None = None, strat_out: list | None = None,
+                index5: list[dict] | None = None) -> dict | None:
     """Trade v1 de l'action ; avec `strat_out`, y ajoute aussi les lignes du labo v2 (strategies.py),
-    calculées sur les mêmes bougies, chargées une seule fois."""
+    calculées sur les mêmes bougies, chargées une seule fois (`index5` : séance de SPY en 5 min)."""
     inp = stock_inputs(db, symbol, day)
     if not inp:
         return None
@@ -148,7 +149,7 @@ def stock_trade(db: LabDB, symbol: str, day: date, s: dict, meta: dict | None = 
     finally:
         if strat_out is not None:
             strat_out.extend(_strategies(ST.stock_day, day, symbol, inp["hist5"], inp["session"], inp["daily"],
-                                         (meta or {}).get("rank"), v1))
+                                         (meta or {}).get("rank"), v1, index5))
     return row
 
 
@@ -202,8 +203,11 @@ def stock_day(db: LabDB, day: date, s: dict, universe: list[dict],
     cutoff = CO.ny_midnight(day)
     index_daily = db.get_bars("stock", INDEX["stock"], 1440, cutoff - 120 * 86400, cutoff)
     regime = U.regime(index_daily, cutoff, ANNUAL_DAYS["stock"])
+    bounds = CO.session_ts(day)
+    index5 = db.get_bars("stock", INDEX["stock"], CO.BASE_TF, *bounds) if strat_out is not None else None
     rows = [r for meta in universe
-            if (r := _guarded(errors, meta["symbol"], stock_trade, db, meta["symbol"], day, s, meta, regime, strat_out))]
+            if (r := _guarded(errors, meta["symbol"], stock_trade, db, meta["symbol"], day, s, meta, regime, strat_out,
+                              index5))]
     return [U.stock_decision_ts(day)], rows
 
 

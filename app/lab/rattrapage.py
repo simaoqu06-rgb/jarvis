@@ -20,6 +20,7 @@ import time
 from datetime import date, datetime, timedelta, timezone
 
 from app.lab import collector as CO
+from app.lab import generator as G
 from app.lab import heartbeat
 from app.lab import simulator as SIM
 from app.lab import sources as SRC
@@ -92,6 +93,10 @@ async def stock_rows(db: LabDB, origin: str, day: date, transport=None) -> list[
     rows: list[dict] = []
     names = [u["symbol"] for u in universe]
     ranks = {u["symbol"]: u.get("rank") for u in universe}
+    # Déclaration n° 6 : séance de SPY en 5 min (sortie sur avalement baissier de l'indice).
+    index = (await SRC.alpaca_bars([G.INDEX["stock"]], CO.BASE_TF, datetime.fromtimestamp(bounds[0], timezone.utc),
+                                   datetime.fromtimestamp(bounds[1], timezone.utc),
+                                   transport=transport)).get(G.INDEX["stock"])
     for i in range(0, len(names), STOCK_BATCH):
         batch = names[i:i + STOCK_BATCH]
         bars = await SRC.alpaca_bars(batch, CO.BASE_TF, datetime.fromtimestamp(first, timezone.utc),
@@ -105,7 +110,8 @@ async def stock_rows(db: LabDB, origin: str, day: date, transport=None) -> list[
                 continue
             v = next((_v1("stock", t, bounds[1], ranks[symbol]) for t in v1.get(symbol, [])), None)
             try:
-                rows += ST.stock_day(day, symbol, hist, session, _daily(db, "stock", symbol, cutoff), ranks[symbol], v)
+                rows += ST.stock_day(day, symbol, hist, session, _daily(db, "stock", symbol, cutoff), ranks[symbol], v,
+                                     index)
             except Exception as exc:
                 log.warning("Labo v2 : rattrapage %s %s ignoré (%s: %s)", symbol, day, type(exc).__name__, exc)
     return rows

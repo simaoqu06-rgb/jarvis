@@ -270,6 +270,58 @@ bougies longues viennent des 5 min déjà chargées) ; le rattrapage refait les 
 n° 3. Critique : pas de 1 h en actions plutôt que de rallonger l'historique (et les appels Alpaca) du rejeu ;
 le témoin reste celui des autres stratégies, pour que l'écart mesure bien l'entrée.
 
+## Déclaration n° 6 (8 octobre 2026) : trois règles de sortie de Gemini, actions
+
+Demande de Simão (carte du 8 octobre, 00 h 44 UTC, « Les tester », fil « Avis sur un actif et positions
+ouvertes ») : mesurer trois règles que Gemini présente comme acquises, avant que JARVIS en utilise une.
+Ce qu'on en sait avant de mesurer : Gemini cite une baisse de 15 à 20 % du taux de réussite sous le VWAP
+sans source, et justifie le time stop par « ±0,03 R, comme tu l'as mesuré », qui est l'écart entre nos
+sorties, pas le résultat de garder après 14 h 30 ; GPT a retiré ces deux règles faute de preuve. Au tableau
+de la n° 3 (octobre-décembre 2024), les sept sorties finissent à moins de 0,05 R les unes des autres en
+actions. Demande complète : `/mnt/project-files/labo/demande-tests-regles-gemini.md`.
+
+Chaque règle s'ajoute **seule** à la gestion de référence (`r_net` : un tiers à chaque objectif, stop à
+l'entrée après TP1), sur les mêmes trades, pour toutes les stratégies actions et v1 :
+
+| Colonne | Règle | Exécution |
+|---|---|---|
+| `r_vwap` | Une bougie de 5 min close à partir de 10 h 30 New York finit sous le VWAP de séance : sortie de toute la position | à la clôture de la bougie suivante |
+| `r_1430` | Position encore ouverte à 14 h 30 New York sans TP1 touché : sortie | à 14 h 30 |
+| `r_spy` | Avalement baissier de SPY en 5 min (bougie rouge dont le corps englobe celui de la verte précédente) | à la clôture de la bougie suivante |
+
+- Une bougie de retard pour le VWAP et SPY : ce sont des alertes, Simão passe l'ordre à la main (même
+  convention que `r_emperor_alerte`). Le time stop est une heure connue d'avance : pas de retard.
+- Une règle qui ne se déclenche pas pendant que la position est ouverte laisse le résultat de `r_net`.
+- Pas de condition de volume sur le VWAP : le « volume vendeur » de Gemini ne se lit pas sur des bougies
+  OHLCV, et une variante de plus coûterait des essais. SPY et pas QQQ : c'est déjà l'indice du labo, et en
+  prendre un seul évite de choisir après coup. Les bougies de 5 min de SPY de la séance sont collectées en
+  plus (une requête Alpaca par jour) ; un jour sans elles, `r_spy` n'est pas mesuré.
+- Non testé : la sortie forcée à 14 h 30 sans condition (GPT) ; la « sortie à la clôture si ni stop ni
+  objectif » est déjà la règle du labo (tout est soldé à la clôture).
+
+**Jugement, fixé avant le premier résultat** : pour chaque stratégie, écart apparié de la règle à `r_net`,
+trade par trade, avec son z en grappes par jour. La règle « aide » si l'écart est positif avec z au-dessus
+du seuil « candidate » et au moins 30 trades. Rien ne change dans JARVIS en direct avant la règle de
+promotion habituelle (un an de rejeu, deux régimes, une ouverture du bloc scellé, le forward-test).
+
+**Essais déclarés : 129** (105 + 8 couples actions × 3 sorties) ; seuil « candidate » : **z ≥ 3,36**.
+
+**Mesure sans essai** : le filtre d'entrée VWAP que GPT propose (pas d'entrée avant 10 h 30, puis seulement
+au-dessus du VWAP). La position de la décision par rapport au VWAP est gardée (`sur_vwap`) et le tableau
+donne l'espérance de référence par tranche : décision avant 10 h 30, après au-dessus du VWAP, après en
+dessous (v1, décidée à 9 h 10, est toujours « avant »). Tester le filtre comme essai aurait doublé les
+stratégies actions ; une tranche qui tiendrait deviendrait une déclaration à part.
+
+Les jours déjà traités sont recalculés par le rattrapage (`progress_job` change avec le numéro).
+
+**Council** (Sceptique, Pragmatique, Critique : GO modifié). Sceptique : les chiffres de Gemini sont sans
+source et l'étude que cite GPT (Gao, Han, Li et Zhou, « Market intraday momentum », Journal of Financial
+Economics, 2018) va plutôt contre le time stop : la première demi-heure prédit en partie la dernière. On
+s'attend à ce qu'aucune règle n'aide ; c'est justement pour cela qu'on mesure avant de les appliquer.
+Pragmatique : le coût est faible (mêmes trades simulés, une requête SPY par jour, seuil de 3,30 à 3,36) et
+la réponse arrive avec le rattrapage. Critique : une variable à la fois sur `r_net` ; volume et QQQ écartés
+pour ne pas multiplier les variantes ; le filtre d'entrée reste une mesure.
+
 ## Bloc scellé
 
 Le rejeu du **6 avril au 5 octobre 2026** est calculé mais rangé à part (`trades_sealed`,

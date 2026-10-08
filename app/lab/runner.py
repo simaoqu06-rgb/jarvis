@@ -80,6 +80,10 @@ async def prepare_day(db: LabDB, market: str, day: date, now: datetime | None = 
     names = [u["symbol"] for u in universe]
     start, end = CO.stock_window(day) if market == "stock" else CO.crypto_window(day)
     await CO.ensure_intraday(db, market, names, start, end, now, transport)
+    index = G.INDEX["stock"]
+    if market == "stock" and index not in names and CO.session_ts(day):
+        # Labo v2, déclaration n° 6 : séance de SPY en 5 min (sortie sur avalement baissier de l'indice).
+        await CO.ensure_intraday(db, market, [index], *CO.session_ts(day), now, transport)
     return universe
 
 

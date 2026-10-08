@@ -26,14 +26,21 @@ au risque), sans rien filtrer : c'est la mesure qui dira si un plafond de frais 
 Rien de tout ça ne promeut quoi que ce soit : ni le scellé, ni la quantité de rejeu (au moins un an,
 deux régimes) ne sont encore là.
 
+Déclaration n° 6 (règles de sortie de Gemini, actions) : chaque sortie ajoutée est comparée à la sortie de
+référence sur les mêmes trades (écart apparié, z en grappes par jour) ; elle « aide » si l'écart est positif
+avec z ≥ candidate_z() et au moins MIN_N trades. Le filtre d'entrée VWAP de GPT n'est qu'une mesure :
+espérance de référence par tranche (décision avant 10 h 30, après au-dessus du VWAP, après en dessous).
+
 Diagnostic v1 (Lot 1 du plan) : espérance par gap d'ouverture, par mode d'entrée, par raison de sortie,
 et brut contre net de frais, pour vérifier « v1 achète la faiblesse » et « les frais expliquent la perte ».
 """
 import json
 import sqlite3
 from collections import defaultdict
+from datetime import date, datetime
 from statistics import NormalDist
 
+from app.lab import collector as CO
 from app.lab import derivs as DER
 from app.lab import seal as SEAL
 from app.lab import simulator as SIM
@@ -43,12 +50,25 @@ from app.lab import strategies as ST
 MIN_N = 30
 ALPHA = 0.05
 COLUMNS = ("r_net", "r_sans_be", "r_2r", "r_suiveur", "r_emperor", "r_emperor_alerte", "r_emperor_confirme",
-           "r_glisse_x2", "r_glisse_x3", "r_retard", "r_manque", "r_gross")
+           "r_vwap", "r_1430", "r_spy", "r_glisse_x2", "r_glisse_x3", "r_retard", "r_manque", "r_gross")
 RANK_BUCKETS = ((1, 50, "rang 1-50"), (51, 150, "rang 51-150"), (151, 10**9, "rang 151+"))
 IBKR_PER_SHARE = 0.005      # IBKR Pro, plan Fixe (/mnt/project-files/trading/plateforme-actions-us.md)
 IBKR_MAX_PCT = 0.01         # plafond : 1 % de la valeur de l'ordre
 COST_BUCKETS = ((0.0, 0.1, "frais < 0,1 R"), (0.1, 0.2, "frais 0,1-0,2 R"), (0.2, 0.4, "frais 0,2-0,4 R"),
                 (0.4, 1e9, "frais ≥ 0,4 R"))
+VWAP_BUCKETS = ("avant 10 h 30", "après 10 h 30, au-dessus du VWAP", "après 10 h 30, sous le VWAP")
+_vwap_from: dict[str, int] = {}
+
+
+def _vwap_bucket(day: str, signal_at: int | None, above: int | None) -> str | None:
+    """n° 6 : tranche horaire et VWAP de la décision (actions) ; None si on ne sait pas."""
+    if signal_at is None:
+        return None
+    if day not in _vwap_from:
+        _vwap_from[day] = int(datetime.combine(date.fromisoformat(day), ST.VWAP_EXIT_FROM, CO.NEW_YORK).timestamp())
+    if signal_at < _vwap_from[day]:
+        return VWAP_BUCKETS[0]
+    return None if above is None else VWAP_BUCKETS[1] if above else VWAP_BUCKETS[2]
 
 
 def candidate_z(trials: int | None = None) -> float:
@@ -116,20 +136,22 @@ class Mean:
 def _strategies(conn: sqlite3.Connection) -> dict:
     out: dict = {}
     sql = (f"SELECT s.market, s.strategy, s.day, s.triggered, s.tp1_hit, s.temoin_r, s.temoin_triggered, s.rank, "
-           f"s.entry, s.stop, s.symbol, s.signal_at, {', '.join('s.' + c for c in COLUMNS)}, r.label "
+           f"s.entry, s.stop, s.symbol, s.signal_at, s.sur_vwap, {', '.join('s.' + c for c in COLUMNS)}, r.label "
            "FROM strat_trades s LEFT JOIN regimes r ON r.market = s.market AND r.day = s.day")
     acc: dict = {}
     z_min = candidate_z()
     derivs = DER.load(conn)
+    pooled = {"ecarts": defaultdict(Mean), "par_vwap": defaultdict(Mean)}  # n° 6, toutes stratégies actions
     for row in conn.execute(sql):
-        market, name, day, trig, tp1, wit, wit_trig, rank, entry, stop, symbol, signal_at = row[:12]
-        values = dict(zip(COLUMNS, row[12:12 + len(COLUMNS)]))
+        market, name, day, trig, tp1, wit, wit_trig, rank, entry, stop, symbol, signal_at, above = row[:13]
+        values = dict(zip(COLUMNS, row[13:13 + len(COLUMNS)]))
         label = row[-1] or "inconnu"
         a = acc.setdefault((market, name), {"signaux": 0, "declenches": 0, "gagnants": 0, "tp1": 0,
                                             "sorties": defaultdict(Mean), "temoin": Mean(), "ecart": Mean(),
                                             "regimes": defaultdict(Mean), "rangs": defaultdict(Mean), "manques": 0,
                                             "ibkr": Mean(), "commission": Mean(), "frais": defaultdict(Mean),
-                                            "funding": defaultdict(Mean), "oi": defaultdict(Mean)})
+                                            "funding": defaultdict(Mean), "oi": defaultdict(Mean),
+                                            "ecarts": defaultdict(Mean), "vwap": defaultdict(Mean)})
         a["signaux"] += 1
         if not trig:
             continue
@@ -147,6 +169,15 @@ def _strategies(conn: sqlite3.Connection) -> dict:
         if market == "stock":
             a["commission"].add(day, comm)
         a["frais"][_cost_bucket(expected_cost_r(market, entry, stop, rank))].add(day, ref)
+        if market == "stock":  # n° 6 : sorties de Gemini contre la référence, et VWAP à la décision
+            for c in ST.STOCK_EXITS:
+                if values[c] is not None and values["r_net"] is not None:
+                    a["ecarts"][c].add(day, values[c] - values["r_net"])
+                    pooled["ecarts"][c].add(day, values[c] - values["r_net"])
+            bucket = _vwap_bucket(day, signal_at, above)
+            if bucket:
+                a["vwap"][bucket].add(day, ref)
+                pooled["par_vwap"][bucket].add(day, ref)
         if market == "crypto":  # lot B : positionnement des dérivés au signal, sans rien filtrer
             funding, oi_chg = DER.context(derivs, symbol, signal_at)
             a["funding"][DER.bucket(funding, DER.FUNDING_BUCKETS)].add(day, ref)
@@ -166,7 +197,7 @@ def _strategies(conn: sqlite3.Connection) -> dict:
             "taux_declenchement": round(n / a["signaux"], 4) if a["signaux"] else None,
             "jours": main["jours"], **{k: main[k] for k in ("esperance_r", "ic95")},
             "reussite": round(a["gagnants"] / n, 4) if n else None, "tp1": round(a["tp1"] / n, 4) if n else None,
-            "sorties": {c: a["sorties"][c].result() for c in ST.EXITS},
+            "sorties": {c: a["sorties"][c].result() for c in ST.exits(market)},
             "brut_r": brut,
             "frais_r": round(brut - main["esperance_r"], 4) if brut is not None and main["esperance_r"] is not None
             else None,
@@ -182,6 +213,10 @@ def _strategies(conn: sqlite3.Connection) -> dict:
                             if k in a["funding"]} if market == "crypto" else None,
             "par_oi": {k: a["oi"][k].result() for _, _, k in (*DER.OI_BUCKETS, (0, 0, "inconnu"))
                        if k in a["oi"]} if market == "crypto" else None,
+            "ecarts_sorties": {c: _helps(a["ecarts"][c].result(), z_min) for c in ST.STOCK_EXITS}
+            if market == "stock" else None,
+            "par_vwap": {k: a["vwap"][k].result() for k in VWAP_BUCKETS if k in a["vwap"]}
+            if market == "stock" else None,
             "robustesse": {c: a["sorties"][c].result() for c in ("r_glisse_x2", "r_glisse_x3", "r_retard", "r_manque")},
             "ordres_limites_retires": a["manques"],
             "temoin": {"esperance_r": a["temoin"].result()["esperance_r"], "ecart_r": ecart["esperance_r"],
@@ -195,7 +230,16 @@ def _strategies(conn: sqlite3.Connection) -> dict:
     for market, items in out.items():
         out[market] = dict(sorted(items.items(), key=lambda kv: -(kv[1]["esperance_ref_r"]
                                                                    if kv[1]["esperance_ref_r"] is not None else -99)))
+    if pooled["ecarts"] or pooled["par_vwap"]:
+        out["_n6"] = {"ecarts": {c: pooled["ecarts"][c].result() for c in ST.STOCK_EXITS if c in pooled["ecarts"]},
+                      "par_vwap": {k: pooled["par_vwap"][k].result() for k in VWAP_BUCKETS if k in pooled["par_vwap"]}}
     return out
+
+
+def _helps(res: dict, z_min: float) -> dict:
+    """Écart apparié d'une sortie à la référence ; « aide » si positif avec z ≥ seuil et assez de trades."""
+    return res | {"aide": bool(res["esperance_r"] is not None and res["esperance_r"] > 0
+                               and (res["z"] or 0) >= z_min and res["n"] >= MIN_N)}
 
 
 def _bucket(gap: float | None) -> str:
@@ -234,11 +278,12 @@ def diagnostic_v1(conn: sqlite3.Connection) -> dict:
 
 def report(conn: sqlite3.Connection) -> dict:
     out = {"declaration": {"numero": ST.DECLARATION, "le": ST.REGISTERED_ON, "essais": len(ST.trials()),
-                           "z_candidate": candidate_z(), "sorties": ST.EXITS, "robustesse": ST.STRESS,
-                           "doc": "docs/labo-strategies.md"},
-           "scelle": SEAL.describe(), "strategies": {}, "diagnostic_v1": {}}
+                           "z_candidate": candidate_z(), "sorties": ST.EXITS, "sorties_actions": ST.STOCK_EXITS,
+                           "robustesse": ST.STRESS, "doc": "docs/labo-strategies.md"},
+           "scelle": SEAL.describe(), "strategies": {}, "sorties_gemini": None, "diagnostic_v1": {}}
     try:  # base pas encore migrée par le worker (lecture seule) : tableau vide plutôt qu'une erreur
         out["strategies"] = _strategies(conn)
+        out["sorties_gemini"] = out["strategies"].pop("_n6", None)
         out["diagnostic_v1"] = diagnostic_v1(conn)
     except sqlite3.Error as exc:
         out["erreur"] = f"base pas encore prête : {exc}"
@@ -267,6 +312,10 @@ def _r(x) -> str:
     return "n/d" if x is None else f"{x:+.2f}".replace(".", ",")
 
 
+def _z(x) -> str:
+    return "n/d" if x is None else f"{x:g}".replace(".", ",")
+
+
 def text(rep: dict | None) -> str:
     if not rep:
         return "🧪 **Stratégies du labo v2** : pas encore de mesure (le rejeu n'a pas encore traité de jour avec elles)."
@@ -290,6 +339,21 @@ def text(rep: dict | None) -> str:
                          f"{_r(-(it.get('frais_r') or 0)) if it.get('frais_r') is not None else 'n/d'} R{comm} · "
                          f"vs témoin {_r(wit.get('ecart_r'))} R (z {wit.get('z') if wit.get('z') is not None else 'n/d'})"
                          + (" · échantillon faible" if it.get("echantillon_faible") else ""))
+    n6 = rep.get("sorties_gemini")
+    if n6:
+        names = {"r_vwap": "VWAP après 10 h 30", "r_1430": "time stop 14 h 30", "r_spy": "avalement de SPY"}
+        stock = (rep.get("strategies") or {}).get("stock") or {}
+        parts = []
+        for c, res in n6["ecarts"].items():
+            helped = sum(bool(((it.get("ecarts_sorties") or {}).get(c) or {}).get("aide")) for it in stock.values())
+            parts.append(f"{names.get(c, c)} {_r(res['esperance_r'])} R (z {_z(res['z'])}"
+                         + (f", ✅ sur {helped} stratégie{'s' if helped > 1 else ''}" if helped else "") + ")")
+        if parts:
+            lines.append("Sorties de Gemini (n° 6), écart à la sortie v1, toutes stratégies actions : "
+                         + " · ".join(parts))
+        if n6["par_vwap"]:
+            lines.append("Entrée selon l'heure et le VWAP (mesure, pas un essai) : " + " · ".join(
+                f"{k} {_r(v['esperance_r'])} R ({v['n']})" for k, v in n6["par_vwap"].items()))
     diag = (rep.get("diagnostic_v1") or {}).get("stock")
     if diag:
         gaps = " · ".join(f"{k} {_r(v['esperance_r'])} ({v['n']})" for k, v in diag["par_gap"].items())

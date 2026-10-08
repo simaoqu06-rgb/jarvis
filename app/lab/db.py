@@ -43,7 +43,7 @@ STRAT_COLUMNS = ("origin", "market", "symbol", "day", "strategy", "slot", "signa
                  "triggered", "filled_at", "entry_mode", "minutes_to_fill", "exit_reason", "r_net", "r_gross",
                  "tp1_hit", "mfe_r", "mae_r", "r_sans_be", "r_2r", "r_suiveur", "r_glisse_x2", "r_glisse_x3",
                  "r_retard", "r_manque", "temoin_r", "temoin_triggered", "gap_open_pct", "rank", "r_emperor",
-                 "r_emperor_alerte", "r_emperor_confirme")
+                 "r_emperor_alerte", "r_emperor_confirme", "r_vwap", "r_1430", "r_spy", "sur_vwap")
 STRAT_DDL = """CREATE TABLE IF NOT EXISTS {name} (
     id INTEGER PRIMARY KEY,
     origin TEXT NOT NULL CHECK (origin IN ('replay', 'live')),
@@ -53,7 +53,7 @@ STRAT_DDL = """CREATE TABLE IF NOT EXISTS {name} (
     r_net REAL, r_gross REAL, tp1_hit INTEGER, mfe_r REAL, mae_r REAL,
     r_sans_be REAL, r_2r REAL, r_suiveur REAL, r_glisse_x2 REAL, r_glisse_x3 REAL, r_retard REAL, r_manque REAL,
     temoin_r REAL, temoin_triggered INTEGER, gap_open_pct REAL, rank INTEGER, r_emperor REAL,
-    r_emperor_alerte REAL, r_emperor_confirme REAL,
+    r_emperor_alerte REAL, r_emperor_confirme REAL, r_vwap REAL, r_1430 REAL, r_spy REAL, sur_vwap INTEGER,
     UNIQUE (origin, market, symbol, day, strategy, slot)
 );
 CREATE INDEX IF NOT EXISTS {name}_day ON {name} (market, day);"""
@@ -148,9 +148,11 @@ MIGRATIONS = {
     "lessons": (("base_trade_id", "INTEGER"),),
     "method_versions": (("base", "TEXT"), ("rules", "TEXT"), ("role", "TEXT"), ("started_ts", "INTEGER"),
                         ("decided_at", "TEXT"), ("note", "TEXT")),
-    # Labo v2, déclarations n° 2 et 3 : sorties EmperorBTC.
-    "strat_trades": (("r_emperor", "REAL"), ("r_emperor_alerte", "REAL"), ("r_emperor_confirme", "REAL")),
-    "strat_trades_sealed": (("r_emperor", "REAL"), ("r_emperor_alerte", "REAL"), ("r_emperor_confirme", "REAL")),
+    # Labo v2, déclarations n° 2 et 3 : sorties EmperorBTC ; n° 6 : sorties de Gemini et VWAP à la décision.
+    "strat_trades": (("r_emperor", "REAL"), ("r_emperor_alerte", "REAL"), ("r_emperor_confirme", "REAL"),
+                     ("r_vwap", "REAL"), ("r_1430", "REAL"), ("r_spy", "REAL"), ("sur_vwap", "INTEGER")),
+    "strat_trades_sealed": (("r_emperor", "REAL"), ("r_emperor_alerte", "REAL"), ("r_emperor_confirme", "REAL"),
+                            ("r_vwap", "REAL"), ("r_1430", "REAL"), ("r_spy", "REAL"), ("sur_vwap", "INTEGER")),
 }
 GENERATION_SQL = "SELECT version FROM method_versions WHERE base IS NULL ORDER BY created_at DESC, version DESC LIMIT 1"
 LEGACY_VERSION_SQL = "SELECT version FROM method_versions ORDER BY created_at DESC, version DESC LIMIT 1"

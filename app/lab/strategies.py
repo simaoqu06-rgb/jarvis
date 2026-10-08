@@ -67,6 +67,16 @@ la solution 1 du manuel, est rejouée telle quelle sur des bougies de 15 min (ac
 (crypto ; en actions, deux séances d'historique ne donnent pas assez de bougies de 1 h) : zones, cassure,
 retest, ordre et stop se lisent sur ces bougies (Day.frame), donc stops plus larges en R ; la simulation, les
 sorties et le témoin restent sur les bougies de 5 min, comme pour les autres.
+Déclaration n° 6 (8 octobre 2026, demande de Simão : tester trois règles de sortie de Gemini, actions seulement) :
+sur la gestion de référence (r_net), une règle de plus, une variable à la fois (STOCK_EXITS) :
+- r_vwap : sortie de toute la position si une bougie close à partir de 10 h 30 New York finit sous le VWAP de
+  séance, exécutée à la clôture de la bougie suivante (alerte, ordre passé à la main) ; sans condition de
+  volume (le « volume vendeur » ne se lit pas sur des bougies OHLCV) ;
+- r_1430 : time stop, sortie à 14 h 30 New York d'une position encore ouverte dont le TP1 n'est pas touché ;
+- r_spy : sortie à la clôture de la bougie qui suit un avalement baissier de SPY en 5 min (indicators.engulfing).
+Le filtre d'entrée VWAP proposé par GPT (pas d'entrée avant 10 h 30, puis seulement au-dessus du VWAP) n'est
+pas un essai : la position de la décision par rapport au VWAP est gardée (sur_vwap) et le tableau donne
+l'espérance par tranche horaire et VWAP, sans rien filtrer.
 Objectifs : 1, 2 et 3 R. Fenêtre des signaux : actions de 9 h 45 à 15 h New York (soldé à la
 clôture) ; crypto de 0 h à 20 h UTC (soldé 24 h après le signal).
 v1 est rejouée avec les mêmes sorties et tests, sur ses propres objectifs : c'est la référence.
@@ -93,7 +103,7 @@ from app.trading import signals as S
 REGISTERED_ON = "2026-10-08"
 # Déclaration en vigueur (docs/labo-strategies.md). En changer relance le rattrapage de tous les jours déjà
 # traités (progress_job), pour que chaque stratégie soit mesurée sur les mêmes jours.
-DECLARATION = 4
+DECLARATION = 6
 BAR = CO.BASE_TF * 60
 REFERENCE = "v1"
 STRATEGIES = {
@@ -121,6 +131,12 @@ EXITS = {
     "r_emperor_alerte": "EmperorBTC + sortie à la bougie qui suit le premier signe de retournement "
                         "(alertes en direct)",
     "r_emperor_confirme": "EmperorBTC + signe de retournement confirmé par une clôture sous le plus bas de sa bougie",
+}
+# Déclaration n° 6 : règles de sortie de Gemini, actions seulement (VWAP de séance, horaires et indice américains).
+STOCK_EXITS = {
+    "r_vwap": "sortie v1 + sortie complète après une clôture sous le VWAP à partir de 10 h 30 New York",
+    "r_1430": "sortie v1 + time stop à 14 h 30 New York si le TP1 n'est pas touché",
+    "r_spy": "sortie v1 + sortie après un avalement baissier de SPY en 5 min",
 }
 STRESS = {
     "r_glisse_x2": "glissement ×2", "r_glisse_x3": "glissement ×3",
@@ -157,6 +173,8 @@ STOCK_SIGNAL_UNTIL = time(15, 0)
 ORB_UNTIL = time(12, 0)
 CRYPTO_SIGNAL_HOURS = 20    # crypto : signaux de 0 h à 20 h UTC, soldés 24 h après
 CRYPTO_HORIZON = 86400
+VWAP_EXIT_FROM = time(10, 30)  # n° 6 : bougies closes à partir de 10 h 30 New York
+TIME_STOP_AT = time(14, 30)    # n° 6
 
 
 def progress_job(market: str) -> str:
@@ -164,12 +182,17 @@ def progress_job(market: str) -> str:
     return f"strats:{market}:d{DECLARATION}"
 
 
+def exits(market: str) -> dict:
+    """Sorties mesurées sur un marché : les communes, plus celles des actions (déclaration n° 6)."""
+    return {**EXITS, **STOCK_EXITS} if market == "stock" else EXITS
+
+
 def trials() -> list[dict]:
     """Essais déclarés : chaque stratégie (et v1) × sortie × marché, comptés gagnants ou non."""
     out = []
     for market in ("stock", "crypto"):
         names = [REFERENCE] + [k for k, v in STRATEGIES.items() if market in v["markets"]]
-        out += [{"market": market, "strategy": n, "exit": e} for n in names for e in EXITS]
+        out += [{"market": market, "strategy": n, "exit": e} for n in names for e in exits(market)]
     return out
 
 
@@ -230,6 +253,8 @@ class Day:
             self.signal_from_ts = self.start_ts + STOCK_SIGNAL_FROM_MIN * 60
             self.signal_until_ts = min(int(datetime.combine(day, STOCK_SIGNAL_UNTIL, ny).timestamp()), self.close_ts)
             self.orb_until_ts = int(datetime.combine(day, ORB_UNTIL, ny).timestamp())
+            self.vwap_exit_ts = int(datetime.combine(day, VWAP_EXIT_FROM, ny).timestamp())
+            self.time_stop_ts = int(datetime.combine(day, TIME_STOP_AT, ny).timestamp())
         else:
             self.start_ts = CO.utc_midnight(day)
             self.close_ts = self.start_ts + 86400
@@ -254,6 +279,7 @@ class Day:
         self._exit_signal: dict[int, bool] = {}
         self._swing_highs: list[tuple[int, float]] | None = None
         self._frames: dict[int, "Day"] = {}
+        self.index_down: list[int] | None = None  # n° 6 : clôtures des avalements baissiers de SPY (stock_day)
 
     def frame(self, tf: int | None) -> "Day":
         """Le même jour lu sur des bougies de `tf` minutes (déclaration n° 4) ; lui-même en 5 min."""
@@ -584,6 +610,46 @@ def _emperor(d: Day, plan: dict, decided_at: int, entry_until: int, exit_at: int
     return out
 
 
+def _gemini(d: Day, plan: dict, decided_at: int, entry_until: int, exit_at: int, cost: dict, order: str,
+            last_price: float, res: dict) -> dict:
+    """Sorties de la déclaration n° 6 (actions), chacune ajoutée seule à la gestion de référence : à la clôture
+    de la bougie qui suit une clôture sous le VWAP à partir de 10 h 30 (r_vwap) ou un avalement baissier de
+    SPY (r_spy) ; à 14 h 30 si le TP1 n'est pas touché (r_1430). Une règle qui ne se déclenche pas pendant
+    que la position est ouverte laisse le résultat de référence. r_spy vaut None sans bougies de SPY."""
+    out: dict = dict.fromkeys(STOCK_EXITS)
+    if d.market != "stock" or not res["triggered"]:
+        return out
+    filled, closed = res["filled_at"], res["closed_at"]
+
+    def cut(ts: int, reason: str) -> dict:
+        return _sim(d, plan, decided_at, entry_until, min(exit_at, ts), cost, order, last_price,
+                    exit_reason_end=reason)
+
+    def after(ts: int | None, reason: str) -> float:
+        """Règle vue à la clôture `ts` d'une bougie, position encore ouverte : sortie une bougie plus tard."""
+        return cut(ts + BAR, reason)["r_net"] if ts is not None else res["r_net"]
+
+    sig = None
+    for k in range(bisect_left(d.t, max(filled, d.vwap_exit_ts - BAR)), len(d.t)):
+        end = d.t[k] + BAR
+        if end >= closed:
+            break
+        if d.vwap[k] is not None and d.c[k] < d.vwap[k]:
+            sig = end
+            break
+    out["r_vwap"] = after(sig, "vwap")
+    if filled < d.time_stop_ts < closed:
+        early = cut(d.time_stop_ts, "time_stop")
+        out["r_1430"] = res["r_net"] if early["tp_hits"] and early["tp_hits"][0] else early["r_net"]
+    else:
+        out["r_1430"] = res["r_net"]
+    if d.index_down is not None:
+        k = bisect_left(d.index_down, filled + 1)
+        out["r_spy"] = after(d.index_down[k] if k < len(d.index_down) and d.index_down[k] < closed else None,
+                             "indice")
+    return out
+
+
 def measure(d: Day, plan: dict, decided_at: int, entry_until: int, cost: dict, order: str, last_price: float,
             res: dict | None = None, emperor_plan: dict | None = None) -> dict:
     """Toutes les sorties et tous les tests d'un plan (ordre `order`) décidé à `decided_at`.
@@ -604,6 +670,7 @@ def measure(d: Day, plan: dict, decided_at: int, entry_until: int, cost: dict, o
     out["r_suiveur"] = _sim(d, plan, decided_at, entry_until, exit_at, cost, order, last_price,
                             exit_mode="suiveur", trail_r=TRAIL_R)["r_net"]
     out.update(_emperor(d, emperor_plan or plan, decided_at, entry_until, exit_at, cost, order, last_price))
+    out.update(_gemini(d, plan, decided_at, entry_until, exit_at, cost, order, last_price, res))
     out["r_glisse_x2"] = SIM.net_r(res, cost, slip_factor=2.0)
     out["r_glisse_x3"] = SIM.net_r(res, cost, slip_factor=3.0)
     late = _sim(d, plan, decided_at + BAR, entry_until + BAR, exit_at, cost, order, last_price)
@@ -637,12 +704,21 @@ def witness(d: Day, key: tuple, risk_pct: float, multiples: list[float], cost_of
     return {"temoin_r": round(sum(rs) / len(rs), 4), "temoin_triggered": 1}
 
 
-def _row(symbol: str, strategy: str, slot: int, plan: dict, decided_at: int, m: dict, wit: dict,
+def above_vwap(d: Day, decided_at: int) -> int | None:
+    """n° 6 : 1 si la bougie de 5 min close à la décision finit au-dessus du VWAP de séance, 0 dessous,
+    None avant l'ouverture (v1) ou sans bougie close à cet instant."""
+    k = bisect_left(d.t, decided_at - BAR)
+    if d.market != "stock" or k >= len(d.t) or d.t[k] + BAR != decided_at or d.vwap[k] is None:
+        return None
+    return int(d.c[k] > d.vwap[k])
+
+
+def _row(d: Day, symbol: str, strategy: str, slot: int, plan: dict, decided_at: int, m: dict, wit: dict,
          gap: float | None, rank) -> dict:
     entry, stop = plan["entry"], plan["stop"]
     return {"symbol": symbol, "strategy": strategy, "slot": slot, "signal_at": decided_at,
             "entry": round(entry, 8), "stop": round(stop, 8), "risk_pct": round((entry - stop) / entry * 100, 4),
-            **m, **wit, "gap_open_pct": gap, "rank": rank}
+            **m, **wit, "gap_open_pct": gap, "rank": rank, "sur_vwap": above_vwap(d, decided_at)}
 
 
 def strategy_rows(d: Day, symbol: str, rank=None, gap: float | None = None, names=None) -> list[dict]:
@@ -678,7 +754,7 @@ def strategy_rows(d: Day, symbol: str, rank=None, gap: float | None = None, name
         risk_pct = (plan["entry"] - plan["stop"]) / plan["entry"] * 100
         wit = witness(d, (d.market, symbol, d.day, name), risk_pct, list(TARGETS_R),
                       lambda p: SIM.costs(d.market, p, rank), (d.first, d.last)) if m["triggered"] else NO_WITNESS
-        rows.append(_row(symbol, name, 0, plan, cand["decided_at"], m, wit, gap, rank))
+        rows.append(_row(d, symbol, name, 0, plan, cand["decided_at"], m, wit, gap, rank))
     return rows
 
 
@@ -693,7 +769,7 @@ def v1_row(d: Day, symbol: str, plan: dict, decided_at: int, entry_until: int, l
     multiples = [round((t - plan["entry"]) / risk, 4) for t in targets] if risk > 0 else []
     wit = witness(d, (d.market, symbol, d.day, REFERENCE, decided_at), risk_pct, multiples,
                   lambda px: SIM.costs(d.market, px, rank), window or (d.first, d.last)) if m["triggered"] else NO_WITNESS
-    return _row(symbol, REFERENCE, decided_at, p, decided_at, m, wit, gap, rank)
+    return _row(d, symbol, REFERENCE, decided_at, p, decided_at, m, wit, gap, rank)
 
 
 # --- Entrées du générateur ------------------------------------------------------------------
@@ -701,14 +777,26 @@ def v1_row(d: Day, symbol: str, plan: dict, decided_at: int, entry_until: int, l
 STOCK_WARMUP_BARS = 160  # deux séances : EMA 20, ATR 14 et impulsion du matin
 
 
+def index_down(index5: list[dict] | None) -> list[int] | None:
+    """n° 6 : heures de clôture des bougies de 5 min de SPY qui forment un avalement baissier avec la
+    précédente (contiguë) ; None sans bougies de l'indice."""
+    if not index5:
+        return None
+    bars = CO.regular_hours(sorted(index5, key=lambda b: b["t"]))
+    return [cur["t"] + BAR for prev, cur in zip(bars, bars[1:])
+            if cur["t"] - prev["t"] == BAR and I.engulfing(prev, cur) == "baissier"]
+
+
 def stock_day(day: date, symbol: str, hist5: list[dict], session: list[dict], daily: list[dict],
-              rank=None, v1: dict | None = None) -> list[dict]:
+              rank=None, v1: dict | None = None, index5: list[dict] | None = None) -> list[dict]:
     """Lignes du jour pour une action : v1 (si son plan existe) et les stratégies.
 
     `hist5` : bougies de 5 min avant la séance ; `session` : celles de la séance ; `daily` :
-    journalier connu avant le jour ; `v1` : {plan, decided_at, entry_until, last_price, cost, result}."""
+    journalier connu avant le jour ; `v1` : {plan, decided_at, entry_until, last_price, cost, result} ;
+    `index5` : bougies de 5 min de SPY pendant la séance (sortie r_spy, déclaration n° 6)."""
     bars = CO.regular_hours(hist5[-STOCK_WARMUP_BARS * 2:])[-STOCK_WARMUP_BARS:] + session
     d = Day("stock", day, bars, daily)
+    d.index_down = index_down(index5)
     prev = d.prev_close
     gap = round((session[0]["o"] / prev - 1) * 100, 3) if session and prev else None
     rows = strategy_rows(d, symbol, rank, gap)
