@@ -223,22 +223,29 @@ async def test_temoin_catalyseur(paths, monkeypatch):
     call = K.record(a, NOW)
     assert call["groupe"] == "temoin_catalyseur" and "aucune actu positive" in call["catalyseur"][0]
     assert K.record(a, NOW) is None  # une fois par séance et par groupe
-    sources(monkeypatch)
-    assert K.record(await K.analyze("ACME", NOW), NOW)["groupe"] == "kill"
+    other = K.record(a | {"symbol": "BETA"}, NOW)  # un autre témoin, sans KILL ce jour-là
     sources(monkeypatch, catalyst=cat(news=[]), price=108.5)  # graphique raté (déjà parti) : ni l'un ni l'autre
     assert K.group(await K.analyze("ACME", NOW)) is None
     assert K.group({"symbol": "X", "verdict": "erreur", "erreur": "boum"}) is None
     after = bars_from(OPEN, RANGE + RUN + [(114.7, 115.0, 114.5, 114.8)] * 60)
 
     async def bars_range(symbols, interval, start, end, **kw):
-        return {"ACME": after}
+        return {s: after for s in symbols}
 
     monkeypatch.setattr(K.alpaca, "bars_range", bars_range)
     monkeypatch.setattr(K, "lab_item", lambda: None)
     assert await K.settle_due(datetime.fromtimestamp(call["close_ts"] + 3600, timezone.utc)) == 2
     txt = K.bilan_text(K.calls())
-    assert "🔪 KILL : 1 déclenché" in txt and "Témoin catalyseur (tout réuni sauf le catalyseur) : 1 déclenché" in txt
-    assert "ACME (témoin)" in txt and "rien n'est jugé avant 30 KILL" in txt
+    assert "Témoin catalyseur (tout réuni sauf le catalyseur) : 2 déclenchés" in txt
+    assert "ACME (témoin)" in txt and "BETA (témoin)" in txt and "rien n'est jugé avant 30 KILL" in txt
+    # L'actu arrive : ACME devient KILL dans la même séance. Le KILL l'emporte, ACME n'est plus un témoin.
+    sources(monkeypatch)
+    kill = K.record(await K.analyze("ACME", NOW), NOW)
+    assert kill["groupe"] == "kill" and other["symbol"] == "BETA"
+    assert K.stats(K.calls(), "temoin_catalyseur")["appels"] == 1
+    assert K.record(a, NOW) is None  # ni témoin après un KILL de la même séance
+    txt = K.bilan_text(K.calls())
+    assert "1 KILL proposé, 1 témoin catalyseur" in txt and "ACME (témoin)" not in txt
 
 
 async def test_scan_note_les_temoins_ecartes(paths, monkeypatch):
@@ -256,32 +263,45 @@ async def test_scan_note_les_temoins_ecartes(paths, monkeypatch):
 
 
 def book(rs, groupe="kill"):
-    return [{"symbol": f"S{i}", "day": f"2026-09-{1 + i % 25:02d}", "groupe": groupe, "entry": 10.0, "stop": 9.0,
+    return [{"symbol": f"S{i}", "day": f"2026-09-{1 + i % 25:02d}", "at": i, "groupe": groupe, "entry": 10.0,
+             "stop": 9.0,
              "resultat": {"declenche": True, "r_ibkr": r, "tp": [r > 0, False, False], "sortie": "x"}}
             for i, r in enumerate(rs)]
 
 
 def test_regle_de_lecture():
-    few = K.reading(K.stats(book([1.0] * 29)), None)
+    few = K.reading(book([1.0] * 29), None)
     assert "rien n'est jugé avant 30" in few[0]
-    bad = K.reading(K.stats(book([-1.0, -0.8] * 15)), None)
-    assert "JARVIS recommande d'éteindre Killmode ; à toi de décider" in bad[0]
-    good = K.reading(K.stats(book([1.2, 0.8] * 15)), None)
+    bad = K.reading(book([-1.0, -0.8] * 15), None)
+    assert "JARVIS recommande d'éteindre Killmode ; à toi de décider" in bad[0] and "30 premiers KILL" in bad[0]
+    good = K.reading(book([1.2, 0.8] * 15), None)
     assert "on continue" in good[0] and "positive" in good[0]
-    unsure = K.reading(K.stats(book([1.0, -1.0] * 15)), None)
-    assert "jusqu'à 100 KILL" in unsure[0]
-    done = K.reading(K.stats(book([1.0, -1.0] * 50)), None)
-    assert "ne voit pas d'avantage" in done[0]
-    gap = K.reading(K.stats(book([-1.0, -0.8] * 15)), {"ic95_ibkr": [0.05, 0.3]})
-    assert "Écart labo/direct" in gap[1]
+    unsure = K.reading(book([1.0, -1.0] * 15), None)
+    assert "prochaine lecture à 100 KILL" in unsure[0]
+    # Deux regards fixes seulement : des pertes après le 30e KILL ne déclenchent rien avant le 100e.
+    later = K.reading(book([1.0, -1.0] * 15 + [-1.0] * 30), None)
+    assert "prochaine lecture à 100 KILL (60 pour l'instant)" in later[0]
+    frozen = K.reading(book([1.2, 0.8] * 15 + [-1.0] * 30), None)
+    assert "positive" in frozen[0] and "30 premiers KILL" in frozen[0]
+    done = K.reading(book([1.0, -1.0] * 50), None)
+    assert "ne voit pas d'avantage" in done[0] and "100 premiers KILL" in done[0]
+    lab = {"esperance_ibkr_r": 0.15, "ic95_ibkr": [0.05, 0.25]}
+    far = K.reading(book([-1.0, -0.8] * 15), lab)
+    assert len(far) == 2 and "Écart labo/direct" in far[1]
+    noisy = K.reading(book([1.0, -1.2] * 15), {"esperance_ibkr_r": -0.02, "ic95_ibkr": [-0.06, 0.02]})
+    assert len(noisy) == 1  # −0,10 R [−0,43 ; +0,23] contre le labo : dans le bruit, pas d'alerte
     assert K.stats(book([1.0] * 3, "temoin_catalyseur"))["declenches"] == 0  # les groupes ne se mélangent pas
 
 
 def test_bilan_par_regle(paths, monkeypatch):
     monkeypatch.setattr(K, "lab_item", lambda: None)
+    assert K.LEGACY_VERSION == K._current()  # les appels de la PR #32 sont de la règle en vigueur aujourd'hui
     old = [c | {"regle": 5, "seuils": K.seuils() | {"gap": 3.0}} for c in book([1.0])]
     txt = K.bilan_text(old + book([-1.0]))
-    assert "règle n° 5 (gap ≥ +3 %" in txt and "(en vigueur) · KILL : 1 déclenché" in txt
+    assert "Ancienne règle n° 5 (gap ≥ +3 %, ATR ≥ 4 %, range 15 min, ordre jusqu'à 11 h New York" in txt
+    assert "🔪 KILL · règle en vigueur : 1 déclenché · espérance −1,00 R" in txt.replace("-1,00", "−1,00")
+    monkeypatch.setattr(K, "RULE", 7)  # une déclaration change la règle : les anciens appels n'en sont pas
+    assert "rien n'est jugé avant 30 KILL déclenchés et soldés (0 pour l'instant)" in K.bilan_text(book([-1.0] * 30))
 
 
 def test_ligne_du_labo(monkeypatch):
@@ -371,3 +391,54 @@ async def test_snapshot_donne_l_ouverture(monkeypatch):
     monkeypatch.setattr(alpaca, "_request", request)
     snap = (await alpaca.snapshots(["ACME"]))["ACME"]
     assert snap["open"] == 10.2 and snap["open_day"] == "2026-10-06"
+
+
+async def test_gap_d_ouverture_avant_les_bougies(paths, monkeypatch):
+    at = datetime.fromtimestamp(OPEN + 10 * 60, timezone.utc)  # 9 h 40 : aucune bougie de séance close (Alpaca)
+
+    def setup(open_, price):
+        sources(monkeypatch, price=price)
+
+        async def snapshots(symbols, feed="iex"):
+            return {"ACME": {"price": price, "prev_close": 100.0, "open": open_, "open_day": DAY.isoformat()}}
+
+        async def candles(symbol, market, interval, source=None, max_age=None, outputsize=None):
+            return CO.regular_hours(hist())
+
+        monkeypatch.setattr(K.alpaca, "snapshots", snapshots)
+        monkeypatch.setattr(K.T, "candles", candles)
+
+    setup(106.0, 103.0)  # ouverte à +6 %, à +3 % maintenant : jugée sur l'ouverture, comme au labo
+    a = await K.analyze("ACME", at)
+    assert a["gap_pct"] == pytest.approx(6.0) and a["verdict"] == "pret"
+    assert "gap d'ouverture +6,0 %" in a["piliers"]["volatilite"]["raisons"][0]
+    setup(102.0, 105.0)  # ouverte à +2 %, à +5 % maintenant : pas un jour Killmode
+    a = await K.analyze("ACME", at)
+    assert a["verdict"] == "non" and "gap d'ouverture +2,0 %" in a["piliers"]["volatilite"]["raisons"][0]
+
+
+async def test_bougie_de_9h30_absente(paths, monkeypatch):
+    sources(monkeypatch)
+
+    async def candles(symbol, market, interval, source=None, max_age=None, outputsize=None):
+        return CO.regular_hours(hist()) + bars_from(OPEN + 300, RANGE + RUN)
+
+    monkeypatch.setattr(K.T, "candles", candles)
+    a = await K.analyze("ACME", NOW)
+    assert a["verdict"] == "non" and "bougie de 9 h 30 absente" in a["piliers"]["graphique"]["raisons"][0]
+
+
+def test_source_des_bougies():
+    fresh = bars_from(OPEN, RANGE + RUN)
+    assert K.candle_source(None, fresh, NOW) == "twelvedata"
+    late = [b for b in fresh if b["t"] + 300 <= NOW.timestamp() - 16 * 60]  # retombé sur Alpaca (16 min)
+    assert K.candle_source(None, late, NOW) == "alpaca (secours)"
+    assert K.candle_source("alpaca", late, NOW) == "alpaca" and K.candle_source(None, [], NOW) is None
+
+
+def test_historique_court_seulement_s_il_l_est():
+    co = {"nom": "Acme", "mesures": None, "seances": 60}
+    a = {"symbol": "ACME", "at": NOW.isoformat(), "price": None, "gap_pct": None, "verdict": "non", "societe": co,
+         "piliers": {k: {"ok": False, "raisons": ["x"]} for k, _ in K.PILLARS}, "graphique": {"status": "non"}}
+    assert "historique court" not in K.text(a)
+    assert "historique court (20 séances)" in K.text(a | {"societe": co | {"seances": 20}})

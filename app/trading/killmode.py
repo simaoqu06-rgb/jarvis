@@ -41,6 +41,7 @@ Killmode (Simão décide) ; borne basse au-dessus de 0 → on continue ; sinon o
 import asyncio
 import json
 import logging
+import math
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -82,8 +83,10 @@ GROUPS = {"kill": "🔪 KILL", "temoin_catalyseur": "Témoin catalyseur (tout r�
 READ_AT = 30           # règle de lecture du journal (écrite avant le premier appel)
 READ_MAX = 100
 VOL15_DAYS = 20
+SC_MIN_SESSIONS = 51   # scanner.features (MM50, RSI) : la fiche société seulement
 LAB_SCOPE = "règle de prix seule, sans catalyseur, sur l'univers du labo (~300 actions choisies la veille)"
-SCORE_NOTE = "non prédictive au labo (rejeu oct.-déc. 2024 : notes 5 à 9 entre −0,16 et −0,25 R)"
+SCORE_NOTE = ("non prédictive au labo, mesurée sans sa part catalyseur (rejeu oct.-déc. 2024 : notes 5 à 9 "
+              "entre −0,16 et −0,25 R)")
 
 
 def seuils() -> dict:
@@ -172,6 +175,21 @@ def vol15_adv(d: ST.Day, ctx: dict) -> float | None:
     return sum(b["v"] for b in d.bars[d.d0:d.d0 + n]) / avg if avg > 0 else None
 
 
+def candle_source(source: str | None, bars5: list[dict] | None, now: datetime) -> str | None:
+    """Source réelle des bougies de 5 min : Alpaca pour le scan ; sinon Twelve Data en temps réel, sauf si
+    service.candles est retombé en silence sur Alpaca (16 min de retard), ce qui se voit à l'âge de la
+    dernière bougie pendant la séance."""
+    if source == "alpaca":
+        return "alpaca"
+    if not bars5:
+        return None
+    bounds = CO.session_ts(now.astimezone(NEW_YORK).date())
+    ts = now.timestamp()
+    if bounds and bounds[0] + 10 * 60 <= ts < bounds[1] and ts - (bars5[-1]["t"] + BAR) > 10 * 60:
+        return "alpaca (secours)"
+    return "twelvedata"
+
+
 def open_gap(rows: list[dict], snap: dict, prev: float | None, now: datetime) -> float | None:
     """Gap d'ouverture du jour en % de la clôture SIP de la veille : ouverture de la bougie journalière SIP du
     jour si Alpaca la donne déjà, sinon celle d'IEX (snapshot) ; None avant 9 h 30 New York."""
@@ -225,6 +243,9 @@ def chart_pillar(d: ST.Day | None, now: datetime, price: float | None) -> dict:
     pilier volatilité (avant l'ouverture, sur le gap de pré-ouverture)."""
     if d is None:
         return {"status": "ferme", "ok": False, "raisons": ["Bourse de New York fermée aujourd'hui"]}
+    if d.d1 > d.d0 and d.t[d.d0] != d.start_ts:
+        return {"status": "non", "ok": False,
+                "raisons": ["bougie de 9 h 30 absente : la règle du labo ne peut pas juger cette séance"]}
     cand, reasons = ST.killmode_check(d)
     until = int(datetime.combine(d.day, ST.KILL_UNTIL, NEW_YORK).timestamp())
     if cand is None:
@@ -292,8 +313,13 @@ async def analyze(symbol: str, now: datetime | None = None, source: str | None =
         errors += [f"Finnhub {e}" for e in cat.get("errors") or []]
     d = live_day(bars5, daily, now) if bars5 and daily else None
     ctx = ST.kill_context(d) if d else {"gap_pct": None, "atr_pct": daily_atr_pct(before)}
-    pre_gap = (price / prev - 1) * 100 if price and prev else None
-    gap = ctx["gap_pct"] if ctx["gap_pct"] is not None else pre_gap
+    # Gap du labo (ouverture de la bougie de 9 h 30) ; sinon l'ouverture du jour (bougie journalière SIP ou
+    # IEX, bougies de 5 min en retard) ; avant 9 h 30, le gap de pré-ouverture.
+    gap, gap_kind = ctx["gap_pct"], "d'ouverture"
+    if gap is None:
+        gap = open_gap(daily, snap, prev, now)
+    if gap is None and price and prev:
+        gap, gap_kind = (price / prev - 1) * 100, "du moment"
     atr_pct = ctx["atr_pct"]
     if d is not None or (bars5 and daily):
         chart = chart_pillar(d, now, price)
@@ -304,7 +330,7 @@ async def analyze(symbol: str, now: datetime | None = None, source: str | None =
     if gap is None:
         vol_reasons.append("gap inconnu")
     elif gap < ST.KILL_GAP_PCT:
-        vol_reasons.append(f"gap {ST._pct_fr(gap)} % (il faut au moins +{ST.KILL_GAP_PCT:g} %)")
+        vol_reasons.append(f"gap {gap_kind} {ST._pct_fr(gap)} % (il faut au moins +{ST.KILL_GAP_PCT:g} %)")
     if atr_pct is None:
         vol_reasons.append("ATR journalier inconnu")
     elif atr_pct < ST.KILL_ATR_PCT:
@@ -312,7 +338,7 @@ async def analyze(symbol: str, now: datetime | None = None, source: str | None =
     cat_ok, cat_reasons = catalyst_pillar(cat, now)
     pillars = {
         "volatilite": {"ok": not vol_reasons, "raisons": vol_reasons or [
-            f"gap {ST._pct_fr(gap)} %, ATR {atr_pct:.1f} %".replace(".", ",")]},
+            f"gap {gap_kind} {ST._pct_fr(gap)} %, ATR {atr_pct:.1f} %".replace(".", ",")]},
         "catalyseur": {"ok": cat_ok, "raisons": cat_reasons},
         "graphique": {"ok": chart["ok"], "raisons": chart["raisons"] or ["range tenu au-dessus du VWAP, gap pas comblé"]},
         "donnees": {"ok": not errors, "raisons": errors or ["cours, journalier, 5 min, profil, résultats, actus"]},
@@ -328,8 +354,7 @@ async def analyze(symbol: str, now: datetime | None = None, source: str | None =
            "atr_pct": atr_pct, "vol15_adv": vol15_adv(d, ctx) if d else None, "verdict": verdict,
            "piliers": pillars, "graphique": chart, "societe": _company(symbol, profile, cat, feats, before),
            "catalyseur": cat, "potentiel": PO.hint(gap) if gap is not None else None, "jarvis": None,
-           # Twelve Data en temps réel par défaut (Alpaca en secours s'il ne répond pas) ; Alpaca pour le scan
-           "source": "alpaca" if source == "alpaca" else "twelvedata"}
+           "source": candle_source(source, bars5, now)}
     if verdict == "kill":
         out["jarvis"] = await _jarvis_reading(symbol, chart["plan"], cat, source, now)
     return out
@@ -429,8 +454,19 @@ def _group_of(c: dict) -> str:
     return c.get("groupe") or "kill"  # appels notés avant les groupes : des KILL
 
 
+# Appels notés avant que le journal garde la règle (PR #32) : règle n° 5 avec ces seuils, figés.
+LEGACY_VERSION = (5, json.dumps({"gap": 4.0, "atr": 4.0, "range_min": 15, "jusqu_a": "11:00", "poursuite_r": 0.5,
+                                 "catalyseur_h": 48}, sort_keys=True))
+
+
 def _version(c: dict) -> tuple:
-    return c.get("regle") or RULE, json.dumps(c.get("seuils") or seuils(), sort_keys=True)
+    if "regle" not in c:
+        return LEGACY_VERSION
+    return c["regle"], json.dumps(c["seuils"], sort_keys=True)
+
+
+def _current() -> tuple:
+    return RULE, json.dumps(seuils(), sort_keys=True)
 
 
 def record(a: dict, now: datetime | None = None) -> dict | None:
@@ -442,8 +478,8 @@ def record(a: dict, now: datetime | None = None) -> dict | None:
     now = now or datetime.now(timezone.utc)
     day = now.astimezone(NEW_YORK).date().isoformat()
     book = calls()
-    if any(c["symbol"] == a["symbol"] and c["day"] == day and _group_of(c) == g for c in book):
-        return None
+    if any(c["symbol"] == a["symbol"] and c["day"] == day and _group_of(c) in (g, "kill") for c in book):
+        return None  # déjà noté ; un témoin ne s'ajoute pas à un KILL de la même séance
     plan = a["graphique"]["plan"]
     cat = a.get("catalyseur") or {}
     call = {"id": uuid.uuid4().hex[:8], "groupe": g, "symbol": a["symbol"], "day": day, "at": int(now.timestamp()),
@@ -499,10 +535,19 @@ async def settle_due(now: datetime | None = None) -> int:
     return done
 
 
+def in_group(book: list[dict], groupe: str) -> list[dict]:
+    """Appels d'un groupe. Les groupes sont disjoints par action et séance : un témoin dont l'action a aussi
+    un KILL ce jour-là (l'actu est arrivée entre deux analyses) n'est pas un témoin, il est écarté."""
+    if groupe != "temoin_catalyseur":
+        return [c for c in book if _group_of(c) == groupe]
+    kills = {(c["symbol"], c["day"]) for c in book if _group_of(c) == "kill"}
+    return [c for c in book if _group_of(c) == groupe and (c["symbol"], c["day"]) not in kills]
+
+
 def stats(book: list[dict], groupe: str = "kill") -> dict:
     """Bilan d'un groupe du journal ; espérance nette (commission IBKR par action) avec IC 95 % en grappes
     par jour, comme au labo."""
-    book = [c for c in book if _group_of(c) == groupe]
+    book = in_group(book, groupe)
     settled = [c for c in book if c.get("resultat")]
     trig = [c for c in settled if c["resultat"]["declenche"] and c["resultat"]["r_ibkr"] is not None]
     m = SS.Mean()
@@ -558,29 +603,61 @@ def lab_line(it: dict | None) -> str | None:
             + (" · échantillon faible" if it.get("echantillon_faible") else ""))
 
 
-def reading(st: dict, lab: dict | None) -> list[str]:
-    """Règle de lecture du journal, écrite avant le premier appel, sur les KILL d'une même règle."""
-    n, ci = st["declenches"], st["ic95"]
-    if n < READ_AT or not ci:
+def judged(book: list[dict], n: int) -> list[dict]:
+    """Les `n` premiers KILL déclenchés et soldés, dans l'ordre des appels : la règle de lecture ne regarde
+    qu'à 30 puis à 100, jamais entre les deux (regarder à chaque bilan multiplierait les fausses alertes)."""
+    trig = sorted((c for c in in_group(book, "kill") if c.get("resultat") and c["resultat"]["declenche"]
+                   and c["resultat"]["r_ibkr"] is not None), key=lambda c: c["at"])
+    return trig[:n] if len(trig) >= n else []
+
+
+def reading(book: list[dict], lab: dict | None) -> list[str]:
+    """Règle de lecture du journal, écrite avant le premier appel, sur les KILL d'une même règle : lue une fois
+    à 30 KILL déclenchés ; si l'IC 95 % contient 0, relue une fois à 100."""
+    n = stats(book, "kill")["declenches"]
+    st, look = None, None
+    for size in (READ_AT, READ_MAX):
+        cut = judged(book, size)
+        if not cut:
+            break
+        st, look = stats(cut, "kill"), size
+        if st["ic95"] and (st["ic95"][1] < 0 or st["ic95"][0] > 0):
+            break
+    if st is None or not st["ic95"]:
         return [f"-# Règle de lecture : rien n'est jugé avant {READ_AT} KILL déclenchés et soldés "
                 f"({n} pour l'instant)."]
-    span = f"IC 95 % [{SS._r(ci[0])} ; {SS._r(ci[1])}] sur {n} KILL"
+    ci = st["ic95"]
+    span = f"lu sur les {look} premiers KILL : {SS._r(st['esperance_r'])} R, IC 95 % [{SS._r(ci[0])} ; {SS._r(ci[1])}]"
     if ci[1] < 0:
         out = [f"📉 **Espérance négative même en haut de l'intervalle** ({span}) : JARVIS recommande d'éteindre "
                "Killmode ; à toi de décider."]
     elif ci[0] > 0:
         out = [f"📈 **Espérance positive même en bas de l'intervalle** ({span}) : on continue."]
-    elif n < READ_MAX:
-        out = [f"Pas encore tranché ({span}, zéro dedans) : on continue jusqu'à {READ_MAX} KILL."]
+    elif look < READ_MAX:
+        out = [f"Pas tranché à {READ_AT} ({span}, zéro dedans) : on continue, prochaine lecture à {READ_MAX} KILL "
+               f"({n} pour l'instant)."]
     else:
-        out = [f"{READ_MAX} KILL sans écart démontré à zéro ({span}) : JARVIS ne voit pas d'avantage ; "
-               "à toi de décider."]
-    lab_ci = (lab or {}).get("ic95_ibkr")
-    if lab_ci and not lab_ci[0] <= st["esperance_r"] <= lab_ci[1]:
-        out.append(f"-# Écart labo/direct : le journal fait {SS._r(st['esperance_r'])} R, hors de l'intervalle du "
-                   f"labo [{SS._r(lab_ci[0])} ; {SS._r(lab_ci[1])}] (catalyseur, univers ou données différents) : "
-                   "à comprendre avant d'en tirer quoi que ce soit.")
+        out = [f"Pas d'écart démontré à zéro ({span}) : JARVIS ne voit pas d'avantage ; à toi de décider."]
+    gap = _lab_gap(st, lab)
+    if gap:
+        out.append(gap)
     return out
+
+
+def _lab_gap(st: dict, lab: dict | None) -> str | None:
+    """Écart labo/direct seulement s'il dépasse le bruit des deux mesures (z ≥ 1,96 sur la différence)."""
+    lab_ci, ci = (lab or {}).get("ic95_ibkr"), st["ic95"]
+    if not lab_ci or not ci:
+        return None
+    m_lab = lab.get("esperance_ibkr_r")
+    if m_lab is None:
+        m_lab = (lab_ci[0] + lab_ci[1]) / 2
+    se = math.hypot((lab_ci[1] - lab_ci[0]) / 3.92, (ci[1] - ci[0]) / 3.92)
+    if not se or abs(st["esperance_r"] - m_lab) / se < 1.96:
+        return None
+    return (f"-# Écart labo/direct : le journal fait {SS._r(st['esperance_r'])} R, le labo {SS._r(m_lab)} R "
+            f"[{SS._r(lab_ci[0])} ; {SS._r(lab_ci[1])}], au-delà du bruit des deux mesures (catalyseur, univers ou "
+            "données différents) : à comprendre avant d'en tirer quoi que ce soit.")
 
 
 # --- Discord ---------------------------------------------------------------------------------
@@ -651,7 +728,7 @@ def text(a: dict, lab: str | None = None) -> str:
         rvol = f"{m['rvol']:g}×".replace(".", ",") if m["rvol"] is not None else "n/d"
         company.append(f"5 j {_pct(m['change_5d_pct'])} · RSI {m['rsi']:.0f} · volume veille {rvol} · "
                        f"{'au-dessus de' if m['price'] > m['ma50'] else 'sous'} la MM50")
-    elif co.get("seances"):
+    elif 0 < (co.get("seances") or 0) < SC_MIN_SESSIONS:
         company.append(f"historique court ({co['seances']} séances) : MM50 et RSI indisponibles")
     if last:
         sur = last.get("eps_surprise_pct")
@@ -710,7 +787,11 @@ def _n(n: int, word: str) -> str:
 
 def _version_label(v: tuple) -> str:
     s = json.loads(v[1])
-    return f"règle n° {v[0]} (gap ≥ +{s['gap']:g} %, ATR ≥ {s['atr']:g} %, ordre jusqu'à {s['jusqu_a']})"
+    h, m = (s.get("jusqu_a") or "?:00").split(":")
+    until = f"{int(h) if h.isdigit() else h} h" + ("" if m == "00" else f" {m}")
+    return (f"règle n° {v[0]} (gap ≥ +{s.get('gap', 0):g} %, ATR ≥ {s.get('atr', 0):g} %, "
+            f"range {s.get('range_min')} min, ordre jusqu'à {until} New York, "
+            f"poursuite {s.get('poursuite_r', 0):g} R, actus {s.get('catalyseur_h')} h)").replace(".", ",")
 
 
 def _group_line(label: str, st: dict) -> str:
@@ -721,29 +802,34 @@ def _group_line(label: str, st: dict) -> str:
 
 
 def bilan_text(book: list[dict]) -> str:
-    """Les deux groupes du journal (KILL, témoin catalyseur), nets de la commission IBKR par action, par règle
-    s'il y en a eu plusieurs ; la ligne du labo ; la règle de lecture sur les KILL de la règle en vigueur."""
-    kill, wit = stats(book, "kill"), stats(book, "temoin_catalyseur")
-    pending = kill["en_attente"] + wit["en_attente"]
-    lines = [f"🔪 **Killmode · bilan** · {_n(kill['appels'], 'KILL proposé')}, "
-             f"{_n(wit['appels'], 'témoin catalyseur')}, {_n(kill['soldes'] + wit['soldes'], 'soldé')}"
-             + (f", {pending} en attente de la clôture" if pending else "")]
+    """Les deux groupes du journal (KILL, témoin catalyseur) de la règle en vigueur, nets de la commission IBKR par
+    action ; les règles précédentes à part ; la ligne du labo ; la règle de lecture."""
+    current = _current()
+    versions = sorted({_version(c) for c in book})
+    cur = [c for c in book if _version(c) == current]
+    kill, wit = stats(cur, "kill"), stats(cur, "temoin_catalyseur")
+    n_kill, n_wit = len(in_group(book, "kill")), len(in_group(book, "temoin_catalyseur"))
+    pending = sum(1 for c in book if not c.get("resultat"))
+    lines = [f"🔪 **Killmode · bilan** · {_n(n_kill, 'KILL proposé')}, {n_wit} témoin{'s' if n_wit > 1 else ''} "
+             f"catalyseur" + (f", {pending} en attente de la clôture" if pending else "")]
+    suffix = " · règle en vigueur" if len(versions) > 1 else ""
     for g, st in (("kill", kill), ("temoin_catalyseur", wit)):
         if st["declenches"]:
-            lines.append(_group_line(GROUPS[g], st))
+            lines.append(_group_line(GROUPS[g] + suffix, st))
     if kill["declenches"] or wit["declenches"]:
         lines.append("-# Net de la commission IBKR par action (0,005 $), sans le minimum par ordre. Le témoin a la "
                      "même règle de prix et le même solde : l'écart entre les deux est la seule mesure de l'apport "
                      "du catalyseur.")
-    current = (RULE, json.dumps(seuils(), sort_keys=True))
-    versions = sorted({_version(c) for c in book})
-    if len(versions) > 1:
-        for v in versions:
-            st = stats([c for c in book if _version(c) == v], "kill")
+    for v in versions:
+        if v == current:
+            continue
+        sub = [c for c in book if _version(c) == v]
+        for g in GROUPS:
+            st = stats(sub, g)
             if st["declenches"]:
-                lines.append(f"-# {_version_label(v)}{' (en vigueur)' if v == current else ''} · "
-                             + _group_line("KILL", st))
-    for c in [c for c in book if c.get("resultat")][-8:]:
+                lines.append(f"-# Ancienne {_version_label(v)} · " + _group_line(GROUPS[g], st))
+    kept = {id(c) for g in GROUPS for c in in_group(book, g)}
+    for c in [c for c in book if c.get("resultat") and id(c) in kept][-8:]:
         res = c["resultat"]
         out = (f"{SS._r(res['r_ibkr'])} R ({res['sortie']})" if res["declenche"] else "pas déclenché")
         tag = " (témoin)" if _group_of(c) == "temoin_catalyseur" else ""
@@ -753,7 +839,7 @@ def bilan_text(book: list[dict]) -> str:
     line = lab_line(lab)
     if line:
         lines.append(line)
-    lines += reading(stats([c for c in book if _version(c) == current], "kill"), lab)
+    lines += reading(cur, lab)
     return "\n".join(lines)
 
 
