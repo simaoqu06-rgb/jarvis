@@ -542,7 +542,8 @@ def apply_bars(trade: dict, bars: list[dict], now: datetime) -> list[str]:
     """Rejoue les bougies d'1 min arrivées depuis le dernier passage. Renvoie les messages à envoyer.
 
     Le stop ne remonte pas au prix d'entrée dès le TP1 (EmperorBTC : « ne soyez pas pressé de
-    passer votre SL au seuil de rentabilité ») : il y monte après le TP2.
+    passer votre SL au seuil de rentabilité ») : il y monte après le TP2. Un KILL pris (`!prends … kill`) suit la
+    gestion que mesure le journal de Killmode : stop à l'entrée dès le TP1.
     """
     messages = []
     sign = 1 if trade["side"] == "long" else -1
@@ -586,7 +587,12 @@ def apply_bars(trade: dict, bars: list[dict], now: datetime) -> list[str]:
                 text += " Dernier objectif atteint, trade terminé. 🏁"
             else:
                 nxt = trade["targets"][n]
-                if n >= 2:
+                if trade.get("killmode"):  # la gestion du KILL, celle que son journal mesure : l'entrée dès TP1
+                    trade["stop_current"] = trade["entry"]
+                    trade["stop_moved_at"] = bar["t"]
+                    stop_text = (f"Remonte les SL des brackets restants à l'entrée ({_num(trade['entry'])}) : c'est la "
+                                 "gestion du KILL que le journal mesure. Le reste se vend avant la clôture.")
+                elif n >= 2:
                     trade["stop_current"] = trade["entry"]
                     trade["stop_moved_at"] = bar["t"]
                     stop_text = f"Stop remonté à l'entrée ({_num(trade['entry'])})."

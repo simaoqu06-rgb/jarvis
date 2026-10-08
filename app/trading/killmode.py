@@ -31,18 +31,22 @@ note chaque 🔪 KILL proposé et un « témoin catalyseur » (tout réuni sauf 
 solde ; « propre » quand il ne manque qu'une actu positive), avec la version (règle, seuils, empreinte du code du
 catalyseur, version du direct), les actus comptées, le contexte (veille, volume, source, secteur) et les codes
 du catalyseur. `!kill bilan` (permis Killmode éteint) solde chaque appel après la clôture sur les bougies SIP
-d'Alpaca non ajustées : ordre stop d'achat rejoué minute par minute après l'appel puis en 5 min, un tiers par
-objectif, stop à l'entrée après TP1, soldé à la clôture. Le chiffre qui décide est le R aux frais réels de
-Simão (20 € de risque, un bracket IBKR par objectif, minimum par ordre, glissement d'au moins un demi-pas).
+d'Alpaca non ajustées d'1 min de toute la séance (gardées pour un re-solde) : ordre stop d'achat actif une minute
+pleine après l'appel, un tiers par objectif, stop à l'entrée après TP1, soldé à la clôture ; une minute dont
+l'ordre des prix est inconnu est jouée dans le pire ordre (le meilleur est affiché). Le chiffre qui décide est
+le R aux frais réels de Simão (20 € de risque, un bracket IBKR par objectif en actions entières, minimum par
+ordre, glissement d'au moins un demi-pas).
 
 Règle de lecture, écrite avant le premier appel et revue le 8 octobre avant tout KILL soldé (avis de GPT et
 Gemini, council) : au 30e KILL déclenché, un audit (borne haute de l'IC 95 % sous 0 → JARVIS recommande
 d'éteindre, sinon « pas d'alerte », jamais une validation) ; au 100e, la lecture finale (avantage démontré
 seulement si l'IC tient par jour, par semaine et avec 3 c de glissement par côté) ; une borne de dégât (IC
-99,9 %) dès 10 KILL. Simão décide toujours. Le journal ne voit qu'une catastrophe ou un gros écart ; l'apport du
-catalyseur (écart au témoin) se mesure au labo.
+99,9 %) dès 10 KILL. Simão décide toujours. Le journal ne voit qu'une catastrophe ou un gros écart ; la valeur
+prédictive du filtre catalyseur à règle de prix égale (écart au témoin, pas l'effet causal d'une actu) se mesure
+au labo.
 """
 import asyncio
+import gzip
 import hashlib
 import inspect
 import json
@@ -60,6 +64,7 @@ from app.core.http import SourceError
 from app.lab import collector as CO
 from app.lab import potentiel as PO
 from app.lab import simulator as SIM
+from app.lab import sources as LSRC
 from app.lab import stats as LS
 from app.lab import strat_stats as SS
 from app.lab import strategies as ST
@@ -90,10 +95,10 @@ PILLARS = (("volatilite", "Volatilité"), ("catalyseur", "Catalyseur"), ("graphi
 # Déclaration du labo qui a posé la règle de prix de killmode. À changer seulement quand une déclaration
 # modifie cette règle : le bilan ne mélange pas les appels de deux règles différentes.
 RULE = 5
-# Version de l'analyse en direct et du solde (2, 8 octobre : pas de seconde entrée quand le trade du labo est
-# fini, bougies closes jugées sur la fin réelle des données, entrée soldée minute par minute après l'appel,
-# frais réels). Le bilan ne mélange pas les appels de deux versions ; la définition du catalyseur (code de
-# catalyst.py, partagé avec JARVIS) y entre par son empreinte : le moindre changement ouvre une version.
+# Version de l'analyse en direct (2, 8 octobre : pas de seconde entrée quand le trade du labo est fini, bougies
+# closes jugées sur la fin réelle des données, frais réels). Le bilan ne mélange pas les appels de deux versions ;
+# la définition du catalyseur (code de catalyst.py, partagé avec JARVIS) y entre par son empreinte : le moindre
+# changement ouvre une version. Le solde a sa propre méthode (SETTLE_METHOD) : il est refait sur tout le journal.
 DIRECT_VERSION = 2
 GROUPS = {"kill": "🔪 KILL", "temoin_catalyseur": "Témoin catalyseur (tout réuni sauf le catalyseur)"}
 # Raisons qui font tomber le pilier catalyseur (codes notés dans le journal). Le « témoin propre » n'a que
@@ -117,6 +122,14 @@ SPLIT_GAP_PCT = 50.0   # gap de +50 % ou plus : clôture de la veille vérifiée
 SPLIT_TOLERANCE = 0.2
 SLIP_ALERT_R = 0.25    # risque réel : sortie à 0,25 R ou plus sous le stop actif
 LATE_GAP = 30 * 60     # solde : trade ouvert à la clôture sans bougie dans la dernière demi-heure = incomplet
+# Méthode du solde, datée dans docs/labo-strategies.md ; un changement re-solde tout le journal depuis les bougies
+# gardées (KILL et témoins restent comparables). 1 (PR #41) : minutes jusqu'à la fin de la bougie de 5 min de
+# l'appel, puis 5 min. 2 (8 octobre, avant tout solde, second avis de GPT et Gemini) : toute la séance en bougies
+# d'1 min, ordre actif LATENCY après l'appel, bougie ambiguë jouée dans le pire ordre (le meilleur est affiché).
+SETTLE_METHOD = 2
+STEP = 60              # bougies du solde : 1 min
+LATENCY = 60           # appel lu et ordre saisi chez IBKR : l'ordre est actif à la 1re minute pleine après 60 s
+BARS_DIR = os.getenv("JARVIS_KILLMODE_BARS_PATH", "data/killmode_bars")  # bougies d'1 min de chaque solde
 # Frais réels de Simão (le chiffre qui décide) : 20 € de risque par trade, un bracket IBKR par objectif (une
 # entrée et une sortie chacun, donc deux minimums de commission), plan Fixe sauf JARVIS_IBKR_PLAN=degressif ;
 # glissement du labo, jamais moins d'un demi-pas par côté.
@@ -423,15 +436,15 @@ def adv(before: list[dict]) -> float | None:
 
 
 async def split_check(symbol: str, prev: float) -> str | None:
-    """Gap de +100 % ou plus : la clôture SIP de la veille doit coller à celle de Finnhub (un regroupement
-    d'actions pas encore ajusté donne un faux gap). Le problème en clair, ou None si tout colle."""
+    """Gap de +50 % ou plus (SPLIT_GAP_PCT) : la clôture SIP de la veille doit coller à celle de Finnhub (un
+    regroupement d'actions pas encore ajusté donne un faux gap). Le problème en clair, ou None si tout colle."""
     try:
         q = (await finnhub.stock_quotes([symbol]))[0]
     except SourceError as exc:
-        return f"gap de +100 % ou plus et clôture de la veille non vérifiable ({exc})"
+        return f"gap de +{SPLIT_GAP_PCT:g} % ou plus et clôture de la veille non vérifiable ({exc})"
     pc = q.get("previous_close")
     if not pc:
-        return "gap de +100 % ou plus et clôture de la veille non vérifiable (Finnhub muet)"
+        return f"gap de +{SPLIT_GAP_PCT:g} % ou plus et clôture de la veille non vérifiable (Finnhub muet)"
     if abs(prev / pc - 1) > SPLIT_TOLERANCE:
         return (f"clôture de la veille {prev:g} (Alpaca) contre {pc:g} (Finnhub) : regroupement d'actions "
                 "possible, gap faux").replace(".", ",")
@@ -701,6 +714,14 @@ def record(a: dict, now: datetime | None = None) -> dict | None:
     return call
 
 
+def kill_today(symbol: str, now: datetime | None = None) -> dict | None:
+    """Le dernier 🔪 KILL noté aujourd'hui (New York) sur `symbol` : ses objectifs servent à `!prends … kill`
+    donné sans `tp`, pour que le suivi applique la gestion que le journal mesure."""
+    day = (now or datetime.now(timezone.utc)).astimezone(NEW_YORK).date().isoformat()
+    return next((c for c in reversed(calls()) if c["symbol"] == symbol.upper() and c["day"] == day
+                 and _group_of(c) == "kill"), None)
+
+
 def sip_view(call: dict, bars: list[dict]) -> dict | None:
     """La règle de prix refaite sur les bougies SIP de la séance (tout le marché ; en direct, Twelve Data ne voit
     qu'une part des échanges) : signal, entrée et stop, même ordre qu'en direct à un pas près, volume des 15
@@ -722,39 +743,59 @@ def sip_view(call: dict, bars: list[dict]) -> dict | None:
             "vol15_adv": round(sum(b["v"] for b in s[:n]) / adv20, 4) if adv20 else None}
 
 
-def _incomplete(call: dict, after: list[dict], res: dict) -> bool:
+def _incomplete(call: dict, after: list[dict], res: dict, step: int = STEP) -> bool:
     """Trade encore ouvert à la clôture sans bougie dans la dernière demi-heure (suspension, données coupées) :
     soldé à un prix d'avant, peut-être faux."""
     if not res["triggered"] or res["exit_reason"] != "cloture":
         return False
-    last = max((b["t"] for b in after if b["t"] + BAR <= call["close_ts"]), default=None)
-    return last is None or last + BAR < call["close_ts"] - LATE_GAP
+    last = max((b["t"] for b in after if b["t"] + step <= call["close_ts"]), default=None)
+    return last is None or last + step < call["close_ts"] - LATE_GAP
 
 
-def settle(call: dict, bars: list[dict], minutes: list[dict] | None = None) -> dict:
-    """Solde un appel : ordre stop d'achat posé à l'heure de l'appel, rejoué sur les bougies d'1 min jusqu'à la
-    fin de la bougie de 5 min de l'appel (`minutes`), puis sur celles de 5 min ; une minute qui ouvre au-dessus de
-    l'entrée remplit à son ouverture (prix déjà parti : l'ordre part au prix du moment, jamais sous l'entrée).
-    Gestion du labo (tiers par objectif, stop à l'entrée après TP1), soldé à la clôture. Garde le détail
-    (remplissage, sorties, pire excursion) d'où le bilan recalcule les frais réels, et la règle refaite sur
-    les bougies SIP de la séance."""
-    b5 = -(-call["at"] // BAR) * BAR  # début de la première bougie de 5 min qui suit l'appel
-    after = [b for b in minutes or [] if call["at"] <= b["t"] < b5] + [b for b in bars if b["t"] >= b5]
+def activation(call: dict, step: int = STEP) -> int:
+    """Début de la première bougie pleine LATENCY secondes après l'appel : l'ordre posé chez IBKR (message lu,
+    ordre saisi), le même délai pour chaque KILL et chaque témoin. Ce qui se passe avant n'est jamais vu."""
+    return -(-(call["at"] + LATENCY) // step) * step
+
+
+def _exits(res: dict) -> list[dict]:
+    return [{"prix": e["price"], "part": e["part"], "raison": e["reason"]} for e in res["exits"]]
+
+
+def settle(call: dict, bars: list[dict], step: int = STEP) -> dict:
+    """Solde un appel sur les bougies de sa séance (`step` secondes, 1 min) : ordre stop d'achat actif à
+    `activation` (une bougie qui ouvre au-dessus de l'entrée remplit à son ouverture : l'ordre part au prix du
+    moment, jamais sous l'entrée), gestion du labo (un tiers par objectif, stop à l'entrée après TP1), soldé à la
+    clôture. Une bougie dont l'ordre des prix est inconnu et change l'issue est jouée dans le pire ordre
+    (`sorties`, d'où vient le chiffre qui décide) et dans le meilleur (`sorties_fav`, affiché) ; `ambigus` dit
+    lesquelles et pourquoi. `r_ibkr` rejoue l'appel comme le labo (bougies de 5 min dès la suivante, résolution
+    et frais du labo), pour la comparaison au labo seulement. Garde le détail (remplissage, sorties, pire
+    excursion) d'où le bilan recalcule les frais réels, et la règle refaite sur les bougies SIP de la séance."""
+    act = activation(call, step)
     plan = {"side": "long", "entry": call["entry"], "stop": call["stop"],
             "targets": [{"price": p} for p in call["targets"]]}
-    res = SIM.simulate(plan, after, market="stock", decided_at=call["at"],
-                       entry_until=min(call["until"], call["close_ts"]), exit_at=call["close_ts"],
-                       last_price=call["price"] or call["entry"], cost=SIM.costs("stock", call["entry"]),
-                       entry_order="stop")
+    kw = {"market": "stock", "entry_until": min(call["until"], call["close_ts"]), "exit_at": call["close_ts"],
+          "last_price": call["price"] or call["entry"], "cost": SIM.costs("stock", call["entry"]),
+          "entry_order": "stop"}
+    after = [b for b in bars if b["t"] >= act]
+    res = SIM.simulate(plan, after, decided_at=act, bar_seconds=step, resolution="prudente", **kw)
+    fav = SIM.simulate(plan, after, decided_at=act, bar_seconds=step, resolution="favorable", **kw)
+    five = CO.aggregate(bars, CO.BASE_TF, "stock") if step < BAR else bars
+    b5 = -(-call["at"] // BAR) * BAR  # le labo : bougies de 5 min dès celle qui suit l'appel
+    lab = SIM.simulate(plan, [b for b in five if b["t"] >= b5], decided_at=b5, **kw)
     risk = call["entry"] - call["stop"]
-    out = {"declenche": bool(res["triggered"]), "r_net": res["r_net"], "r_ibkr": None, "sortie": res["exit_reason"],
+    seen = {a["t"]: a["cas"] for a in fav.get("ambigus", []) + res.get("ambigus", [])}
+    out = {"methode": SETTLE_METHOD, "pas": step, "activation": act, "declenche": bool(res["triggered"]),
+           "r_net": res["r_net"], "r_ibkr": None, "sortie": res["exit_reason"],
            "tp": [bool(x) for x in (res.get("tp_hits") or [])], "mfe_r": res.get("mfe_r"), "mae_r": res.get("mae_r"),
-           "minutes": minutes is not None, "remplissage": res["fill_price"], "mode_entree": res["entry_mode"],
-           "sorties": [{"prix": e["price"], "part": e["part"], "raison": e["reason"]} for e in res["exits"]],
-           "entree_r": None, "sous_stop_r": None, "donnees_incompletes": _incomplete(call, after, res),
-           "sip": sip_view(call, bars)}
+           "remplissage": res["fill_price"], "mode_entree": res["entry_mode"], "sorties": _exits(res),
+           "sorties_fav": _exits(fav), "sortie_fav": fav["exit_reason"],
+           "ambigus": [{"t": t, "cas": seen[t]} for t in sorted(seen)],
+           "entree_r": None, "sous_stop_r": None, "donnees_incompletes": _incomplete(call, after, res, step),
+           "sip": sip_view(call, five)}
+    if lab["triggered"] and lab["r_net"] is not None:
+        out["r_ibkr"] = round(lab["r_net"] - (SS.ibkr_commission_r(call["entry"], call["stop"]) or 0.0), 4)
     if res["triggered"] and res["r_net"] is not None:
-        out["r_ibkr"] = round(res["r_net"] - (SS.ibkr_commission_r(call["entry"], call["stop"]) or 0.0), 4)
         out["entree_r"] = round((res["fill_price"] - call["entry"]) / risk, 4)
         for e in res["exits"]:
             if e["reason"] in ("stop", "stop_be"):  # stop actif : le stop, ou l'entrée après TP1
@@ -772,42 +813,76 @@ async def eurusd() -> float | None:
         return None
 
 
+def _bars_file(call: dict) -> Path:
+    return Path(BARS_DIR) / f"{call['day']}_{call['symbol']}.json.gz"
+
+
+async def _alpaca_call(fn, *args, **kwargs):
+    return await LSRC.with_retry(fn, *args, limiter=LSRC.ALPACA_LIMIT, **kwargs)
+
+
+async def session_bars(call: dict) -> list[dict]:
+    """Bougies d'1 min SIP non ajustées de toute la séance de l'appel, en une seule requête (≈ 390 bougies), gardées
+    dans BARS_DIR : un changement de méthode re-solde sur les mêmes prix sans rien redemander. Non ajustées : un
+    regroupement d'actions entre l'appel et le bilan ne fausse pas le solde."""
+    path = _bars_file(call)
+    if path.exists():
+        with gzip.open(path, "rt", encoding="utf-8") as f:
+            return json.load(f)
+    bounds = CO.session_ts(date.fromisoformat(call["day"]))
+    if not bounds:
+        return []
+    start, end = (datetime.fromtimestamp(x, timezone.utc) for x in bounds)
+    rows = (await alpaca.bars_range([call["symbol"]], 1, start, end, adjustment="raw", call=_alpaca_call)
+            ).get(call["symbol"]) or []
+    rows = [b for b in rows if bounds[0] <= b["t"] < bounds[1]]
+    if rows:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        with gzip.open(tmp, "wt", encoding="utf-8") as f:
+            json.dump(rows, f)
+        os.replace(tmp, path)
+    return rows
+
+
 async def settle_due(now: datetime | None = None) -> int:
-    """Solde les appels dont la séance est finie, sur les bougies SIP d'Alpaca non ajustées (un regroupement
-    d'actions entre l'appel et le bilan ne fausse pas le solde) ; appelé par `!kill bilan`, jamais planifié.
-    Un appel encore sans bougies UNSETTLED_DAYS jours après sa séance est « insoldable », compté à part."""
+    """Solde les appels dont la séance est finie, et re-solde sur les mêmes bougies ceux d'une méthode précédente
+    (l'ancien solde est gardé dans `soldes_anciens`) ; appelé par `!kill bilan`, jamais planifié. Une erreur sur
+    un appel est notée (`erreur_solde`, affichée au bilan) sans bloquer les autres, et l'appel est retenté au
+    bilan suivant. Un appel encore sans bougies UNSETTLED_DAYS jours après sa séance est « insoldable », compté
+    à part. Renvoie le nombre d'appels soldés ou déclarés insoldables."""
     now = now or datetime.now(timezone.utc)
     book = calls()
     ready = now.timestamp() - SETTLE_DELAY.total_seconds()
-    due = [c for c in book if c["resultat"] is None and not c.get("insoldable") and c["close_ts"] <= ready]
-    rate = await eurusd() if due else None
-    changed = 0
+    due = [c for c in book if not c.get("insoldable") and c["close_ts"] <= ready
+           and (not c.get("resultat") or c["resultat"].get("methode", 1) != SETTLE_METHOD)]
+    rate = await eurusd() if any(not c.get("resultat") for c in due) else None
+    changed = done = 0
     for c in due:
-        bounds = CO.session_ts(date.fromisoformat(c["day"]))
-        start = datetime.fromtimestamp(min(c["at"], bounds[0] if bounds else c["at"]) - BAR, timezone.utc)
-        end = datetime.fromtimestamp(c["close_ts"], timezone.utc)
-        b5 = -(-c["at"] // BAR) * BAR
+        old = c.get("resultat")
         try:
-            rows = (await alpaca.bars_range([c["symbol"]], CO.BASE_TF, start, end, adjustment="raw")
-                    ).get(c["symbol"]) or []
-            minutes = None
-            if rows and b5 > c["at"]:
-                minutes = (await alpaca.bars_range(
-                    [c["symbol"]], 1, datetime.fromtimestamp(c["at"], timezone.utc),
-                    datetime.fromtimestamp(b5 - 60, timezone.utc), adjustment="raw")).get(c["symbol"]) or []
-        except SourceError as exc:
-            log.warning("Killmode : bougies de %s indisponibles pour le bilan : %s", c["symbol"], exc)
+            rows = await session_bars(c)
+            if rows:
+                kept = ({"eurusd": old.get("eurusd"), "plan_ibkr": old.get("plan_ibkr") or IBKR_PLAN} if old
+                        else {"eurusd": rate, "plan_ibkr": IBKR_PLAN})
+                c["resultat"] = settle(c, rows) | kept
+                if old:
+                    c["soldes_anciens"] = (c.get("soldes_anciens") or []) + [old]
+            elif not old and now.timestamp() >= c["close_ts"] + UNSETTLED_DAYS * 86400:
+                c["insoldable"] = True
+            else:
+                continue
+        except (SourceError, OSError, ValueError, KeyError, TypeError) as exc:  # ni les autres appels, ni le bilan
+            log.warning("Killmode : solde de %s du %s impossible : %s", c["symbol"], c["day"], exc)
+            c["erreur_solde"] = f"{type(exc).__name__} : {exc}"[:200]
+            changed += 1
             continue
-        if rows:
-            c["resultat"] = settle(c, rows, minutes) | {"eurusd": rate, "plan_ibkr": IBKR_PLAN}
-        elif now.timestamp() >= c["close_ts"] + UNSETTLED_DAYS * 86400:
-            c["insoldable"] = True
-        else:
-            continue
+        c.pop("erreur_solde", None)
         changed += 1
+        done += 1
     if changed:
         _write(CALLS_PATH, book)
-    return changed
+    return done
 
 
 def shares(risk: float, rate: float | None = None) -> int:
@@ -835,37 +910,72 @@ def _half_tick_slip(price: float) -> float:
     return max(SIM.stock_slippage_bps(price) / 10000 * price, SIM.tick_size("stock", price) / 2)
 
 
-def real_r(call: dict, res: dict | None) -> float | None:
-    """Le chiffre qui décide : R du trade à la taille de Simão (RISK_EUR de risque, change du jour du solde), un
-    bracket IBKR par objectif (une entrée et une sortie chacun, chaque ordre avec son minimum), plan IBKR noté au
-    solde, glissement du labo avec un plancher d'un demi-pas par côté. Recalculé à chaque bilan depuis les
-    sorties gardées. None si l'ordre n'est pas parti ou si le solde n'a pas le détail."""
-    if not res or not res.get("declenche") or not res.get("sorties") or res.get("remplissage") is None:
+def _legs(q: int, n_targets: int, exits: list[dict]) -> list[tuple[int, dict]]:
+    """Chaque bracket en actions entières (`_brackets`) et la sortie du solde qui le ferme : celle qui couvre le
+    milieu du bracket dans les parts du solde (un tiers par objectif). Avec moins d'actions que d'objectifs, un
+    bracket prend l'objectif du milieu de sa part (1 action : TP2 ; 2 actions : TP1 et TP3)."""
+    legs, cum = [], 0.0
+    for e in exits:
+        cum += e["part"]
+        legs.append((cum, e))
+    out, done = [], 0
+    for n in _brackets(q, n_targets):
+        mid = (done + n / 2) / q
+        done += n
+        out.append((n, next((e for c, e in legs if mid <= c + 1e-9), legs[-1][1])))
+    return out
+
+
+def _at_size(call: dict, res: dict | None, exits_key: str = "sorties", stress: bool = False) -> float | None:
+    """R du trade à la taille de Simão : RISK_EUR de risque (change du jour du solde), un bracket IBKR par objectif
+    en actions entières, gain et frais bracket par bracket (une entrée et une sortie chacun, chaque ordre avec son
+    minimum, plan IBKR noté au solde ; ce qui reste à la clôture part en un seul ordre). Glissement du labo avec un plancher d'un demi-pas par côté ; `stress` : 3 c
+    à l'entrée et à chaque sortie au marché (1 % du prix sous 1 $), objectifs au prix de l'ordre. Sur le risque
+    prévu : un mauvais remplissage n'améliore jamais le chiffre. None si l'ordre n'est pas parti ou si le solde
+    n'a pas le détail."""
+    if not res or not res.get("declenche") or not res.get(exits_key) or res.get("remplissage") is None:
         return None
     entry, stop = call["entry"], call["stop"]
     risk = entry - stop
     q = shares(risk, res.get("eurusd"))
     plan = IBKR_PLANS.get(res.get("plan_ibkr") or IBKR_PLAN, IBKR_PLANS["fixe"])
     fill = res["remplissage"]
-    legs, cum = [], 0.0
-    for e in res["sorties"]:
-        cum += e["part"]
-        legs.append((cum, e["prix"]))
-    gain = (sum(e["part"] * (e["prix"] - _half_tick_slip(e["prix"])) for e in res["sorties"])
-            - fill - _half_tick_slip(fill))
-    fees, done = 0.0, 0
-    for n in _brackets(q, len(call["targets"])):
-        mid = (done + n / 2) / q  # le tiers de ce bracket est sorti par la jambe qui le couvre
-        done += n
-        price = next((p for c, p in legs if mid <= c + 1e-9), legs[-1][1])
-        fees += order_commission(n, fill, plan) + order_commission(n, price, plan)
-    return round(gain / risk - fees / (q * risk), 4)
+    s = (STRESS_CENTS if entry >= 1 else entry * STRESS_SUB_DOLLAR) if stress else None
+    legs = _legs(q, len(call["targets"]), res[exits_key])
+    pnl = 0.0
+    for n, e in legs:
+        price = e["prix"]
+        out = (0.0 if e["raison"].startswith("tp") else s) if stress else _half_tick_slip(price)
+        pnl += (n * (price - out - fill - (s if stress else _half_tick_slip(fill))) - order_commission(n, fill, plan)
+                - (0.0 if e["raison"] == "cloture" else order_commission(n, price, plan)))
+    closing = [(n, e["prix"]) for n, e in legs if e["raison"] == "cloture"]
+    if closing:  # TP et SL annulés, le reste vendu en un seul ordre : un seul minimum
+        pnl -= order_commission(sum(n for n, _ in closing), closing[0][1], plan)
+    return round(pnl / (q * risk), 4)
+
+
+def real_r(call: dict, res: dict | None) -> float | None:
+    """Le chiffre qui décide : le R aux frais réels de Simão (`_at_size`), sur le solde joué dans le pire ordre
+    des bougies ambiguës. Recalculé à chaque bilan depuis les sorties gardées."""
+    return _at_size(call, res)
+
+
+def favorable_r(call: dict, res: dict | None) -> float | None:
+    """Le même R sur le solde joué dans le meilleur ordre des bougies ambiguës : une sensibilité, affichée."""
+    return _at_size(call, res, "sorties_fav")
+
+
+def stress_20e(call: dict, res: dict | None) -> float | None:
+    """Le stress de Gemini à la taille de Simão (3 c par côté au lieu du glissement, mêmes brackets et minimums IBKR
+    que r_20e) : la condition « avec 3 c » de la lecture finale. Une hypothèse, pas une mesure."""
+    return _at_size(call, res, stress=True)
 
 
 def stressed_r(call: dict, res: dict | None) -> float | None:
-    """Stress de Gemini, une hypothèse et pas une mesure : 3 cents de plus à l'entrée, 3 cents de moins à chaque
-    sortie au marché (stop, stop à l'entrée, clôture), objectifs au prix de l'ordre, commission IBKR par action ;
-    sous 1 $, 1 % du prix au lieu de 3 cents. Remplace le glissement du labo (il ne s'y ajoute pas)."""
+    """Stress de Gemini à la commission IBKR par action, sans minimum : 3 cents de plus à l'entrée, 3 cents de moins
+    à chaque sortie au marché (stop, stop à l'entrée, clôture), objectifs au prix de l'ordre ; sous 1 $, 1 % du prix
+    au lieu de 3 cents. Remplace le glissement du labo (il ne s'y ajoute pas). Gardé pour le labo (PR #43) ; le
+    journal du direct lit `stress_20e`, à la taille de Simão."""
     if not res or not res.get("declenche") or not res.get("sorties") or res.get("remplissage") is None:
         return None
     entry, stop = call["entry"], call["stop"]
@@ -875,12 +985,13 @@ def stressed_r(call: dict, res: dict | None) -> float | None:
     return round(gain / (entry - stop) - (SS.ibkr_commission_r(entry, stop) or 0.0), 4)
 
 
-KEYS = {"r_20e": real_r, "r_3c": stressed_r}
+KEYS = {"r_20e": real_r, "r_3c": stress_20e, "r_fav": favorable_r}
 
 
 def value(c: dict, key: str = "r_20e") -> float | None:
-    """Résultat d'un appel déclenché en R ; `key` : r_20e (frais réels de Simão, le chiffre qui décide), r_ibkr
-    (frais du labo, pour la comparaison au labo) ou r_3c (stress de Gemini). None sinon."""
+    """Résultat d'un appel déclenché en R ; `key` : r_20e (frais réels de Simão, le chiffre qui décide), r_fav (le
+    même dans le meilleur ordre des bougies ambiguës), r_3c (stress de Gemini à la taille de Simão) ou r_ibkr
+    (rejoué comme le labo, frais du labo, pour la comparaison au labo). None sinon."""
     res = c.get("resultat") or {}
     if c.get("insoldable") or not res.get("declenche"):
         return None
@@ -971,13 +1082,14 @@ def stats(book: list[dict], groupe: str = "kill", key: str = "r_20e") -> dict:
             "tp1": sum(1 for c in trig if c["resultat"]["tp"][:1] == [True])}
 
 
-def call_gap(book: list[dict], scan_only: bool = False) -> dict:
+def call_gap(book: list[dict], scan_only: bool = False, key: str = "r_20e") -> dict:
     """Écart par appel KILL − témoin propre (0 R pour un ordre expiré), chaque action et séance comptée une fois
     selon son premier appel ; `scan_only` : les appels du scan seulement (même source, même retard, actions que
-    Simão n'a pas choisies). Descriptif, il ne décide rien : il faudrait des centaines de séances pour voir 0,3 R ;
-    l'apport du catalyseur se mesure au labo."""
+    Simão n'a pas choisies). Descriptif, il ne décide rien : il faudrait des centaines de séances pour voir 0,3 R.
+    C'est la valeur prédictive du filtre catalyseur à règle de prix égale, pas l'effet causal d'une actu ; elle se
+    mesure au labo."""
     first = [c for c in first_calls(book) if not scan_only or (c.get("source") or "").startswith("alpaca")]
-    k, w = stats(first, "kill"), stats(first, "temoin_propre")
+    k, w = stats(first, "kill", key), stats(first, "temoin_propre", key)
     if k["par_appel_r"] is None or w["par_appel_r"] is None:
         return {"m": None, "ci": None, "n": (k["soldes"], w["soldes"])}
     m = k["par_appel_r"] - w["par_appel_r"]
@@ -1090,6 +1202,7 @@ def reading(book: list[dict], lab: dict | None) -> list[str]:
         if ci[1] < 0:
             out.append(f"📉 **Lecture finale : espérance négative même en haut de l'intervalle** ({span}) : "
                        "JARVIS recommande d'éteindre Killmode ; à toi de décider.")
+            out += [x for x in (_fav_note(final),) if x]
         elif ci[0] > 0:
             weeks, stress = s100["ic95_semaines"], stats(final, "kill", "r_3c")["ic95"]
             if weeks and weeks[0] > 0 and stress and stress[0] > 0:
@@ -1117,6 +1230,7 @@ def reading(book: list[dict], lab: dict | None) -> list[str]:
             out.append(f"📉 **Espérance négative même en haut de l'intervalle** ({span}) : JARVIS recommande "
                        f"d'éteindre Killmode ; à toi de décider. Lecture finale à {READ_MAX} KILL "
                        f"({n} pour l'instant).")
+            out += [x for x in (_fav_note(first),) if x]
         else:
             out.append(f"Lu au {READ_AT}e KILL ({span}) : pas d'alerte. C'est un audit, pas une validation : lecture "
                        f"finale à {READ_MAX} KILL ({n} pour l'instant).")
@@ -1125,9 +1239,15 @@ def reading(book: list[dict], lab: dict | None) -> list[str]:
                    f"l'instant), l'intervalle affiché d'ici là est indicatif ; lecture finale à {READ_MAX}.")
     h = harm(book)
     if h:
+        inc = sum(1 for c in in_group(book, "kill")
+                  if value(c) is not None and c["resultat"].get("donnees_incompletes"))
         out.append(f"🛑 **Borne de dégât franchie** : {SS._r(h['m'])} R par trade sur {h['n']} KILL, IC 99,9 % "
-                   f"[{SS._r(h['ci'][0])} ; {SS._r(h['ci'][1])}] entièrement sous 0 : JARVIS recommande d'éteindre "
-                   "Killmode ; à toi de décider.")
+                   f"[{SS._r(h['ci'][0])} ; {SS._r(h['ci'][1])}] entièrement sous 0"
+                   + (f" ({inc} soldé{'s' if inc > 1 else ''} sur des données incomplètes, à vérifier)" if inc else "")
+                   + " : JARVIS recommande d'éteindre Killmode ; à toi de décider.")
+        if stats(book, "kill", "r_fav")["declenches"] and harm(book, "r_fav") is None:
+            out.append("-# Joué dans le meilleur ordre des minutes ambiguës, la borne de dégât ne serait pas "
+                       "franchie : l'alerte dépend de l'ordre des prix dans la minute ; la règle garde le pire.")
     lot = final if look is s100 else first  # le lot lu, aux frais du labo pour la comparaison au labo
     gap = _lab_gap(stats(lot, "kill", "r_ibkr"), lab) if look else None
     if gap:
@@ -1135,13 +1255,47 @@ def reading(book: list[dict], lab: dict | None) -> list[str]:
     return out
 
 
+def _fav_note(rows: list[dict]) -> str | None:
+    """Une alerte (borne haute de l'IC sous 0) qui ne tient plus si les minutes ambiguës sont jouées dans le
+    meilleur ordre : dite sous l'alerte, sans rien changer à la règle (le pire ordre décide, demande de GPT)."""
+    st = stats(rows, "kill", "r_fav")
+    ci = st["ic95"]
+    if not st["declenches"] or not ci or ci[1] < 0:
+        return None
+    return (f"-# Joué dans le meilleur ordre des minutes ambiguës : {SS._r(st['esperance_r'])} R par trade "
+            f"[{SS._r(ci[0])} ; {SS._r(ci[1])}], borne haute au-dessus de 0. L'alerte dépend de l'ordre des prix dans "
+            "la minute ; la règle garde le pire ordre.")
+
+
+def ambiguous_line(rows: list[dict]) -> str | None:
+    """Ce que pèse l'ordre inconnu des prix dans une minute : KILL dont le pire et le meilleur ordre diffèrent, et
+    l'espérance dans les deux (le pire décide)."""
+    trig = [c for c in rows if value(c) is not None and value(c, "r_fav") is not None]
+    if not trig:
+        return None
+    moved = [c for c in trig if abs(value(c, "r_fav") - value(c)) > 1e-9]
+    worst, best = (sum(value(c, k) for c in trig) / len(trig) for k in ("r_20e", "r_fav"))
+    return (f"-# Minutes ambiguës (ordre des prix inconnu) : {len(moved)}/{len(trig)} KILL changent selon l'ordre ; "
+            f"{SS._r(worst)} R par trade dans le pire ordre (celui qui compte), {SS._r(best)} R dans le meilleur.")
+
+
+def errors_line(rows: list[dict]) -> str | None:
+    """Appels que le bilan n'a pas pu solder : jamais en silence, retentés au bilan suivant."""
+    bad = [c for c in rows if c.get("erreur_solde") and not c.get("resultat")]
+    if not bad:
+        return None
+    return (f"⚠️ {_n(len(bad), 'appel')} pas encore soldé{'s' if len(bad) > 1 else ''} ("
+            + " · ".join(f"{c['symbol']} du {c['day']} : {c['erreur_solde']}" for c in bad[:3])
+            + ") : retenté au prochain `!kill bilan`. Tant qu'un KILL attend, la lecture du lot ne se fait pas.")
+
+
 def stress_line(book: list[dict]) -> str | None:
     """Le stress de Gemini (3 c par côté) en un chiffre : une hypothèse, pas une mesure, qui ne décide rien seul."""
     st = stats(book, "kill", "r_3c")
     if not st["declenches"]:
         return None
-    return (f"-# Avec 3 c de glissement par côté (hypothèse de Gemini, non mesurée) : {SS._r(st['esperance_r'])} R "
-            f"par trade sur {_n(st['declenches'], 'KILL')}.")
+    return (f"-# Avec 3 c de glissement par côté (hypothèse de Gemini, non mesurée), mêmes brackets et minimums IBKR : "
+            f"{SS._r(st['esperance_r'])} R par trade sur {_n(st['declenches'], 'KILL')}.")
 
 
 def _lab_gap(st: dict, lab: dict | None) -> str | None:
@@ -1183,17 +1337,25 @@ def _paris(ts: int, now: datetime) -> str:
 
 
 def stop_cost(entry: float, stop: float) -> dict:
-    """Frais d'un trade stoppé, en R : à la taille de Simão (RISK_EUR, 3 brackets, une entrée et un stop
-    chacun, minimum par ordre, glissement d'au moins un demi-pas), au labo, et au stress de 3 c de Gemini."""
+    """Frais d'un trade stoppé, en R : à la taille de Simão (RISK_EUR, un bracket par objectif, une entrée et un
+    stop chacun, minimum par ordre, glissement d'au moins un demi-pas), au labo, et au stress de 3 c de Gemini
+    (mêmes brackets et minimums)."""
     risk = entry - stop
     q = shares(risk)
     plan = IBKR_PLANS.get(IBKR_PLAN, IBKR_PLANS["fixe"])
-    fees = sum(order_commission(n, entry, plan) + order_commission(n, stop, plan)
-               for n in _brackets(q, len(ST.TARGETS_R)))
+    parts = _brackets(q, len(ST.TARGETS_R))
+    fees = sum(order_commission(n, entry, plan) + order_commission(n, stop, plan) for n in parts) / (q * risk)
     s3 = STRESS_CENTS if entry >= 1 else entry * STRESS_SUB_DOLLAR
-    return {"actions": q, "reel": (_half_tick_slip(entry) + _half_tick_slip(stop)) / risk + fees / (q * risk),
-            "labo": SS.expected_cost_r("stock", entry, stop, None) or 0.0,
-            "stress": 2 * s3 / risk + (SS.ibkr_commission_r(entry, stop) or 0.0)}
+    return {"actions": q, "brackets": parts, "reel": (_half_tick_slip(entry) + _half_tick_slip(stop)) / risk + fees,
+            "labo": SS.expected_cost_r("stock", entry, stop, None) or 0.0, "stress": 2 * s3 / risk + fees}
+
+
+def bracket_orders(entry: float, stop: float, targets: list[float]) -> list[tuple[int, float]]:
+    """Ce que Simão saisit chez IBKR : les actions de chaque bracket et son objectif, comme le journal les solde
+    (`_legs` : avec moins d'actions que d'objectifs, l'objectif du milieu de la part du bracket)."""
+    q = shares(entry - stop)
+    thirds = [{"prix": p, "part": 1 / len(targets), "raison": f"tp{i}"} for i, p in enumerate(targets, start=1)]
+    return [(n, e["prix"]) for n, e in _legs(q, len(targets), thirds)]
 
 
 def text(a: dict, lab: str | None = None) -> str:
@@ -1216,9 +1378,18 @@ def text(a: dict, lab: str | None = None) -> str:
                      f" - {_fr(plan['range_high'])}), valable jusqu'à {_paris(plan['until'], now)} · **stop "
                      f"{_fr(plan['stop'])}** ({_pct((plan['stop'] / plan['entry'] - 1) * 100)})")
         lines.append(f"{tps} · un tiers par objectif, stop à l'entrée après TP1, le reste vendu à la clôture")
+        orders = bracket_orders(plan["entry"], plan["stop"], plan["targets"])
+        q = sum(n for n, _ in orders)
+        legs = " · ".join(f"{_n(n, 'action')} → TP{plan['targets'].index(p) + 1} {_fr(p)}" for n, p in orders)
+        lines.append(f"📋 Chez IBKR, à {RISK_EUR:g} € de risque : **{_n(q, 'action')} en {_n(len(orders), 'bracket')}** "
+                     f"(stop d'achat {_fr(plan['entry'])}, SL {_fr(plan['stop'])} et TP liés, ordres du jour) : "
+                     f"**{legs}**. Dès que TP1 ({_fr(plan['targets'][0])}) est touché, remonte les SL restants à "
+                     f"l'entrée ; ce qui reste, vends-le en un ordre avant la clôture ({_paris(plan['close_ts'], now)}, "
+                     f"{datetime.fromtimestamp(plan['close_ts'], NEW_YORK).hour} h New York). "
+                     "C'est la gestion que le journal mesure.")
         cost = stop_cost(plan["entry"], plan["stop"])
         lines.append(f"-# Un trade stoppé coûte ≈ {_fr(cost['reel'])} R de frais à {RISK_EUR:g} € de risque "
-                     f"({cost['actions']} actions, 3 brackets IBKR {IBKR_PLAN}, minimum par ordre compris) ; labo "
+                     f"({_n(len(cost['brackets']), 'bracket')} IBKR {IBKR_PLAN}, minimum par ordre compris) ; labo "
                      f"≈ {_fr(cost['labo'])} R ; avec 3 c de glissement par côté (hypothèse de Gemini, non "
                      f"mesurée) ≈ {_fr(cost['stress'])} R.")
         if plan.get("declenche_a") and a["price"] is not None and a["price"] >= plan["entry"]:
@@ -1227,8 +1398,9 @@ def text(a: dict, lab: str | None = None) -> str:
         elif plan.get("declenche_a"):
             lines.append(f"-# Entrée touchée à {_paris(plan['declenche_a'], now)} puis reperdue : l'ordre stop attend "
                          "un nouveau passage à l'entrée.")
-        lines.append(f"-# Pour que JARVIS suive le trade et que le journal compare ton exécution : `!prends "
-                     f"{a['symbol']} <ton prix d'exécution> stop {plan['stop']:.2f} kill`.")
+        tp = " ".join(f"{p:.2f}" for p in plan["targets"])
+        lines.append(f"-# Pour que JARVIS suive le trade avec cette gestion et que le journal compare ton exécution : "
+                     f"`!prends {a['symbol']} <ton prix d'exécution> stop {plan['stop']:.2f} kill tp {tp}`.")
     elif a["verdict"] == "pret":
         opening = chart.get("ouverture_range")
         if opening:
@@ -1342,8 +1514,10 @@ def balance(label: str, rows: list[dict]) -> str:
              lambda x: _fr(x, 1) + " %"),
             ("prix", _median([c["entry"] for c in rows]), lambda x: _fr(x) + " $"),
             ("vol15 SIP", _median(sip), lambda x: _fr(x)), ]
+    trig = [c for c in rows if value(c) is not None]
+    amb = sum(1 for c in trig if (c["resultat"].get("ambigus") or []))
     return (f"{label} ({len(rows)}) : " + ", ".join(f"{k} {f(v)}" for k, v, f in vals if v is not None)
-            + f", scan {scan}/{len(rows)}")
+            + f", scan {scan}/{len(rows)}" + (f", minute ambiguë {amb}/{len(trig)}" if trig else ""))
 
 
 def risk_line(rows: list[dict]) -> str | None:
@@ -1410,8 +1584,12 @@ def _call_gap_line(cur: list[dict]) -> str | None:
             lines.append(f"{label} {SS._r(g['m'])} R{ci} ({g['n'][0]} KILL, {_n(g['n'][1], 'témoin')})")
     if not lines:
         return None
+    fav = call_gap(cur, False, "r_fav")
+    if fav["m"] is not None:  # GPT : l'écart apparié dans les deux ordres des minutes ambiguës
+        lines.append(f"meilleur ordre des minutes ambiguës {SS._r(fav['m'])} R toutes sources")
     return ("-# Écart par appel KILL − témoin propre : " + " · ".join(lines) + ". Descriptif, il ne décide rien : "
-            "même à 100 KILL seul un écart de plus de ~0,5 R se verrait.")
+            "même à 100 KILL seul un écart de plus de ~0,5 R se verrait. C'est la valeur prédictive du filtre "
+            "catalyseur, pas l'effet causal d'une actu.")
 
 
 def bilan_text(book: list[dict], trades: list[dict] | None = None) -> str:
@@ -1440,10 +1618,12 @@ def bilan_text(book: list[dict], trades: list[dict] | None = None) -> str:
             lines.append(_group_line(label, st))
             shown = True
     if shown:
-        lines.append(f"-# Aux frais réels : {RISK_EUR:g} € de risque, un bracket IBKR par objectif (minimum par ordre, "
-                     "plan " + IBKR_PLAN + "), glissement du labo d'au moins un demi-pas. IC 95 % en t, indicatif "
-                     f"avant {READ_AT} KILL.")
-    for line in (_call_gap_line(cur), stress_line(cur), risk_line(kills), sip_line(kills), fills_line(kills, trades)):
+        lines.append(f"-# Aux frais réels : {RISK_EUR:g} € de risque, un bracket IBKR par objectif en actions entières "
+                     "(minimum par ordre, plan " + IBKR_PLAN + "), glissement du labo d'au moins un demi-pas ; soldé en "
+                     "bougies d'1 min, ordre actif une minute pleine après l'appel, minute ambiguë dans le pire ordre. "
+                     f"IC 95 % en t, indicatif avant {READ_AT} KILL.")
+    for line in (errors_line(cur), _call_gap_line(cur), stress_line(cur), ambiguous_line(kills), risk_line(kills),
+                 sip_line(kills), fills_line(kills, trades)):
         if line:
             lines.append(line)
     if kills and clean_:
@@ -1481,8 +1661,9 @@ HELP = """**JARVIS Killmode** (désactivé par défaut, toi seul l'allumes ; auc
 `!kill bilan`              KILL et témoins catalyseur soldés après la clôture aux frais réels (20 €), la stratégie
                            `killmode` du labo et la règle de lecture (audit au 30e KILL, lecture finale au 100e) ;
                            marche aussi Killmode éteint
-`!prends NVDA 132.6 stop 128 kill`   suivre un KILL pris (ton prix d'exécution) : hors de `!desaccords`,
-                           comparé au journal
+`!prends NVDA 132.6 kill`  suivre un KILL pris (ton prix d'exécution ; stop et objectifs du KILL du jour si tu
+                           ne les donnes pas) avec sa gestion (SL à l'entrée dès TP1, vendu avant la clôture) :
+                           hors de `!desaccords`, comparé au journal
 `!kill etat`               allumé ou éteint"""
 
 

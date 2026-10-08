@@ -215,3 +215,23 @@ async def test_message_avant_la_cloture_garde_les_conseils(monkeypatch):
     await scheduler.tick_closing(NOW)  # une seule fois par séance
     assert len(sent) == 1 and "Avant la clôture US" in sent[0] and "GARDER" in sent[0]
     assert book.trades[0]["conseils"][0]["decision"] == "GARDER"
+
+
+async def test_un_kill_pris_se_vend_a_la_cloture(monkeypatch):
+    """Un KILL pris ne reçoit pas de conseil garder / alléger : sa règle le vend avant la clôture."""
+    from app import scheduler
+
+    book = S.Book(None)
+    book.trades.append(trade(100.0, market="stock", symbol="ACME", killmode=True))
+    monkeypatch.setattr(scheduler, "book", book)
+    monkeypatch.setattr(scheduler.state, "data", {})
+    monkeypatch.setattr(scheduler.state, "save", lambda: None)
+    sent = []
+    monkeypatch.setattr(scheduler, "_queue", lambda text, kind, **kw: sent.append(text))
+
+    async def fake(trades, now):
+        raise AssertionError("pas de conseil sur un KILL")
+
+    monkeypatch.setattr(A, "advise_book", fake)
+    await scheduler.tick_closing(NOW)
+    assert len(sent) == 1 and "vends le reste de ACME avant la clôture (16 h New York)" in sent[0]

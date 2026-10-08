@@ -297,6 +297,10 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
                     f"`!prends {a['symbol']} {req['entry']:g}{' short' if req['side'] == 'short' else ''}` pour que JARVIS la suive.")
         if cmd == "prends":
             req = parse_trade(args)
+            kill = killmode.kill_today(req["symbol"]) if req.get("killmode") else None
+            if kill:  # stop et objectifs du KILL du jour quand ils manquent : la gestion que son journal mesure
+                req["stop"] = req["stop"] if req["stop"] is not None else kill["stop"]
+                req["targets"] = req["targets"] or kill["targets"]
             plan = await trading.build_plan(req["symbol"], req["market"], req["side"], req["entry"], req["stop"],
                                             req["targets"])
             if req.get("killmode"):
