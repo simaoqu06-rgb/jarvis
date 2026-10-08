@@ -175,7 +175,7 @@ async def test_analyse_setup_complet(paths, monkeypatch):
     assert "!prends ACME <ton prix d'exécution> stop 104.49 kill tp 108.53 110.55 112.57" in txt
     assert "**11 actions en 3 brackets**" in txt and "**4 actions → TP1 108,53 · 4 actions → TP2 110,55 · " \
         "3 actions → TP3 112,57**" in txt and "remonte les SL restants à l'entrée" in txt
-    assert "vends-le avant la clôture (aujourd'hui 22:00, 16 h New York)" in txt
+    assert "vends-le en un ordre avant la clôture (aujourd'hui 22:00, 16 h New York)" in txt
     assert K.record(a, NOW) and K.record(a, NOW) is None  # une fois par séance
 
 
@@ -715,7 +715,8 @@ def test_frais_reels_a_20_euros():
     assert K.real_r(c, stopped) == pytest.approx(-1 - 0.0114 - fees / 23, abs=1e-4)
     cheap = {"entry": 2.0, "stop": 1.9, "targets": [2.1, 2.2, 2.3]}  # 15 pb de 2 $ = 0,3 c < demi-pas 0,5 c
     flat = {"declenche": True, "remplissage": 2.0, "sorties": [{"prix": 2.0, "part": 1.0, "raison": "cloture"}]}
-    assert K.real_r(cheap, flat) == pytest.approx(-0.1 - 6 / 23, abs=1e-3)  # 2 demi-pas + 6 minimums de 1 $
+    # 2 demi-pas, 3 entrées au minimum de 1 $ et le reste vendu à la clôture en un seul ordre (230 × 0,005 $)
+    assert K.real_r(cheap, flat) == pytest.approx(-0.1 - (3 + 1.15) / 23, abs=1e-3)
     assert K.stressed_r(c, stopped) == pytest.approx(-1 - 0.06 - 0.01, abs=1e-4)  # le labo (PR #43), inchangé
     # r_3c du journal : 3 c par côté avec les mêmes brackets et minimums que r_20e (la lecture finale le demande).
     assert K.stress_20e(c, stopped) == pytest.approx(-1 - 0.06 - fees / 23, abs=1e-4)

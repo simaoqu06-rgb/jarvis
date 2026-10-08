@@ -929,7 +929,7 @@ def _legs(q: int, n_targets: int, exits: list[dict]) -> list[tuple[int, dict]]:
 def _at_size(call: dict, res: dict | None, exits_key: str = "sorties", stress: bool = False) -> float | None:
     """R du trade à la taille de Simão : RISK_EUR de risque (change du jour du solde), un bracket IBKR par objectif
     en actions entières, gain et frais bracket par bracket (une entrée et une sortie chacun, chaque ordre avec son
-    minimum, plan IBKR noté au solde). Glissement du labo avec un plancher d'un demi-pas par côté ; `stress` : 3 c
+    minimum, plan IBKR noté au solde ; ce qui reste à la clôture part en un seul ordre). Glissement du labo avec un plancher d'un demi-pas par côté ; `stress` : 3 c
     à l'entrée et à chaque sortie au marché (1 % du prix sous 1 $), objectifs au prix de l'ordre. Sur le risque
     prévu : un mauvais remplissage n'améliore jamais le chiffre. None si l'ordre n'est pas parti ou si le solde
     n'a pas le détail."""
@@ -941,12 +941,16 @@ def _at_size(call: dict, res: dict | None, exits_key: str = "sorties", stress: b
     plan = IBKR_PLANS.get(res.get("plan_ibkr") or IBKR_PLAN, IBKR_PLANS["fixe"])
     fill = res["remplissage"]
     s = (STRESS_CENTS if entry >= 1 else entry * STRESS_SUB_DOLLAR) if stress else None
+    legs = _legs(q, len(call["targets"]), res[exits_key])
     pnl = 0.0
-    for n, e in _legs(q, len(call["targets"]), res[exits_key]):
+    for n, e in legs:
         price = e["prix"]
         out = (0.0 if e["raison"].startswith("tp") else s) if stress else _half_tick_slip(price)
-        pnl += (n * (price - out - fill - (s if stress else _half_tick_slip(fill)))
-                - order_commission(n, fill, plan) - order_commission(n, price, plan))
+        pnl += (n * (price - out - fill - (s if stress else _half_tick_slip(fill))) - order_commission(n, fill, plan)
+                - (0.0 if e["raison"] == "cloture" else order_commission(n, price, plan)))
+    closing = [(n, e["prix"]) for n, e in legs if e["raison"] == "cloture"]
+    if closing:  # TP et SL annulés, le reste vendu en un seul ordre : un seul minimum
+        pnl -= order_commission(sum(n for n, _ in closing), closing[0][1], plan)
     return round(pnl / (q * risk), 4)
 
 
@@ -1380,7 +1384,7 @@ def text(a: dict, lab: str | None = None) -> str:
         lines.append(f"📋 Chez IBKR, à {RISK_EUR:g} € de risque : **{_n(q, 'action')} en {_n(len(orders), 'bracket')}** "
                      f"(stop d'achat {_fr(plan['entry'])}, SL {_fr(plan['stop'])} et TP liés, ordres du jour) : "
                      f"**{legs}**. Dès que TP1 ({_fr(plan['targets'][0])}) est touché, remonte les SL restants à "
-                     f"l'entrée ; ce qui reste, vends-le avant la clôture ({_paris(plan['close_ts'], now)}, "
+                     f"l'entrée ; ce qui reste, vends-le en un ordre avant la clôture ({_paris(plan['close_ts'], now)}, "
                      f"{datetime.fromtimestamp(plan['close_ts'], NEW_YORK).hour} h New York). "
                      "C'est la gestion que le journal mesure.")
         cost = stop_cost(plan["entry"], plan["stop"])

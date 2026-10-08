@@ -362,7 +362,8 @@ réalité, d'où le journal des appels en direct pour juger le mode complet.
     son plus haut vient après) ; un objectif posé s'exécute à son prix, et au prix d'entrée s'il est déjà
     dépassé quand le bracket est posé. Le meilleur ordre est affiché (`r_fav`), avec la part des KILL qui
     changent selon l'ordre ; une alerte qui ne tient plus dans le meilleur ordre le dit, sans changer la règle ;
-  - le R aux frais réels compte le gain bracket par bracket en actions entières, comme les frais ;
+  - le R aux frais réels compte le gain bracket par bracket en actions entières, comme les frais ; ce qui reste à
+    la clôture est vendu en un seul ordre (TP et SL annulés d'abord), donc un seul minimum ;
   - « avec 3 c de glissement par côté » se calcule à la taille de Simão (mêmes brackets et minimums IBKR) ;
   - l'écart au labo (`r_ibkr`) rejoue l'appel comme le labo : bougies de 5 min dès la suivante, résolution du
     labo (`simulator.simulate`, `resolution="v1"`, inchangée) ;
