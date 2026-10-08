@@ -165,15 +165,28 @@ async def tick_closing(now: datetime | None = None) -> None:
     ouverte. Une fois par séance ; les conseils sont gardés sur les trades pour être mesurés.
     Calculé hors du verrou global (bougies, catalyseur), qui n'est pris que pour écrire."""
     now = now or datetime.now(timezone.utc)
-    trades = [t for t in book.open_trades() if t["market"] == "stock"]
-    if not trades or not advice.closing_due(now, state.data.get("closing_advice_date")):
+    stocks = [t for t in book.open_trades() if t["market"] == "stock"]
+    # Un KILL pris se vend à la clôture (la règle que mesure son journal) : pas de conseil garder / alléger.
+    kills = [t for t in stocks if t.get("killmode")]
+    trades = [t for t in stocks if not t.get("killmode")]
+    if not stocks or not advice.closing_due(now, state.data.get("closing_advice_date")):
         return
     today = now.astimezone(NEW_YORK).date().isoformat()
     async with _lock:
         state.data["closing_advice_date"] = today  # une seule tentative : un échec ne doit pas répéter le message
         state.save()
-    advices = await advice.advise_book(trades, now)
     _, close = CAL.session_bounds(now.astimezone(NEW_YORK).date())
+    if kills:
+        text = ("🔪 **Killmode** : vends le reste de " + ", ".join(sorted({t["symbol"] for t in kills}))
+                + f" avant la clôture ({close.astimezone(NEW_YORK).hour} h New York), après avoir annulé ses TP et SL : "
+                "un KILL ne passe pas la nuit, c'est la règle que mesure son journal.")
+        async with _lock:
+            _queue(text, "clôture des KILL", expires_at=close)
+            _dm_trades(text)
+            _kick_outbox()
+    if not trades:
+        return
+    advices = await advice.advise_book(trades, now)
     async with _lock:
         by_id = {t["id"]: t for t in book.trades}
         for a in advices:

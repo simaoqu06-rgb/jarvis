@@ -41,6 +41,9 @@ OKX_TAKER_FEE = 0.0010
 EXIT_REASONS = ("stop", "stop_be", "stop_suiveur", "tp1", "tp2", "tp3", "cloture", "horizon", "non_declenche")
 ENTRY_ORDERS = ("limit", "stop", "market")
 EXIT_MODES = ("v1", "sans_be", "suiveur")
+# Ordre dans une bougie ambiguë : « v1 » (le labo, inchangé), « prudente » (le pire ordre possible partout),
+# « favorable » (le meilleur, bougie par bougie : une sensibilité, pas un maximum). Journal de Killmode, 8 octobre.
+RESOLUTIONS = ("v1", "prudente", "favorable")
 
 
 def stock_slippage_bps(price: float) -> float:
@@ -80,7 +83,8 @@ def _minutes(market: str, start: int, end: int) -> float:
 
 def simulate(plan: dict, bars: list[dict], *, market: str, decided_at: int, entry_until: int, exit_at: int,
              last_price: float, cost: dict, exit_reason_end: str | None = None, entry_order: str = "limit",
-             exit_mode: str = "v1", trail_r: float = 1.0) -> dict:
+             exit_mode: str = "v1", trail_r: float = 1.0, bar_seconds: int = BAR_SECONDS,
+             resolution: str = "v1") -> dict:
     """Rejoue le plan sur `bars` (5 min, toutes commencées à `decided_at` ou après).
 
     `entry_until` : fin de la fenêtre d'entrée ; `exit_at` : tout est soldé à la clôture de la
@@ -93,9 +97,19 @@ def simulate(plan: dict, bars: list[dict], *, market: str, decided_at: int, entr
     - `exit_mode` : « v1 » (tiers aux TP, stop à l'entrée après le TP1) ; « sans_be » (même chose sans
       remonter le stop) ; « suiveur » (aucun objectif : le stop suit le plus haut atteint à `trail_r`
       fois le risque, recalculé à la clôture de chaque bougie, solde à la clôture ou à l'horizon).
+
+    Journal de Killmode (8 octobre, avis de GPT et Gemini), les valeurs par défaut gardent le labo tel quel :
+    - `bar_seconds` : durée des bougies (60 pour un solde en bougies d'1 min) ;
+    - `resolution` : « v1 » ; « prudente » = le pire ordre dans chaque bougie ambiguë : stop avant objectif,
+      plus bas de la bougie d'entrée après l'exécution, un seul objectif avant un retour à l'entrée, et un
+      objectif rempli à son prix (en séance continue, un ordre limité posé s'exécute à son prix), ou au prix
+      d'entrée s'il est posé alors que le prix l'a déjà dépassé (entrée remplie à l'ouverture au-delà) ;
+      avec l'ordre stop d'achat, un objectif traversé dans la bougie d'entrée est certain (elle ouvre sous
+      l'entrée, son plus haut vient après l'exécution) et compte. « favorable » = le meilleur ordre, bougie par
+      bougie. Les deux donnent `ambigus` : les bougies où l'ordre a été choisi, avec leur cas.
     """
-    if entry_order not in ENTRY_ORDERS or exit_mode not in EXIT_MODES:
-        raise ValueError(f"ordre {entry_order} ou sortie {exit_mode} inconnus")
+    if entry_order not in ENTRY_ORDERS or exit_mode not in EXIT_MODES or resolution not in RESOLUTIONS:
+        raise ValueError(f"ordre {entry_order}, sortie {exit_mode} ou résolution {resolution} inconnus")
     if any(b["t"] < decided_at for b in bars):
         raise ValueError("bougie antérieure à la décision : le simulateur ne voit que la suite")
     side = plan["side"]
@@ -107,7 +121,7 @@ def simulate(plan: dict, bars: list[dict], *, market: str, decided_at: int, entr
     risk = abs(entry - stop) or abs(plan["entry"] - plan["stop"])
     tick = tick_size(market, entry)
     end_reason = exit_reason_end or ("cloture" if market == "stock" else "horizon")
-    window = [b for b in bars if b["t"] + BAR_SECONDS <= exit_at]
+    window = [b for b in bars if b["t"] + bar_seconds <= exit_at]
     result = {"triggered": False, "filled_at": None, "fill_price": None, "entry_mode": None,
               "exit_reason": "non_declenche", "exits": [], "r_gross": None, "r_net": None,
               "tp_hits": [False] * len(targets), "minutes_to_tp": [None] * len(targets),
@@ -115,7 +129,9 @@ def simulate(plan: dict, bars: list[dict], *, market: str, decided_at: int, entr
               "slippage_bps": round(cost["slippage"] * 10000, 2), "fees": {"maker": cost["maker"], "taker": cost["taker"]},
               "entry_liquidity": None,
               "order_prices": {"entry": entry, "stop": stop, "targets": targets},
-              "data_incomplete": not window or window[-1]["t"] + BAR_SECONDS < exit_at}
+              "data_incomplete": not window or window[-1]["t"] + bar_seconds < exit_at}
+    if resolution != "v1":
+        result["ambigus"] = []
     if not window:
         return result
 
@@ -176,11 +192,24 @@ def simulate(plan: dict, bars: list[dict], *, market: str, decided_at: int, entr
                       "fee": cost["maker"] if maker else cost["taker"]})
         remaining -= share
 
+    v1, favorable = resolution == "v1", resolution == "favorable"
+    # Ordre stop d'achat exécuté en cours de bougie (elle ouvre avant l'entrée) : son extrême favorable vient
+    # après l'exécution, son extrême défavorable a pu venir avant.
+    stop_fill = entry_order == "stop" and mode == "stop"
+
+    def adverse(b: dict, level: float) -> bool:
+        return b["l"] <= level if sign == 1 else b["h"] >= level
+
+    def note(b: dict, case: str) -> None:
+        if not v1 and not any(a["t"] == b["t"] for a in result["ambigus"]):
+            result["ambigus"].append({"t": b["t"], "cas": case})
+
     last = window[fill_i]
     for i in range(fill_i, len(window)):
         b = window[i]
         last = b
         at_open = i > fill_i or mode == "ouverture"
+        targets_ok = at_open or (not v1 and stop_fill)  # objectifs comptés dans cette bougie
         stop_label = ("stop_be" if hit and exit_mode == "v1"
                       else "stop_suiveur" if (stop_now - stop) * sign > 0 else "stop")
         # Stop d'abord : gap à l'ouverture, puis contact dans la bougie.
@@ -189,15 +218,30 @@ def simulate(plan: dict, bars: list[dict], *, market: str, decided_at: int, entr
             leave(b["o"], b["t"], stop_label, remaining)
             reason = stop_label
             break
-        touched = b["l"] <= stop_now if sign == 1 else b["h"] >= stop_now
-        if touched:
-            price = stop_now if i > fill_i or (fill_price - stop_now) * sign > 0 else fill_price
-            excursion(price)  # au-delà du stop, la position est déjà soldée
-            leave(price, b["t"], stop_label, remaining)
-            reason = stop_label
-            break
-        excursion(b["l"] if sign == 1 else b["h"])
-        if not at_open:
+        crosses = targets_ok and hit < len(targets) and (
+            (b["h"] >= targets[hit] + tick) if sign == 1 else (b["l"] <= targets[hit] - tick))
+        adverse_before = targets_first = False  # ordre choisi par « favorable » dans une bougie ambiguë
+        if adverse(b, stop_now):
+            case = None
+            if i == fill_i and stop_fill and (b["c"] - stop_now) * sign > 0:
+                case = "entree_et_stop"  # le plus bas a pu précéder l'exécution
+            elif crosses:
+                case = "stop_et_objectif"
+            if case:
+                note(b, case)
+            if favorable and case == "entree_et_stop":
+                adverse_before = True
+            elif favorable and case == "stop_et_objectif":
+                targets_first = True
+            else:
+                price = stop_now if i > fill_i or (fill_price - stop_now) * sign > 0 else fill_price
+                excursion(price)  # au-delà du stop, la position est déjà soldée
+                leave(price, b["t"], stop_label, remaining)
+                reason = stop_label
+                break
+        if not adverse_before:
+            excursion(b["l"] if sign == 1 else b["h"])
+        if not targets_ok:
             continue  # entrée en cours de bougie : on ignore son plus haut
         excursion(b["h"] if sign == 1 else b["l"])
         hit_now = False
@@ -205,19 +249,27 @@ def simulate(plan: dict, bars: list[dict], *, market: str, decided_at: int, entr
             tp = targets[hit]
             if not ((b["h"] >= tp + tick) if sign == 1 else (b["l"] <= tp - tick)):
                 break
-            price = b["o"] if (b["o"] - tp) * sign >= tick and i > fill_i else tp
+            if v1:
+                price = b["o"] if (b["o"] - tp) * sign >= tick and i > fill_i else tp
+            else:  # posé, il s'exécute à son prix ; posé alors que le prix l'a dépassé, il part au prix d'entrée
+                price = fill_price if i == fill_i and (fill_price - tp) * sign >= 0 else tp
             hit += 1
             hit_now = True
             result["tp_hits"][hit - 1] = True
-            result["minutes_to_tp"][hit - 1] = _minutes(market, decided_at, b["t"] + BAR_SECONDS // 2)
+            result["minutes_to_tp"][hit - 1] = _minutes(market, decided_at, b["t"] + bar_seconds // 2)
             leave(price, b["t"], f"tp{hit}", part if hit < len(targets) else remaining)
             if exit_mode == "v1":
                 stop_now = entry  # break-even dès le TP1 (choix de Simão)
+                if resolution == "prudente" and hit < len(targets) and adverse(b, stop_now):
+                    break  # retour à l'entrée dans la même bougie : au pire, un seul objectif avant
         if targets and hit == len(targets):
             reason = f"tp{hit}"
             break
-        if hit_now and exit_mode == "v1" and ((b["l"] <= stop_now) if sign == 1 else (b["h"] >= stop_now)):
-            # TP et retour à l'entrée dans la même bougie : ordre inconnu, on suppose le pire.
+        back = hit_now and exit_mode == "v1" and adverse(b, stop_now)
+        if back and not targets_first:
+            note(b, "objectif_puis_entree")
+        if back and not adverse_before and (not favorable or targets_first):
+            # TP et retour à l'entrée dans la même bougie : ordre inconnu, on suppose le pire (sauf « favorable »).
             leave(stop_now, b["t"], "stop_be", remaining)
             reason = "stop_be"
             break
@@ -236,7 +288,7 @@ def simulate(plan: dict, bars: list[dict], *, market: str, decided_at: int, entr
     net = sum(e["part"] * (e["price"] * (1 - sign * (slip + e["fee"])) - fill_eff) * sign for e in exits) / risk
     result.update(exit_reason=reason, exits=exits, r_gross=round(gross, 4), r_net=round(net, 4),
                   mfe_r=round((best - fill_price) * sign / risk, 4), mae_r=round((worst - fill_price) * sign / risk, 4),
-                  closed_at=exits[-1]["at"] + BAR_SECONDS)
+                  closed_at=exits[-1]["at"] + bar_seconds)
     return result
 
 

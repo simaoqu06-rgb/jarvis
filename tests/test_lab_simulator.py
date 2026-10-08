@@ -196,3 +196,58 @@ def test_prix_d_ordre_arrondis_au_pas_de_cotation():
 def test_amplitude_du_jour():
     assert SIM.day_range_pct(session([(100, 102, 99, 101), (101, 103, 100, 102)])) == pytest.approx(4.040, abs=1e-3)
     assert SIM.day_range_pct([]) is None
+
+
+# --- Résolution des bougies ambiguës (journal de Killmode, 8 octobre) -------------------------------------
+
+def minutes(rows, start=OPEN):
+    return [{"t": start + 60 * i, "o": o, "h": h, "l": lo, "c": c, "v": 1000.0} for i, (o, h, lo, c) in enumerate(rows)]
+
+
+def run_stop(rows, resolution):
+    return SIM.simulate(plan(), minutes(rows), market="stock", decided_at=OPEN, entry_until=CLOSE, exit_at=CLOSE,
+                        last_price=99.5, cost=ZERO, entry_order="stop", bar_seconds=60, resolution=resolution)
+
+
+def r_of(rows):
+    return {k: run_stop(rows, k)["r_gross"] for k in SIM.RESOLUTIONS}
+
+
+def test_resolution_v1_inchangee_et_inconnue_refusee():
+    assert "ambigus" not in run_stop([(99.5, 100.5, 99.4, 100.2)], "v1")
+    with pytest.raises(ValueError):
+        run_stop([(99.5, 100.5, 99.4, 100.2)], "optimiste")
+
+
+def test_entree_et_stop_dans_la_bougie_d_entree():
+    rows = [(99.5, 100.5, 97.5, 99.0)] + [(99.5, 99.5, 99.5, 99.5)] * 3  # le plus bas a pu précéder l'exécution
+    assert r_of(rows) == {"v1": -1.0, "prudente": -1.0, "favorable": -0.25}
+    assert run_stop(rows, "prudente")["ambigus"] == [{"t": OPEN, "cas": "entree_et_stop"}]
+    assert r_of([(99.5, 100.5, 97.5, 97.8)] + [(97.8,) * 4] * 3)["favorable"] == -1.0  # clôture sous le stop : certain
+
+
+def test_objectif_dans_la_bougie_d_entree():
+    # Elle ouvre sous l'entrée : son plus haut vient après l'exécution, TP1 est certain ; le retour à l'entrée non.
+    r = r_of([(99.5, 102.5, 99.4, 102.2)] + [(102.2,) * 4] * 3)
+    assert r["v1"] == pytest.approx(1.1) and r["prudente"] == pytest.approx(1 / 3, abs=1e-3)
+    assert r["favorable"] == pytest.approx(1 / 3 + 2 / 3 * 1.1, abs=1e-3)
+
+
+def test_plusieurs_objectifs_puis_retour_a_l_entree():
+    rows = [(99.5, 100.2, 99.4, 100.1), (100.1, 104.5, 99.9, 100.0)] + [(103.0,) * 4] * 3
+    assert r_of(rows) == pytest.approx({"v1": 1.0, "prudente": 1 / 3, "favorable": 1.5}, abs=1e-3)
+    assert run_stop(rows, "prudente")["ambigus"] == [{"t": OPEN + 60, "cas": "objectif_puis_entree"}]
+
+
+def test_stop_et_objectif_apres_l_entree():
+    rows = [(99.5, 100.2, 99.4, 100.1), (100.1, 102.5, 97.9, 100.0)] + [(100.0,) * 4] * 3
+    assert r_of(rows) == pytest.approx({"v1": -1.0, "prudente": -1.0, "favorable": 1 / 3}, abs=1e-3)
+    assert run_stop(rows, "favorable")["ambigus"] == [{"t": OPEN + 60, "cas": "stop_et_objectif"}]
+
+
+def test_objectif_au_prix_de_l_ordre():
+    rows = [(99.5, 100.2, 99.4, 100.1), (102.5, 102.8, 102.4, 102.6)] + [(102.6,) * 4] * 3
+    assert run_stop(rows, "v1")["exits"][0]["price"] == 102.5  # le labo : à l'ouverture au-delà
+    assert run_stop(rows, "prudente")["exits"][0]["price"] == 102.0  # posé, il s'exécute à son prix
+    gap = run_stop([(102.5, 102.8, 102.3, 102.6)] + [(102.6,) * 4] * 3, "prudente")
+    assert gap["fill_price"] == 102.5 and gap["exits"][0]["price"] == 102.5  # posé au-delà : au prix d'entrée

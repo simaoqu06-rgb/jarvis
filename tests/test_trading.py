@@ -85,6 +85,16 @@ def test_stop_inchange_apres_tp1_puis_a_l_entree_apres_tp2():
     assert "stop suivi" in msgs[0] and tr["status"] == "closed"
 
 
+def test_un_kill_pris_remonte_le_stop_des_tp1():
+    """`!prends … kill` : la gestion du KILL, celle que mesure son journal (stop à l'entrée dès TP1)."""
+    tr = trade(killmode=True)
+    msgs = S.apply_bars(tr, bars([101.0, 102.5], spread=0.5, start=T0, step=60), NOW)
+    assert "TP1 touché" in msgs[0] and "Remonte les SL des brackets restants à l'entrée" in msgs[0]
+    assert tr["stop_current"] == 100.0
+    msgs = S.apply_bars(tr, bars([99.0], spread=0.5, start=T0 + 120, step=60), NOW)
+    assert "stop suivi" in msgs[0] and tr["status"] == "closed"
+
+
 def test_stop_direct():
     tr = trade()
     msgs = S.apply_bars(tr, bars([97.0], spread=0.5, start=T0, step=60), NOW)
