@@ -41,6 +41,7 @@ from app.trading import service as trading
 from app.core import fallback
 from app.core.http import SourceError
 from app.trading.settings import settings
+from app.trading import research
 
 
 def configure_logging() -> None:
@@ -769,6 +770,36 @@ def lab_morning_get(limit: int = Query(7, ge=1, le=60)):
     days = sorted(st.data["jours"].values(), key=lambda d: d["jour"], reverse=True)[:limit]
     return {"message_prive": "activé" if lab_morning.dm_on() else "rodage", "jours": days,
             "propositions": [p for p in reversed(PR.proposals.items) if p.get("kind") == "labo"][:30]}
+
+
+# Lot D : recherche avant l'ouverture par une routine Claude (lecture du scanner, verdicts mesurés).
+research_book = research.ResearchBook()
+
+
+@app.get("/api/lab/scan", dependencies=[Depends(lab_key)])
+def lab_scan_get():
+    """Dernier passage du scanner avant l'ouverture (« du_jour » : fait aujourd'hui, heure de New York) et
+    les verdicts de recherche déjà déposés ce jour-là."""
+    view = research.scan_view(research.last_scan())
+    return view | {"verdicts": research_book.day(view["jour"])}
+
+
+@app.post("/api/lab/recherche", dependencies=[Depends(lab_key)])
+async def lab_research_submit(request: Request):
+    """Verdicts de la routine sur les valeurs du scanner du jour : [{"symbol", "verdict": soutient|neutre|contre,
+    "raison", "resume"?, "sources"?}]. Rien n'est filtré : les verdicts sont comparés au forward-test."""
+    items = await _lab_rule_body(request, expect=list)
+    try:
+        return research.record(research_book, items, research.last_scan())
+    except research.ResearchError as exc:
+        raise HTTPException(422, str(exc))
+
+
+@app.get("/api/lab/recherche", dependencies=[Depends(lab_key)])
+def lab_research_bilan():
+    """La recherche aide-t-elle ? Espérance en R du forward-test des valeurs « soutient » contre « contre »."""
+    b = research.bilan(research_book, scheduler.paper_book.entries)
+    return b | {"text": research.bilan_text(b)}
 
 
 COCKPIT_HTML = Path(__file__).parent / "web" / "cockpit.html"
