@@ -6,7 +6,10 @@ n'est stocké, le disque ne bouge pas), et on calcule les mêmes lignes qu'en di
 - les stratégies (strategies.STRATEGIES), sur les mêmes fenêtres ;
 - v1 rejouée avec les sorties et tests du labo v2, à partir du plan gardé dans trades (ou
   trades_sealed) : entrée, stop, objectifs, heure de décision. Le prix « dernier cours » de v1 est
-  son prix d'entrée (v1 entre toujours au dernier cours connu).
+  son prix d'entrée (v1 entre toujours au dernier cours connu) ;
+- n° 7 : les GO de ce plan (score.go) et, pour les jours faits par le générateur depuis la n° 7, ceux du
+  plan du direct (« plancher ») : brut contre confirmé (strategies.go_rows). Avant, le plan du direct
+  n'existe pas : il faudrait ~60 séances de bougies de 15 min par action pour le refaire.
 
 Un curseur par marché et par origine (progress strategies.progress_job(marché), clé
 rattrapage:<origine>) avance jour par jour jusqu'au premier jour calculé par le rejeu lui-même
@@ -73,9 +76,13 @@ def _v1(market: str, trade: dict, entry_until: int, rank) -> dict | None:
     p = trade["plan"]
     if not p.get("entry") or not p.get("stop") or not p.get("targets"):
         return None
+    floor = p.get("plancher")  # n° 7 : plan du direct, gardé par le générateur depuis la déclaration n° 7
     return {"plan": {"entry": p["entry"], "stop": p["stop"], "targets": [{"price": t["price"]} for t in p["targets"]]},
             "decided_at": trade["planned_at"], "entry_until": entry_until, "last_price": p["entry"],
-            "cost": SIM.costs(market, p["entry"], rank)}
+            "cost": SIM.costs(market, p["entry"], rank), "go": bool((p.get("score") or {}).get("go")),
+            "plancher": {"plan": {"entry": floor["entry"], "stop": floor["stop"],
+                                  "targets": [{"price": x} for x in floor["targets"]]}, "go": floor["go"]}
+            if floor else None}
 
 
 def _daily(db: LabDB, market: str, symbol: str, cutoff: int) -> list[dict]:

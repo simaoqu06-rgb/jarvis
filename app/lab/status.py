@@ -26,6 +26,9 @@ LIMITATIONS = [
     "Actions : bougies ajustées des splits connus aujourd'hui ; avant un regroupement d'actions, le prix "
     "paraît plus élevé, d'où un glissement, une commission en R et un pas de cotation sous-estimés sur les "
     "petites valeurs (l'inverse avant une division).",
+    "Confirmation des GO (n° 7) : le plan au stop plancher du direct n'existe que pour les jours rejoués depuis "
+    "la n° 7 (le rattrapage n'a pas l'historique de 15 min pour le refaire) ; les GO du labo ne passent ni par "
+    "les filtres du scanner, ni par le catalyseur, ni par les leçons.",
 ]
 
 

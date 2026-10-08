@@ -89,6 +89,19 @@ La n° 6 rend aussi Killmode mesurable pièce par pièce, sans essai de plus (fi
 ligne actions garde atr_pct, vol15_adv (stratégies v2) et stop_avant_entree (kill_context, stop_before_entry) ;
 le témoin de killmode tire ses entrées entre 9 h 45 et 11 h, pendant la vie de son ordre ; killmode et la n° 4
 (POST_SEEN) ne sont jugées que sur les jours après SEEN_UNTIL, déjà lus quand elles ont été choisies.
+Déclaration n° 7 (8 octobre 2026, demande de Simão : rejouer la confirmation des GO du scanner, PR #37, contre le GO
+brut) : sur les plans GO de v1 (actions), deux bras jugés sur la seule sortie déclarée (r_sans_be : un tiers par
+objectif, stop fixe, reste à la clôture), mêmes jours, mêmes coûts (go_rows) :
+- go_brut : achat au marché à l'ouverture (première bougie de la séance), si elle est au-dessus du stop ;
+- go_confirme : la règle du direct (confirm.evaluate, même code) lue sur les bougies de 5 min closes avant 11 h 30
+  New York ; une fois confirmé, ordre stop d'achat au déclencheur, valable jusqu'à 11 h 30 comme le dit le message
+  du direct ; pas de trade si le GO est annulé ou expire.
+Deux stops, chacun là où il se rejoue à l'identique : celui des plans du labo (règle d'origine, tous les jours) et
+le plancher du direct (PR #36, suffixe _plancher) : le plan refait par le code du direct (service._floor_stop,
+objectifs et note recalculés, donc ses propres GO), seulement sur les jours calculés par le générateur ; le
+rattrapage n'a pas les ~60 séances de bougies de 15 min qu'il faudrait. Le générateur le garde dans trades.plan
+(« plancher ») pour les rattrapages des déclarations suivantes. Chaque ligne garde le statut du GO
+(confirmation : confirme, annule, expire) ; strat_stats compare, GO par GO, « confirmé ou rien » au brut.
 Objectifs : 1, 2 et 3 R. Fenêtre des signaux : actions de 9 h 45 à 15 h New York (soldé à la
 clôture) ; crypto de 0 h à 20 h UTC (soldé 24 h après le signal).
 v1 est rejouée avec les mêmes sorties et tests, sur ses propres objectifs : c'est la référence.
@@ -108,18 +121,22 @@ Pour chaque déclenchement, une seule ligne (db.STRAT_COLUMNS) avec :
 import hashlib
 import random
 from bisect import bisect_left
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from itertools import pairwise
 
 from app.lab import collector as CO
 from app.lab import simulator as SIM
+from app.trading import confirm as CF
 from app.trading import indicators as I
 from app.trading import signals as S
 
 REGISTERED_ON = "2026-10-08"
 # Déclaration en vigueur (docs/labo-strategies.md). En changer relance le rattrapage de tous les jours déjà
 # traités (progress_job), pour que chaque stratégie soit mesurée sur les mêmes jours.
-DECLARATION = 6
+DECLARATION = 7
+# Dernière déclaration qui change les lignes crypto : la n° 7 (actions seulement) laisse le rattrapage crypto
+# continuer celui de la n° 6. Une déclaration qui touche la crypto le remonte à son numéro.
+CRYPTO_DECLARATION = 6
 BAR = CO.BASE_TF * 60
 REFERENCE = "v1"
 STRATEGIES = {
@@ -138,7 +155,19 @@ STRATEGIES = {
                                "markets": ("crypto",), "base": "cassure_zone_retest", "tf": 60},
     # Déclaration n° 5 : Killmode, sa partie prix (gap et volatilité forts, range d'ouverture tenu).
     "killmode": {"label": "Killmode : gap ≥ 4 % et ATR ≥ 4 %, cassure du range 15 min tenu", "markets": ("stock",)},
+    # Déclaration n° 7 : GO de v1 achetés à l'ouverture ou après la confirmation du direct (go_rows, pas de signal),
+    # avec le stop d'origine ou le plancher du direct ; une seule sortie.
+    "go_brut": {"label": "GO v1 acheté à l'ouverture (stop d'origine)", "markets": ("stock",),
+                "go": "origine", "arm": "brut", "exits": ("r_sans_be",)},
+    "go_confirme": {"label": "GO v1 confirmé : repli vers l'entrée puis reprise du VWAP (stop d'origine)",
+                    "markets": ("stock",), "go": "origine", "arm": "confirme", "exits": ("r_sans_be",)},
+    "go_brut_plancher": {"label": "GO du direct acheté à l'ouverture (stop plancher 1/3 ATR jour)",
+                         "markets": ("stock",), "go": "plancher", "arm": "brut", "exits": ("r_sans_be",)},
+    "go_confirme_plancher": {"label": "GO du direct confirmé (stop plancher 1/3 ATR jour)", "markets": ("stock",),
+                             "go": "plancher", "arm": "confirme", "exits": ("r_sans_be",)},
 }
+GO_STRATEGIES = tuple(k for k, v in STRATEGIES.items() if "go" in v)  # n° 7
+GO_STATUS = {"confirmé": "confirme", "annulé": "annule"}               # n° 7 : sinon « expire »
 LABELS = {REFERENCE: "v1 (achat à heure fixe, référence)", **{k: v["label"] for k, v in STRATEGIES.items()}}
 EXITS = {
     "r_net": "sortie v1 : un tiers à chaque objectif, stop à l'entrée après TP1",
@@ -206,8 +235,9 @@ POST_SEEN = ("killmode", "cassure_zone_retest_15m", "cassure_zone_retest_1h")
 
 
 def progress_job(market: str) -> str:
-    """Clé de progression du labo v2 (frontière et curseurs du rattrapage) pour la déclaration en vigueur."""
-    return f"strats:{market}:d{DECLARATION}"
+    """Clé de progression du labo v2 (frontière et curseurs du rattrapage) : la dernière déclaration qui change
+    les lignes du marché."""
+    return f"strats:{market}:d{CRYPTO_DECLARATION if market == 'crypto' else DECLARATION}"
 
 
 def exits(market: str) -> dict:
@@ -215,12 +245,24 @@ def exits(market: str) -> dict:
     return {**EXITS, **STOCK_EXITS} if market == "stock" else EXITS
 
 
+def strategy_exits(market: str, name: str) -> dict:
+    """Sorties d'une stratégie : celles du marché, sauf liste propre (n° 7 : la seule sortie déclarée)."""
+    own = STRATEGIES.get(name, {}).get("exits")
+    return {e: exits(market)[e] for e in own} if own else exits(market)
+
+
+def ref_exit(name: str) -> str:
+    """Sortie de référence (classement, règle « candidate ») : r_net, ou la sortie déclarée seule (n° 7)."""
+    own = STRATEGIES.get(name, {}).get("exits")
+    return own[0] if own else "r_net"
+
+
 def trials() -> list[dict]:
     """Essais déclarés : chaque stratégie (et v1) × sortie × marché, comptés gagnants ou non."""
     out = []
     for market in ("stock", "crypto"):
         names = [REFERENCE] + [k for k, v in STRATEGIES.items() if market in v["markets"]]
-        out += [{"market": market, "strategy": n, "exit": e} for n in names for e in exits(market)]
+        out += [{"market": market, "strategy": n, "exit": e} for n in names for e in strategy_exits(market, n)]
     return out
 
 
@@ -771,11 +813,13 @@ def measure(d: Day, plan: dict, decided_at: int, entry_until: int, cost: dict, o
 NO_WITNESS = {"temoin_r": None, "temoin_triggered": 0}
 
 
-def witness(d: Day, key: tuple, risk_pct: float, multiples: list[float], cost_of, window: tuple[int, int]) -> dict:
+def witness(d: Day, key: tuple, risk_pct: float, multiples: list[float], cost_of, window: tuple[int, int],
+            exit_mode: str = "v1") -> dict:
     """Entrées au marché à WITNESS_DRAWS bougies tirées au hasard dans `window` (indices), chacune avec le
-    même stop en % et les mêmes objectifs en R que le trade, sortie v1 ; temoin_r = leur moyenne."""
+    même stop en % et les mêmes objectifs en R que le trade, même sortie (v1, ou stop fixe pour la n° 7) ;
+    temoin_r = leur moyenne."""
     lo, hi = window
-    if hi <= lo or risk_pct <= 0:
+    if hi <= lo or risk_pct <= 0 or any(m <= 0 for m in multiples):
         return NO_WITNESS
     rng = _seed(*key)
     picks = rng.sample(range(lo, hi), min(WITNESS_DRAWS, hi - lo))
@@ -785,7 +829,8 @@ def witness(d: Day, key: tuple, risk_pct: float, multiples: list[float], cost_of
         stop = entry * (1 - risk_pct / 100)
         plan = _plan(entry, stop, _r_targets(entry, stop, multiples))
         decided = d.t[k]
-        res = _sim(d, plan, decided, decided + BAR, d.exit_at(decided), cost_of(entry), "market", entry)
+        res = _sim(d, plan, decided, decided + BAR, d.exit_at(decided), cost_of(entry), "market", entry,
+                   exit_mode=exit_mode)
         if res["triggered"] and res["r_net"] is not None:
             rs.append(res["r_net"])
     if not rs:
@@ -816,7 +861,8 @@ def _row(d: Day, symbol: str, strategy: str, slot: int, plan: dict, decided_at: 
          gap: float | None, rank) -> dict:
     entry, stop = plan["entry"], plan["stop"]
     ctx = kill_context(d) if d.market == "stock" else {}
-    v2 = strategy != REFERENCE  # v1 décide à 9 h 10, avant le volume des 15 premières minutes
+    # v1 décide à 9 h 10, avant le volume des 15 premières minutes ; la n° 7 rejoue ses GO
+    v2 = strategy != REFERENCE and strategy not in GO_STRATEGIES
     return {"symbol": symbol, "strategy": strategy, "slot": slot, "signal_at": decided_at,
             "entry": round(entry, 8), "stop": round(stop, 8), "risk_pct": round((entry - stop) / entry * 100, 4),
             **m, **wit, "gap_open_pct": gap, "rank": rank, "sur_vwap": above_vwap(d, decided_at),
@@ -835,8 +881,8 @@ def strategy_rows(d: Day, symbol: str, rank=None, gap: float | None = None, name
         return []
     rows = []
     for name, spec in STRATEGIES.items():
-        if d.market not in spec["markets"] or (names and name not in names):
-            continue
+        if d.market not in spec["markets"] or (names and name not in names) or "go" in spec:
+            continue  # n° 7 : pas de signal, les lignes viennent des GO de v1 (go_rows)
         sd = d.frame(spec.get("tf"))  # bougies du signal (n° 4) ; simulation toujours en 5 min sur d
         if not sd.usable:
             continue
@@ -881,6 +927,92 @@ def v1_row(d: Day, symbol: str, plan: dict, decided_at: int, entry_until: int, l
     return _row(d, symbol, REFERENCE, decided_at, p, decided_at, m, wit, gap, rank)
 
 
+# --- Déclaration n° 7 : confirmation des GO -------------------------------------------------
+
+NO_TRADE = {"triggered": 0, "filled_at": None, "entry_mode": None, "minutes_to_fill": None,
+            "exit_reason": "non_declenche", "r_net": None, "r_gross": None, "tp1_hit": 0, "mfe_r": None, "mae_r": None}
+
+
+def confirm_event(d: Day, entry: float, stop: float, targets: list[float]) -> dict | None:
+    """n° 7 : la règle du direct (confirm.evaluate, même code) sur les bougies de 5 min de la séance closes avant
+    11 h 30 New York (le direct déclare le GO expiré dès 11 h 30, avant de lire la bougie qui s'y termine).
+    Renvoie l'événement (confirmé, avec son déclencheur, ou annulé) ; None : expiré."""
+    until = int(datetime.combine(d.day, CF.LAST_CHECK, CO.NEW_YORK).timestamp())
+    go = {"status": "attente", "entry": entry, "stop": stop, "targets": targets, "last_bar": None}
+    bars = [b for b in d.bars[d.d0:d.d1] if b["t"] + BAR < until]
+    return CF.evaluate(go, bars, datetime.fromtimestamp(d.start_ts, timezone.utc))
+
+
+def go_measure(d: Day, plan: dict, decided_at: int, entry_until: int, cost: dict, order: str,
+               last_price: float) -> dict:
+    """n° 7 : la seule sortie déclarée (tiers aux objectifs, stop fixe, reste à la clôture : r_sans_be) et ses
+    tests de robustesse ; r_net (gestion v1) n'est pas mesuré. Ordres au marché ou stop : rien à « manquer »."""
+    exit_at = d.exit_at(decided_at)
+    res = _sim(d, plan, decided_at, entry_until, exit_at, cost, order, last_price, exit_mode="sans_be")
+    if not res["triggered"]:
+        return dict(NO_TRADE)
+    late = _sim(d, plan, decided_at + BAR, entry_until + BAR, exit_at, cost, order, last_price, exit_mode="sans_be")
+    return {"triggered": 1, "filled_at": res["filled_at"], "entry_mode": res["entry_mode"],
+            "minutes_to_fill": res["minutes_to_fill"], "exit_reason": res["exit_reason"], "r_net": None,
+            "r_gross": res["r_gross"], "tp1_hit": int(bool(res["tp_hits"] and res["tp_hits"][0])),
+            "mfe_r": res["mfe_r"], "mae_r": res["mae_r"], "r_sans_be": res["r_net"],
+            "r_glisse_x2": SIM.net_r(res, cost, slip_factor=2.0), "r_glisse_x3": SIM.net_r(res, cost, slip_factor=3.0),
+            "r_retard": late["r_net"] if late["triggered"] else None, "r_manque": res["r_net"]}
+
+
+def go_plans(v1: dict | None) -> dict:
+    """n° 7 : plans GO de v1 par stop : « origine » (plan du labo), « plancher » (plan du direct, seulement
+    quand le générateur l'a calculé)."""
+    if not v1:
+        return {}
+    out = {"origine": v1["plan"]} if v1.get("go") else {}
+    floor = v1.get("plancher")
+    if floor and floor.get("go"):
+        out["plancher"] = floor["plan"]
+    return out
+
+
+def go_rows(d: Day, symbol: str, plans: dict, rank=None, gap: float | None = None) -> list[dict]:
+    """n° 7 : pour chaque GO (par stop), une ligne par bras, avec le statut de la confirmation.
+    Brut : achat au marché à l'ouverture si elle est au-dessus du stop. Confirmé : ordre stop d'achat au
+    déclencheur, posé à la clôture de la bougie de confirmation, valable jusqu'à 11 h 30 New York."""
+    if d.d1 <= d.d0:
+        return []
+    rows = []
+    until = int(datetime.combine(d.day, CF.LAST_CHECK, CO.NEW_YORK).timestamp())
+    k_until = bisect_left(d.t, until)
+    for variant, plan in plans.items():
+        suffix = "" if variant == "origine" else f"_{variant}"
+        stop, targets = plan["stop"], [t["price"] for t in plan["targets"]][:3]
+        if not targets or stop >= plan["entry"]:
+            continue
+        ev = confirm_event(d, plan["entry"], stop, targets)
+        status = GO_STATUS.get(ev["kind"], "expire") if ev else "expire"
+        opened, start = d.o[d.d0], d.t[d.d0]
+        arms = {"brut": (_plan(opened, stop, targets), start, start + BAR, "market", opened, (d.first, d.last))}
+        if status == "confirme":
+            decided = ev["t"] + BAR
+            arms["confirme"] = (_plan(ev["trigger"], stop, targets), decided, until, "stop",
+                                d.c[bisect_left(d.t, ev["t"])], (d.first, max(d.first, k_until)))
+        else:  # pas d'ordre : la ligne garde l'entrée du plan et l'heure où le GO est tombé
+            arms["confirme"] = (_plan(plan["entry"], stop, targets), ev["t"] + BAR if ev else until, until, None,
+                                None, None)
+        for arm, (p, decided, entry_until, order, last, window) in arms.items():
+            name = f"go_{arm}{suffix}"
+            entry = p["entry"]
+            cost = SIM.costs("stock", entry, rank)
+            m = (go_measure(d, p, decided, entry_until, cost, order, last) if order and entry > stop
+                 else dict(NO_TRADE))
+            wit = NO_WITNESS
+            if m["triggered"]:
+                risk = entry - stop
+                wit = witness(d, (d.market, symbol, d.day, name), risk / entry * 100,
+                              [round((t - entry) / risk, 4) for t in targets],
+                              lambda px: SIM.costs("stock", px, rank), window, exit_mode="sans_be")
+            rows.append(_row(d, symbol, name, 0, p, decided, m, wit, gap, rank) | {"confirmation": status})
+    return rows
+
+
 # --- Entrées du générateur ------------------------------------------------------------------
 
 STOCK_WARMUP_BARS = 160  # deux séances : EMA 20, ATR 14 et impulsion du matin
@@ -901,8 +1033,9 @@ def stock_day(day: date, symbol: str, hist5: list[dict], session: list[dict], da
     """Lignes du jour pour une action : v1 (si son plan existe) et les stratégies.
 
     `hist5` : bougies de 5 min avant la séance ; `session` : celles de la séance ; `daily` :
-    journalier connu avant le jour ; `v1` : {plan, decided_at, entry_until, last_price, cost, result} ;
-    `index5` : bougies de 5 min de SPY pendant la séance (sortie r_spy, déclaration n° 6)."""
+    journalier connu avant le jour ; `v1` : {plan, decided_at, entry_until, last_price, cost, result, go,
+    plancher} (go et plancher : n° 7, voir go_plans) ; `index5` : bougies de 5 min de SPY pendant la séance
+    (sortie r_spy, déclaration n° 6)."""
     bars = CO.regular_hours(hist5[-STOCK_WARMUP_BARS * 2:])[-STOCK_WARMUP_BARS:] + session
     d = Day("stock", day, bars, daily)
     d.index_down = index_down(index5)
@@ -912,6 +1045,7 @@ def stock_day(day: date, symbol: str, hist5: list[dict], session: list[dict], da
     if v1 and d.d1 > d.d0:
         rows.append(v1_row(d, symbol, v1["plan"], v1["decided_at"], v1["entry_until"], v1["last_price"], v1["cost"],
                            v1.get("result"), rank, gap, (d.first, d.last)))
+        rows += go_rows(d, symbol, go_plans(v1), rank, gap)  # n° 7
     return rows
 
 

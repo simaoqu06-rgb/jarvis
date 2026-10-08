@@ -13,6 +13,10 @@ en plus la bougie « en cours » faite des bougies de 5 min déjà closes, comme
   sans lui et context.catalyst_replayed = false.
 - Délais rejoués limités aux 1 500 derniers départs (historical_timing(lookback=…)) : plus d'un an
   de bougies d'1 h ou ~58 séances de 15 min, pour tenir des centaines de plans par jour.
+- Déclaration n° 7 (actions) : à côté du plan v1 (règle d'origine), le plan tel que le direct le fait depuis
+  la PR #36 (stock_plans : stop éloigné à au moins 1/3 de l'ATR journalier par service._floor_stop, objectifs
+  et note recalculés). Il ne change rien à v1 ; il est gardé dans trades.plan (« plancher ») et rejoué par
+  strategies.go_rows.
 """
 import logging
 from bisect import bisect_left
@@ -77,10 +81,37 @@ def setup_type(p: dict) -> str:
 
 
 def make_plan(symbol: str, market: str, bars: list[dict], daily: list[dict] | None, h4: list[dict] | None,
-              moment: int, s: dict) -> dict:
+              moment: int, s: dict, levels: tuple | None = None) -> dict:
     now = datetime.fromtimestamp(moment, timezone.utc)
     return T.plan_from_bars(symbol, market, "long", bars, daily, h4, now, cat=None, capital=0, s=s,
-                            timing_lookback=TIMING_LOOKBACK)
+                            timing_lookback=TIMING_LOOKBACK, levels=levels)
+
+
+def stock_plans(symbol: str, inp: dict, s: dict) -> tuple[dict, dict | None]:
+    """Plan v1 (règle d'origine) et plan du direct depuis la PR #36 (déclaration n° 7) : comme build_plan, stop
+    éloigné à au moins 1/3 de l'ATR journalier, objectifs recalculés sur ce risque et plan noté avec (donc son
+    propre GO) ; le même plan quand le stop est déjà assez loin. Plan du direct impossible : None."""
+    now = datetime.fromtimestamp(inp["moment"], timezone.utc)
+    levels = T.plan_levels(inp["bars"], "stock", "long", now=now, timing_lookback=TIMING_LOOKBACK)
+    plan = make_plan(symbol, "stock", inp["bars"], inp["daily"], inp["h4"], inp["moment"], s, levels)
+    try:
+        floored = T._floor_stop(inp["bars"], inp["daily"], "stock", "long", None, None, now, levels)
+        if floored is levels:
+            return plan, plan
+        return plan, make_plan(symbol, "stock", inp["bars"], inp["daily"], inp["h4"], inp["moment"], s, floored)
+    except T.PlanError as exc:
+        log.debug("Labo : plan du direct %s impossible (%s)", symbol, exc)
+        return plan, None
+
+
+def floor_summary(plan: dict, floored: dict | None) -> dict | None:
+    """Ce que trades.plan garde du plan du direct (n° 7) ; None s'il n'a pas pu être fait."""
+    if floored is None:
+        return None
+    sc = floored["score"]
+    return {"eloigne": floored is not plan, "entry": floored["entry"], "stop": floored["stop"],
+            "stop_source": floored["stop_source"], "targets": [t["price"] for t in floored["targets"]],
+            "go": sc["go"], "decision": sc["decision"], "composite": sc["composite"]}
 
 
 def _row(market: str, symbol: str, day: date, moment: int, plan: dict, context: dict, result: dict) -> dict:
@@ -155,7 +186,7 @@ def stock_trade(db: LabDB, symbol: str, day: date, s: dict, meta: dict | None = 
 
 def _stock_v1(inp: dict, symbol: str, day: date, s: dict, meta: dict | None, regime: dict | None):
     try:
-        plan = make_plan(symbol, "stock", inp["bars"], inp["daily"], inp["h4"], inp["moment"], s)
+        plan, floored = stock_plans(symbol, inp, s)
     except T.PlanError as exc:
         log.debug("Labo : plan %s %s impossible (%s)", symbol, day, exc)
         return None, None
@@ -176,8 +207,11 @@ def _stock_v1(inp: dict, symbol: str, day: date, s: dict, meta: dict | None, reg
         "sector": None, "catalyst_replayed": False,
     }
     v1 = {"plan": plan, "decided_at": inp["moment"], "entry_until": inp["bounds"][1], "last_price": last_price,
-          "cost": cost, "result": result}
-    return _row("stock", symbol, day, inp["moment"], plan, context, result), v1
+          "cost": cost, "result": result, "go": plan["score"]["go"],
+          "plancher": {"plan": floored, "go": floored["score"]["go"]} if floored else None}
+    row = _row("stock", symbol, day, inp["moment"], plan, context, result)
+    row["plan"]["plancher"] = floor_summary(plan, floored)
+    return row, v1
 
 
 def _guarded(errors: list | None, symbol: str, fn, *args):

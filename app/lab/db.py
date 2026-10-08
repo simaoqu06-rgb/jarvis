@@ -44,7 +44,7 @@ STRAT_COLUMNS = ("origin", "market", "symbol", "day", "strategy", "slot", "signa
                  "tp1_hit", "mfe_r", "mae_r", "r_sans_be", "r_2r", "r_suiveur", "r_glisse_x2", "r_glisse_x3",
                  "r_retard", "r_manque", "temoin_r", "temoin_triggered", "gap_open_pct", "rank", "r_emperor",
                  "r_emperor_alerte", "r_emperor_confirme", "r_vwap", "r_1430", "r_spy", "sur_vwap", "atr_pct",
-                 "vol15_adv", "stop_avant_entree")
+                 "vol15_adv", "stop_avant_entree", "confirmation")
 STRAT_DDL = """CREATE TABLE IF NOT EXISTS {name} (
     id INTEGER PRIMARY KEY,
     origin TEXT NOT NULL CHECK (origin IN ('replay', 'live')),
@@ -55,7 +55,7 @@ STRAT_DDL = """CREATE TABLE IF NOT EXISTS {name} (
     r_sans_be REAL, r_2r REAL, r_suiveur REAL, r_glisse_x2 REAL, r_glisse_x3 REAL, r_retard REAL, r_manque REAL,
     temoin_r REAL, temoin_triggered INTEGER, gap_open_pct REAL, rank INTEGER, r_emperor REAL,
     r_emperor_alerte REAL, r_emperor_confirme REAL, r_vwap REAL, r_1430 REAL, r_spy REAL, sur_vwap INTEGER,
-    atr_pct REAL, vol15_adv REAL, stop_avant_entree INTEGER,
+    atr_pct REAL, vol15_adv REAL, stop_avant_entree INTEGER, confirmation TEXT,
     UNIQUE (origin, market, symbol, day, strategy, slot)
 );
 CREATE INDEX IF NOT EXISTS {name}_day ON {name} (market, day);"""
@@ -146,7 +146,8 @@ CREATE TABLE IF NOT EXISTS derivs (
 # Colonnes ajoutées après coup (ALTER TABLE à l'ouverture par le worker ; idempotent).
 STRAT_MIGRATIONS = (("r_emperor", "REAL"), ("r_emperor_alerte", "REAL"), ("r_emperor_confirme", "REAL"),
                     ("r_vwap", "REAL"), ("r_1430", "REAL"), ("r_spy", "REAL"), ("sur_vwap", "INTEGER"),
-                    ("atr_pct", "REAL"), ("vol15_adv", "REAL"), ("stop_avant_entree", "INTEGER"))
+                    ("atr_pct", "REAL"), ("vol15_adv", "REAL"), ("stop_avant_entree", "INTEGER"),
+                    ("confirmation", "TEXT"))
 MIGRATIONS = {
     "rules": (("pourquoi", "TEXT"), ("council", "TEXT"), ("soiree", "TEXT"), ("decision", "TEXT"),
               ("decided_at", "TEXT")),
@@ -154,7 +155,8 @@ MIGRATIONS = {
     "method_versions": (("base", "TEXT"), ("rules", "TEXT"), ("role", "TEXT"), ("started_ts", "INTEGER"),
                         ("decided_at", "TEXT"), ("note", "TEXT")),
     # Labo v2, déclarations n° 2 et 3 : sorties EmperorBTC ; n° 6 : sorties de Gemini, VWAP à la décision et
-    # mesure de Killmode (ATR, volume des 15 premières minutes, stop touché avant l'entrée).
+    # mesure de Killmode (ATR, volume des 15 premières minutes, stop touché avant l'entrée) ; n° 7 : statut de la
+    # confirmation du GO (confirme, annule, expire).
     "strat_trades": STRAT_MIGRATIONS,
     "strat_trades_sealed": STRAT_MIGRATIONS,
 }

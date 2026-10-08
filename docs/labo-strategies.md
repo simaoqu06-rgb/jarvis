@@ -62,7 +62,8 @@ Pour chaque trade déclenché : même jour, même fenêtre, même stop en %, mê
 marché à une bougie tirée au hasard (graine fixe, reproductible). L'écart stratégie − témoin, apparié
 trade par trade, dit si l'**entrée** apporte quelque chose. Une stratégie qui ne bat pas son témoin n'a
 pas d'avantage d'entrée, quelle que soit son espérance. Exception depuis la n° 6 : le témoin de `killmode`
-tire ses entrées entre 9 h 45 et 11 h, la vie de son ordre.
+tire ses entrées entre 9 h 45 et 11 h, la vie de son ordre (de même, depuis la n° 7, celui de `go_confirme`
+entre 9 h 45 et 11 h 30, avec la sortie à stop fixe de ces bras).
 
 ## Lecture des résultats
 
@@ -437,6 +438,80 @@ s'attend à ce qu'aucune règle n'aide ; c'est justement pour cela qu'on mesure 
 Pragmatique : le coût est faible (mêmes trades simulés, une requête SPY par jour, seuil de 3,32 à 3,38) et
 la réponse arrive avec le rattrapage. Critique : une variable à la fois sur `r_net` ; volume et QQQ écartés
 pour ne pas multiplier les variantes ; le filtre d'entrée reste une mesure.
+
+## Déclaration n° 7 (8 octobre 2026) : confirmation des GO du scanner, brut contre confirmé
+
+Demande de Simão (fil « Avis sur FRSH en pré-market », carte « Oui, déclaration n° 7 », 8 octobre) : rejouer au
+labo la confirmation des GO introduite en direct par la PR #37 (`app/trading/confirm.py`, `!confirmations`), contre
+le GO acheté sans attendre. Demande complète : `/mnt/project-files/labo/demande-declaration-7-confirmation-go.md`.
+Ce qu'on en sait avant de mesurer : rien au labo. v1 achète au dernier cours avec un ordre limité, sans
+confirmation, et sa note ne trie rien (GO ≈ NO GO ≈ −0,24 R au premier constat). L'idée « ça augmente forcément
+le taux de réussite » ne dit rien de l'espérance : l'entrée confirmée est plus haute (risque plus grand, moins de R
+jusqu'aux objectifs) et les GO qui filent au TP1 sans repli sont annulés.
+
+**Population** : les plans GO de v1 (actions, achat), tels que le labo les fait à 9 h 10 New York sur son univers.
+Les filtres propres au scanner (prix ≥ 5 $, ATR ≥ 2,5 %, tendance, 3 à 5 valeurs), le catalyseur et les leçons ne
+se rejouent pas.
+
+**Deux bras**, sur les mêmes GO, les mêmes jours et avec les mêmes coûts (`strategies.go_rows`) :
+
+| Bras | Entrée | Pas de trade |
+|---|---|---|
+| `go_brut` | Au marché à l'ouverture (première bougie de la séance) | Ouverture au niveau du stop ou dessous |
+| `go_confirme` | La règle du direct, avec le **même code** (`confirm.evaluate`) sur les bougies de 5 min closes avant 11 h 30 New York : annulé dès qu'une bougie clôture sous le stop ou que son plus haut touche le TP1 ; repli quand un plus bas atteint l'entrée du plan ; confirmé quand, après le repli, une bougie finie après 9 h 45 clôture au-dessus du VWAP de séance (déclencheur = son plus haut + 0,01, on attend la suivante s'il dépasse le TP1). Ordre stop d'achat au déclencheur, posé à la clôture de cette bougie, exécuté à la première bougie dont le plus haut l'atteint, à max(déclencheur, ouverture), **valable jusqu'à 11 h 30** | GO annulé, expiré, ou ordre pas atteint avant 11 h 30 |
+
+- **Sortie déclarée, la même pour les deux** : `r_sans_be` (un tiers à chaque objectif du plan, stop fixe, reste
+  vendu à la clôture ; une bougie qui touche un objectif et le stop compte comme stop). Aucune autre sortie n'est
+  mesurée sur ces bras : `r_net` reste vide.
+- R rapporté au risque prévu de chaque bras : ouverture − stop pour le brut, déclencheur − stop pour le confirmé
+  (le risque qui fixe la taille de l'ordre en direct).
+- Robustesse sur `r_sans_be` : glissement ×2 et ×3, entrée une bougie plus tard (brut : à 9 h 35 ; confirmé : ordre
+  posé une bougie plus tard). Ordres au marché ou stop : rien à « manquer ».
+- Témoin : même stop en %, mêmes objectifs en R, même sortie à stop fixe ; entrées tirées de 9 h 45 à 15 h pour le
+  brut, de 9 h 45 à 11 h 30 pour le confirmé (la vie de son ordre, comme Killmode).
+- Le direct déclare le GO expiré dès 11 h 30, avant de lire la bougie qui finit à 11 h 30 : le labo fait pareil.
+- Écart avec la demande : l'ordre confirmé expire à 11 h 30, comme le dit le message du direct, alors que la mesure
+  du direct le laissait courir après. Corrigé côté direct par la PR #39.
+
+**Deux stops**, chacun là où il se rejoue à l'identique :
+- **origine** (`go_brut`, `go_confirme`) : le stop et les objectifs des plans du labo, sur tous les jours ;
+- **plancher du direct** (`go_brut_plancher`, `go_confirme_plancher`) : le plan que le direct fait depuis la PR #36,
+  refait avec son code (`service._floor_stop` : stop à au moins 1/3 de l'ATR journalier, objectifs recalculés sur ce
+  risque, plan noté avec, donc ses propres GO). Seulement sur les jours que le générateur calcule à partir du
+  déploiement (rejeu et direct du labo) : le rattrapage relit deux séances de 5 min par action, alors que refaire le
+  plan demande ~60 séances de bougies de 15 min par action et par jour. Le générateur garde ce plan dans
+  `trades.plan` (« plancher ») pour que les déclarations suivantes le retrouvent.
+
+Chaque ligne garde le statut du GO (`confirmation` : `confirme`, `annule`, `expire`).
+
+**Jugement, fixé avant le premier résultat** :
+- chaque bras est jugé comme une stratégie, sur sa sortie déclarée : espérance nette après commission IBKR, IC à
+  95 % en grappes par jour, témoin, robustesse, règle « candidate » ;
+- la confirmation « aide » si l'écart **« confirmé ou rien » − brut**, GO par GO (0 pour un bras sans trade), est
+  positif avec z au-dessus du seuil « candidate » et au moins 30 GO. C'est la comparaison qui compte pour 20 € par
+  trade : elle tient compte des trades que la confirmation évite ;
+- ventilation par statut (confirmé, annulé, expiré) avec ce qu'a fait le brut dans chaque groupe, et le confirmé sur
+  ses ordres exécutés ;
+- taux de réussite affiché, jamais utilisé pour conclure. Rien ne change dans le direct sur ce résultat avant la
+  règle de promotion habituelle.
+
+**Essais déclarés : 143** (139 + 2 bras × 2 stops, une seule sortie) ; seuil « candidate » : **z ≥ 3,39**.
+
+Le rattrapage repart pour les actions seulement : la n° 7 ne change aucune ligne crypto, dont le rattrapage continue
+celui de la n° 6 (`CRYPTO_DECLARATION`).
+
+Avis de ce fil (esprit critique, avant d'écrire) : la comparaison est gardée telle que demandée. Corrigé : la lecture
+« ça augmente forcément le taux de réussite » (le taux montera sans doute, l'espérance est l'inconnue), et
+l'expiration de l'ordre à 11 h 30. Ajouté : l'écart par GO avec 0 sans trade, sans lequel un bras qui trade moins
+paraîtrait meilleur sur sa seule espérance par trade.
+
+**Council** (Sceptique, Pragmatique, Critique : GO modifié, les deux stops). Sceptique : la note ne trie rien au
+labo, et confirmer un mauvais tri peut surtout réduire la perte en tradant moins, sans créer d'espérance positive ;
+l'écart par GO le montrera. Pragmatique : la règle est le code du direct, sans second code à maintenir ; le plan au
+plancher coûte un deuxième calcul de plan quand le plancher joue (rejeu plus lent, accepté par Simão) ; quatre
+essais de plus seulement. Critique : un seul stop aurait été plus simple, mais le stop change les deux bras
+(annulation sous le stop, risque en R) et Simão trade le plancher depuis la PR #36 ; un stop plancher avec les
+objectifs d'origine serait un plan que personne ne trade, d'où le plan refait en entier, exact, sur moins de jours.
 
 ## Bloc scellé
 

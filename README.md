@@ -336,6 +336,10 @@ Liste, seuils et sorties sont déclarés d'avance : [docs/labo-strategies.md](do
 - Killmode décomposé (n° 6, sans essai) : tranches de gap, d'ATR, de volume des 15 premières minutes et de
   stop touché avant l'entrée, trois comparaisons avec `orb15`, part des gappers présents dans l'univers.
   Killmode et la n° 4 sont jugées sur les jours qui suivent ceux déjà lus quand elles ont été choisies.
+- Confirmation des GO (n° 7) : chaque GO de v1 rejoué deux fois, acheté à l'ouverture ou après la
+  confirmation du direct (repli vers l'entrée, reprise du VWAP, ordre stop valable jusqu'à 11 h 30), sortie
+  à stop fixe ; avec le stop d'origine et avec le plancher du direct (plan refait par le code du direct,
+  sur les jours rejoués depuis la n° 7). Écart « confirmé ou rien » − brut GO par GO, et brut par statut.
 - Diagnostic de v1 : espérance par gap d'ouverture, mode d'entrée, raison de sortie, brut contre net.
 - **Bloc scellé** : le rejeu du 6 avril au 5 octobre 2026 est calculé mais rangé à part, invisible des
   statistiques, du brief, du grade et du validateur (`app/lab/seal.py`). Il sert une seule fois.
