@@ -173,7 +173,12 @@ def outcome(go: dict, bars: list[dict]) -> dict:
     confirmed = filled = None
     if go["status"] == "confirmé":
         after = [b for b in bars if b["t"] > go["confirm_bar"]]
+        # Comme le message du direct : l'ordre non déclenché est annulé à 11 h 30 New York.
+        day = datetime.fromtimestamp(go["confirm_bar"], CAL.NEW_YORK).date()
+        cutoff = datetime.combine(day, LAST_CHECK, CAL.NEW_YORK).timestamp()
         for i, b in enumerate(after):
+            if b["t"] >= cutoff:
+                break
             if b["h"] >= go["trigger"]:
                 filled = max(go["trigger"], b["o"])
                 # bougie du déclenchement : on ne sait pas si le stop vient avant ; il compte s'il est touché
