@@ -18,6 +18,7 @@ from app.core.http import SourceError
 from app.sources import alpaca, kraken, twelvedata
 from app.trading import calendar as CAL
 from app.trading import catalyst as C
+from app.trading import ibkr as IBKR
 from app.trading import plan as P
 from app.trading import score as SC
 from app.trading import signals as S
@@ -322,6 +323,7 @@ async def build_plan(
 
     await LESSONS.apply(plan, daily, cat, now)
     apply_grade(plan, capital, risk_pct, now)
+    await IBKR.attach(plan)  # brackets prêts à saisir, risque fixe en euros
     return plan
 
 
@@ -398,6 +400,7 @@ def plan_text(p: dict) -> str:
         from app.lab import grade as GRADE
 
         lines.append(GRADE.plan_line(p["grade"]))
+    lines += IBKR.lines(p)
     lines.append(f"-# {p['method']}")
     return "\n".join(lines)
 

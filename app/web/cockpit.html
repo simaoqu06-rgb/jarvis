@@ -650,6 +650,17 @@ function scoreHtml(p) {
     ${news.length ? `<div class="small" style="margin-top:8px">${news.map((n) => `<div>${tone[n.tone] || ""} ${safeUrl(n.url) ? `<a href="${esc(safeUrl(n.url))}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a>` : esc(n.title)}</div>`).join("")}</div>` : ""}`;
 }
 
+function ibkrHtml(b) {
+  if (!b) return "";
+  const fx = b.eurusd ? `${b.risk_usd} $ au taux BCE ${b.eurusd.toFixed(4)}` : `${b.risk_usd} $, taux EUR/USD indisponible`;
+  if (!b.quantity) return `<div class="small" style="margin-top:4px">🧾 IBKR · risque ${b.risk_eur} € (${fx}) : ${esc(b.raison)}</div>`;
+  const label = { fixe: "Fixe", degressif: "Dégressif" }, f = b.fees, mine = b.plan, other = mine === "fixe" ? "degressif" : "fixe";
+  const tip = f[other].usd < f[mine].usd ? ` · en ${label[other]} : ${f[other].usd.toFixed(2)} $ (${f[other].r.toFixed(2)} R)` : "";
+  return `<div class="small" style="margin-top:6px">🧾 <b>IBKR · ${b.quantity} actions</b> (${fmt(b.notional_usd)} $) · perte au SL ${b.real_risk_usd.toFixed(2)} $ <span class="muted">(max ${b.risk_eur} € = ${fx})</span>
+    ${b.brackets.map((r, i) => `<div class="muted">Bracket ${i + 1} : <b>${r.quantity}</b> @ entrée ${fmt(b.entry)} · SL ${fmt(b.stop)} · ${esc(r.name)} ${fmt(r.take_profit)}</div>`).join("")}
+    <div class="muted">Commissions estimées (${label[mine]}, ${b.brackets.length} brackets) : ${f[mine].usd.toFixed(2)} $ = ${f[mine].r.toFixed(2)} R${tip} · 1 seul bracket : ${f[mine].un_bracket_usd.toFixed(2)} $</div></div>`;
+}
+
 function planHtml(p) {
   const mark = { true: "✅", false: "❌", null: "➖" }, c = p.checklist;
   const s = p.sizing, g = p.grade;
@@ -660,6 +671,7 @@ function planHtml(p) {
     </div>
     ${scoreHtml(p)}
     <div class="small muted" style="margin-top:4px">Stop ${esc(p.stop_source)}${s ? ` · 💰 risque ${s.risk_pct} % = ${fmt(s.risk_amount)} · taille ${fmt(s.quantity)} (${fmt(s.notional)}) · levier ${s.leverage}×` : ""}</div>
+    ${ibkrHtml(p.ibkr)}
     ${g ? `<div class="small" style="margin-top:4px">🏅 Grade JARVIS <b>${esc(g.grade)}</b> · risque proposé <b>${g.risque_propose} %</b>${g.observation ? " · plan en observation" : ""} <span class="muted">(${esc(g.raison)})</span></div>` : ""}
     <div class="tps">${p.targets.map((x) => `<div class="tp">
       <div class="name">${x.name}</div>
