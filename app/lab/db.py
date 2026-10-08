@@ -137,6 +137,19 @@ CREATE TABLE IF NOT EXISTS derivs (
     symbol TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('funding', 'oi')), t INTEGER NOT NULL, value REAL,
     PRIMARY KEY (symbol, kind, t)
 ) WITHOUT ROWID;
+-- Déclaration n° 8, D1 (archive.py) : actus Finnhub des gappers d'avant 9 h 45 New York et calendrier des
+-- résultats, archivés avant que Finnhub gratuit (~1 an) ne les perde ; aucune route ne les lit.
+CREATE TABLE IF NOT EXISTS gap_news (
+    day TEXT NOT NULL, symbol TEXT NOT NULL, gap_pct REAL, atr_pct REAL, prev_close REAL, open REAL,
+    cutoff_ts INTEGER NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+    news_from TEXT, news_to TEXT, received INTEGER, news TEXT, fetched_at TEXT, note TEXT,
+    PRIMARY KEY (day, symbol)
+);
+CREATE INDEX IF NOT EXISTS gap_news_pending ON gap_news (status, day);
+CREATE TABLE IF NOT EXISTS earnings_days (
+    day TEXT PRIMARY KEY, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, n INTEGER, items TEXT,
+    fetched_at TEXT, note TEXT
+);
 -- Bloc scellé (seal.py) : mêmes tables, jamais lues par les statistiques, la routine ni le grade.
 {trades_sealed}
 {strat}

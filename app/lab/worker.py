@@ -25,6 +25,9 @@ Toutes les ~10 min :
    par le tableau des stratégies crypto), dans le budget derivs_calls de la période.
 9. Déclaration n° 6 : « couverture » (universe.coverage_step), part des actions ouvertes en gap ≥ 4 % avec un
    ATR ≥ 4 % présentes dans l'univers du labo, quelques séances par passage (coverage_days).
+10. Déclaration n° 8, D1 : « archive » (archive.py), actus Finnhub d'avant 9 h 45 des actions en gap, calendrier
+   des résultats et profils, la séance la plus ancienne d'abord (Finnhub gratuit perd une séance par jour),
+   archivés sans être lus, hors séance US, archive_seconds et archive_days par passage.
 Le battement (lab.heartbeat) porte l'étape en cours, affichée par /api/lab/status et !labo.
 Le rejeu couvre JARVIS_LAB_REPLAY_DAYS séances (504 ≈ 2 ans) avant le premier lancement du worker ;
 le direct prend le relais à partir de ce jour-là. JARVIS_LAB_ENABLED=off met le worker en veille.
@@ -36,6 +39,7 @@ import time as clock
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from app.lab import archive as ARC
 from app.lab import catalysts as CAT
 from app.lab import collector as CO
 from app.lab import derivs as DER
@@ -73,11 +77,11 @@ KEY_WARNING_SECONDS = 3600
 # statistiques en cache (secondes), par période.
 LAB2_BUDGET = {
     "nuit": {"moves_days": 30, "news_calls": 40, "rules": 3, "stats_age": 3600, "derivs_calls": 300,
-             "coverage_days": 60},
+             "coverage_days": 60, "archive_seconds": 1200, "archive_days": 40},
     "jour": {"moves_days": 5, "news_calls": 10, "rules": 1, "stats_age": 3 * 3600, "derivs_calls": 100,
-             "coverage_days": 10},
+             "coverage_days": 10, "archive_seconds": 600, "archive_days": 10},
     "seance": {"moves_days": 2, "news_calls": 0, "rules": 0, "stats_age": 6 * 3600, "derivs_calls": 30,
-               "coverage_days": 2},
+               "coverage_days": 2, "archive_seconds": 0, "archive_days": 2},
 }
 _key_warned_at: float | None = None
 
@@ -373,6 +377,8 @@ async def lab2(db: LabDB, now: datetime, collect: bool = True) -> dict:
     await step("mouvements", lambda: CAT.backfill_moves(db, now, budget["moves_days"]))
     await step("potentiel", lambda: PO.step(db))
     await step("couverture", lambda: U.coverage_step(db, budget["coverage_days"]))
+    await step("archive", lambda: ARC.step(db, now, budget["archive_seconds"], collect,
+                                                budget["archive_days"]))
     if collect:
         await step("derives", lambda: DER.collect(db, now, budget["derivs_calls"]))
     if collect and not CO.CAL.session_open(now):

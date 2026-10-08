@@ -117,6 +117,38 @@ COVERAGE_JOB = "killcov:stock"
 PRICE_BUCKETS = ((0.0, 1.0, "< 1 $"), (1.0, 5.0, "1-5 $"), (5.0, 20.0, "5-20 $"), (20.0, 1e18, "≥ 20 $"))
 
 
+def gappers(conn: sqlite3.Connection, day: date, gap_min: float = ST.KILL_GAP_PCT,
+            atr_min: float = ST.KILL_ATR_PCT) -> list[dict] | None:
+    """Lecture seule. Actions de toute la base (journalier Alpaca, pas seulement l'univers du labo) ouvertes le
+    jour `day` en gap ≥ `gap_min` % avec un ATR de Wilder 14 j ≥ `atr_min` % (séances d'avant, 15 au moins) :
+    [{symbol, gap_pct, atr_pct, prev_close, open}]. None si le journalier de la séance n'est pas en base."""
+    cutoff = CO.ny_midnight(day)
+    series: dict[str, list[tuple]] = {}
+    for symbol, *bar in conn.execute(
+            "SELECT symbol, ts, o, h, l, c FROM bars WHERE market = 'stock' AND tf = 1440 AND ts >= ? AND ts < ? "
+            "ORDER BY symbol, ts", (cutoff - 40 * 86400, cutoff + 86400)):
+        series.setdefault(symbol, []).append(bar)
+    out: list[dict] = []
+    seen_day = False
+    for symbol, rows in series.items():
+        if CO.ny_day(rows[-1][0]) != day:
+            continue
+        seen_day = True
+        before, today = rows[:-1], rows[-1]
+        prev = before[-1][4] if before else 0
+        if len(before) <= ST.ATR_LEN or prev <= 0:
+            continue
+        gap = (today[1] / prev - 1) * 100
+        if gap < gap_min:
+            continue
+        a = ST.atr([{"h": h, "l": lo, "c": c} for _, _, h, lo, c in before])[-1]
+        if a is None or a / prev * 100 < atr_min:
+            continue
+        out.append({"symbol": symbol, "gap_pct": round(gap, 3), "atr_pct": round(a / prev * 100, 3),
+                    "prev_close": prev, "open": today[1]})
+    return out if seen_day else None
+
+
 def killmode_coverage(conn: sqlite3.Connection, days: list[date]) -> dict[str, dict]:
     """Lecture seule. Pour chaque séance D : actions de toute la base (journalier Alpaca) ouvertes en gap
     ≥ KILL_GAP_PCT avec un ATR de Wilder 14 j ≥ KILL_ATR_PCT (séances d'avant D, 15 au moins), et combien
@@ -124,32 +156,17 @@ def killmode_coverage(conn: sqlite3.Connection, days: list[date]) -> dict[str, d
     Une séance dont le journalier n'est pas encore en base est sautée."""
     out: dict[str, dict] = {}
     for day in days:
-        cutoff = CO.ny_midnight(day)
-        series: dict[str, list[tuple]] = {}
-        for symbol, *bar in conn.execute(
-                "SELECT symbol, ts, o, h, l, c FROM bars WHERE market = 'stock' AND tf = 1440 AND ts >= ? AND ts < ? "
-                "ORDER BY symbol, ts", (cutoff - 40 * 86400, cutoff + 86400)):
-            series.setdefault(symbol, []).append(bar)
+        found = gappers(conn, day)
+        if found is None:
+            continue
         listed = {s for (s,) in conn.execute("SELECT symbol FROM universe WHERE market = 'stock' AND day = ?",
                                              (day.isoformat(),))}
         counts = {label: [0, 0] for _, _, label in PRICE_BUCKETS}
-        seen_day = False
-        for symbol, rows in series.items():
-            if CO.ny_day(rows[-1][0]) != day:
-                continue
-            seen_day = True
-            before, today = rows[:-1], rows[-1]
-            prev = before[-1][4] if before else 0
-            if len(before) <= ST.ATR_LEN or prev <= 0 or (today[1] / prev - 1) * 100 < ST.KILL_GAP_PCT:
-                continue
-            a = ST.atr([{"h": h, "l": lo, "c": c} for _, _, h, lo, c in before])[-1]
-            if a is None or a / prev * 100 < ST.KILL_ATR_PCT:
-                continue
-            cell = counts[next(label for lo, hi, label in PRICE_BUCKETS if lo <= prev < hi)]
+        for g in found:
+            cell = counts[next(label for lo, hi, label in PRICE_BUCKETS if lo <= g["prev_close"] < hi)]
             cell[0] += 1
-            cell[1] += symbol in listed
-        if seen_day:
-            out[day.isoformat()] = counts
+            cell[1] += g["symbol"] in listed
+        out[day.isoformat()] = counts
     return out
 
 
