@@ -156,8 +156,19 @@ async def snapshots(symbols: list[str], feed: str = "iex") -> dict[str, dict]:
         daily = s.get("dailyBar") or {}
         trade = s.get("latestTrade") or {}
         out[symbol] = {"price": trade.get("p") or daily.get("c"), "prev_close": prev.get("c"),
-                       "prev_volume": prev.get("v"), "day_volume": daily.get("v"), "as_of": trade.get("t")}
+                       "prev_volume": prev.get("v"), "day_volume": daily.get("v"), "as_of": trade.get("t"),
+                       "open": daily.get("o"), "open_day": _ny_day(daily.get("t"))}
     return out
+
+
+def _ny_day(stamp: str | None) -> str | None:
+    """Jour de New York d'un horodatage Alpaca (la bougie du jour reste celle de la veille avant le 1er échange)."""
+    if not stamp:
+        return None
+    try:
+        return datetime.fromisoformat(stamp.replace("Z", "+00:00")).astimezone(NEW_YORK).date().isoformat()
+    except ValueError:
+        return None
 
 
 async def most_actives(top: int = 50) -> list[str]:
