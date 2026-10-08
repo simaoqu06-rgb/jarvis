@@ -237,6 +237,7 @@ def text(result: dict) -> str:
             + (f", ~{T.duration_fr(t['minutes_median'])})" if t["minutes_median"] else ")")
             for t in plan["targets"])
         lines.append(f"entrée {T._num(plan['entry'])} · SL {T._num(plan['stop'])} ({plan['stop_pct']:+.1f} %) · {tps}")
+        lines += T.confirmation_lines(plan)
         if p.get("potentiel"):
             lines.append(p["potentiel"])
         news = (plan.get("catalyst") or {}).get("news") or []

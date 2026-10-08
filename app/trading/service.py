@@ -294,6 +294,30 @@ def plan_from_bars(
     return plan
 
 
+# Plancher du stop en direct (choix de Simão, 2026-10-08) : un stop calculé sur bougies de 15 min peut
+# tomber à quelques cents (FRSH : 9 cents pour 0,52 $ d'amplitude journalière), dans le bruit, et la
+# taille qui en découle gonfle les frais. Le labo (plan_from_bars) garde la règle d'origine.
+STOP_FLOOR_DAILY_ATR = 1 / 3
+
+
+def _floor_stop(bars: list[dict], daily: list[dict] | None, market: str, side: str, entry: float | None,
+                targets: list[float] | None, now: datetime, levels: tuple) -> tuple:
+    """Éloigne le stop à au moins 1/3 de l'ATR journalier ; objectifs recalculés sur ce nouveau risque."""
+    lv = levels[0]
+    try:
+        daily_atr = P.atr(daily[:-1]) if daily else None
+    except ValueError:
+        daily_atr = None
+    floor = STOP_FLOOR_DAILY_ATR * daily_atr if daily_atr else None
+    if not floor or lv.risk >= floor:
+        return levels
+    sign = 1 if side == "long" else -1
+    new = plan_levels(bars, market, side, entry, lv.entry - sign * floor, targets, now)
+    new[0].stop_source = (f"{lv.stop_source}, éloigné à 1/3 de l'ATR journalier "
+                          f"({_num(P.round_price(daily_atr))}) contre le bruit, au lieu de {_num(lv.stop)}")
+    return new
+
+
 async def build_plan(
     symbol: str, market: str, side: str = "long", entry: float | None = None,
     stop: float | None = None, targets: list[float] | None = None, now: datetime | None = None,
@@ -312,6 +336,8 @@ async def build_plan(
     # Niveaux d'abord : un plan impossible ne coûte ni bougies journalières ni appels Finnhub.
     levels = plan_levels(bars, market, side, entry, stop, targets, now)
     daily = await _optional_candles(symbol, market, 1440, source)
+    if stop is None:
+        levels = _floor_stop(bars, daily, market, side, entry, targets, now, levels)
     h4 = await _optional_candles(symbol, market, 240, source)
     if market == "stock" and cat is None:
         cat = await C.safe_check(symbol, now)
@@ -372,6 +398,45 @@ def score_lines(p: dict) -> list[str]:
     return lines
 
 
+CONFIRM_WAIT_MIN = 15  # actions : pas d'entrée pendant le premier quart d'heure (range d'ouverture)
+
+
+def confirmation_lines(p: dict, now: datetime | None = None) -> list[str]:
+    """Ce qu'il faut voir avant d'entrer, et ce qui annule le plan : le prix du plan vieillit
+    (pré-ouverture, bougies en retard), une condition observable sur le graphique reste valable.
+
+    Repli vers l'entrée sans clôture au-delà du stop, puis reprise du VWAP sur une bougie 5 min :
+    on entre par un ordre stop au-delà de cette bougie. Si le TP1 est touché avant, on ne court pas
+    après. Lecture seule : ne change ni les niveaux ni la note.
+    """
+    if now is None:
+        now = datetime.fromisoformat(p["created_at"]) if p.get("created_at") else datetime.now(timezone.utc)
+    if p.get("entry") is None or p.get("stop") is None:
+        return []
+    long = p.get("side", "long") == "long"
+    stock = p.get("market", "stock") == "stock"  # le scanner ne voit que des actions à l'achat
+    entry, stop = _num(p["entry"]), _num(p["stop"])
+    tp1 = _num(p["targets"][0]["price"]) if p.get("targets") else None
+    bar = "5 min" if stock else "15 min"
+    lines = []
+    if stock:
+        start = CAL.current_or_next_session(now)[0] + timedelta(minutes=CONFIRM_WAIT_MIN)
+        if now < start:
+            lines.append(f"⏱️ Pas d'entrée avant {time_fr(start, now)} (Paris), le temps que le range d'ouverture se forme.")
+    if long:
+        lines.append(f"👀 **Confirmation** : repli vers {entry} sans clôture {bar} sous {stop}, puis une bougie {bar} "
+                     f"qui clôture au-dessus du VWAP → stop d'achat 1 tick au-dessus de son plus haut.")
+        cancel = f"clôture {bar} sous {stop}"
+    else:
+        lines.append(f"👀 **Confirmation** : rebond vers {entry} sans clôture {bar} au-dessus de {stop}, puis une bougie "
+                     f"{bar} qui clôture sous le VWAP → stop de vente 1 tick sous son plus bas.")
+        cancel = f"clôture {bar} au-dessus de {stop}"
+    if tp1:
+        cancel += f", ou TP1 {tp1} touché avant l'entrée (ne pas courir après)"
+    lines.append(f"❌ **Annulé** : {cancel}.")
+    return lines
+
+
 def plan_text(p: dict) -> str:
     """Le plan en clair pour Discord."""
     arrow = "🟢 LONG" if p["side"] == "long" else "🔴 SHORT"
@@ -388,6 +453,7 @@ def plan_text(p: dict) -> str:
             f"🎯 {t['name']} {_num(t['price'])} ({t['pct']:+.2f} %, {t['r_multiple']:g} R, {t['source']}) · "
             f"{t['eta_text']} · touché avant le stop {t['hit_rate']:.0%}, espérance {t['expectancy_r']:+.2f} R"
         )
+    lines += confirmation_lines(p)
     marks = {True: "✅", False: "❌", None: "➖"}
     lines.append(" · ".join(f"{marks[i['ok']]} {i['label']}" for i in check["items"]))
     if p.get("sizing"):
