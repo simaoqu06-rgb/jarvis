@@ -10,6 +10,9 @@ EmperorBTC (stop sous la structure, ventes sur les résistances, renfort sur un 
 si le plan est GO et que le R/R sur le 2e objectif tient (rr_min, avec la tolérance) ; sinon il donne les ordres
 conditionnels dont le R/R tient ; sinon il attend. Un côté contre la tendance de fond n'est jamais proposé
 (EmperorBTC : tradez dans le sens du marché), ni aucune entrée avant des résultats trimestriels proches.
+Sous l'avis, le grade de JARVIS (risque réel proposé, 0 % tant que la méthode n'a rien prouvé) et, pour les
+entrées sur repli et sur cassure, ce que le labo a mesuré sur les stratégies les plus proches face à un témoin
+aléatoire (lab_entries) : avis externe de GPT du 2026-10-08, ces prix sont ceux de la méthode, pas des prédictions.
 
 `!positions`, `!position NVDA 132.5` et le message 30 min avant la clôture US : pour chaque position, les ordres
 à poser (une vente par part sur les prochaines résistances, stop suiveur sous la structure, renforts si la
@@ -25,6 +28,9 @@ position gagne) et la décision du moment :
 La règle « garder jusqu'au prochain objectif perd en moyenne → SORTIR » de la première version est retirée
 (2026-10-08) : elle ne comparait que « tout garder avec le stop à l'entrée » et « tout vendre », sans vente
 partielle ni stop suiveur, et parlait en moyennes au lieu de donner des prix.
+Un renfort se juge sur toute la position : au stop qui le suit, ce que perd chaque part ajoutée et ce que devient
+chaque part déjà détenue. Le labo ne teste pas les renforts ; la note qui les suit dit ce qu'il a mesuré sur les
+entrées du même type.
 Ces règles ne sont pas validées par le labo : chaque conseil donné sur un trade suivi est gardé (un par trade et
 par jour) et comparé à ce que la position a fait ensuite (`!positions` dit combien étaient justes).
 """
@@ -53,8 +59,14 @@ KIND_FR = {"maintenant": "maintenant", "repli": "sur repli", "cassure": "sur cas
 ORDER_FR = {("long", "maintenant"): "achat au marché", ("long", "repli"): "achat limite", ("long", "cassure"): "achat stop",
             ("short", "maintenant"): "vente au marché", ("short", "repli"): "vente limite",
             ("short", "cassure"): "vente stop"}
-LAB_NOTE = ("-# Entrées et renforts EmperorBTC : le labo n'a pas encore trouvé d'entrée sur repli ou sur cassure "
-            "qui batte le hasard ; ce sont les prix de la méthode, pas une prédiction.")
+# Stratégies du labo v2 les plus proches des entrées et renforts proposés (app/lab/strategies.py) : achat sur repli
+# vers un support (rebond confirmé, pullback) et achat sur cassure (range d'ouverture par ordre stop, cassure d'une
+# zone ou du plus haut de la veille puis retest). Leur écart au témoin aléatoire (même stop, mêmes objectifs, entrée
+# au hasard) dit si ce type d'entrée a un avantage. Avis externe de GPT (2026-10-08) : sans cet avantage, ce sont
+# les prix de la méthode, pas des prédictions, et JARVIS doit dire ce que le labo a mesuré.
+LAB_KIN = {"repli": ("rebond_confirme", "pullback"),
+           "cassure": ("orb15", "orb30", "cassure_zone_retest", "cassure_zone_retest_15m", "cassure_zone_retest_1h",
+                       "cassure_retest")}
 
 
 def _fr(x: float, digits: int = 2) -> str:
@@ -233,6 +245,68 @@ def note_line(m: dict | None) -> str:
             "elle ne prédit rien.")
 
 
+def lab_entries(market: str, path: str | None = None) -> dict | None:
+    """Pour chaque type d'entrée (repli, cassure), la version la plus favorable parmi les stratégies proches que le
+    labo v2 a mesurées sur ce marché (tableau en cache, lecture seule, sans le bloc scellé) : une version prouvée
+    s'il y en a une, sinon celle qui bat le plus son témoin aléatoire. None sans base ou sans tableau."""
+    from app.lab import db as lab_db  # import tardif : le labo importe le moteur de plans
+    from app.lab import strat_stats as STRAT
+
+    conn = lab_db.open_readonly(path) if path else lab_db.open_readonly()
+    if conn is None:
+        return None
+    try:
+        rep = STRAT.cached(conn)
+    finally:
+        conn.close()
+    if not rep:
+        return None
+    items = (rep.get("strategies") or {}).get(market) or {}
+    out: dict = {"seuil": (rep.get("declaration") or {}).get("z_candidate")}
+    for kind, names in LAB_KIN.items():
+        found = [it for name, it in items.items() if name in names and (it.get("temoin") or {}).get("z") is not None]
+        if not found:
+            continue
+        best = max(found, key=lambda it: (bool(it.get("candidate")), it["temoin"]["z"]))
+        ci = best.get("ic95_ibkr") or best.get("ic95")
+        out[kind] = {"versions": len(found), "nom": best["nom"], "z": best["temoin"]["z"], "jours": best.get("jours"),
+                     "prouvee": bool(best.get("candidate")), "perd": bool(ci and ci[1] < 0)}
+    return out
+
+
+def entries_note(lab: dict | None, kinds: set[str], market: str, adds: bool = False) -> str:
+    """Ce que valent les entrées (ou les renforts) sur repli et sur cassure : les prix de la méthode, et pour
+    chaque type la version la plus favorable testée au labo face au hasard (comparaison, pas de moyenne)."""
+    head = ("-# Renforts : prix de la méthode EmperorBTC, jamais testés au labo comme renforts" if adds else
+            "-# Entrées : prix de la méthode EmperorBTC, pas une prédiction")
+    if lab is None:
+        return head + " ; labo indisponible, aucune mesure face au hasard."
+    parts, days = [], []
+    for kind in ("repli", "cassure"):
+        if kind not in kinds:
+            continue
+        k = lab.get(kind)
+        if not k:
+            parts.append(f"{KIND_FR[kind]} : pas encore mesuré")
+            continue
+        days.append(k["jours"] or 0)
+        if k["prouvee"]:
+            parts.append(f"{KIND_FR[kind]} : « {k['nom']} » est prouvée ✅")
+            continue
+        if k["z"] <= -2:
+            verdict = "pire que le hasard"
+        elif k["z"] < 2:
+            verdict = "pas mieux que le hasard"
+        else:
+            verdict = "mieux que le hasard, sans preuve" + (f" (il faut z {lab['seuil']:g})" if lab.get("seuil") else "")
+        best = f"meilleure des {k['versions']} versions testées" if k["versions"] > 1 else "version testée"
+        parts.append(f"{KIND_FR[kind]} : {verdict}{', et perd après frais' if k['perd'] else ''} "
+                     f"({best}, z {k['z']:+.1f})")
+    where = f"{'actions' if market == 'stock' else 'crypto'}" + (f", {max(days)} j rejoués" if days else "")
+    return (f"{head}. {'Comme entrées, au' if adds else 'Au'} labo ({where}), " + " ; ".join(parts)
+            + ". Détail : `!strategies`.")
+
+
 async def opinion(symbol: str, market: str, now: datetime | None = None) -> dict:
     """Calcule les deux plans (long et short), la carte des niveaux et les entrées en prix de chaque côté.
     PlanError si aucun plan n'est possible."""
@@ -257,8 +331,9 @@ async def opinion(symbol: str, market: str, now: datetime | None = None) -> dict
         p["entries"] = L.entries(m, p["side"], price, p["stop"], rr_floor())
     view = decide(plans)
     lab = await asyncio.to_thread(lab_measure, mkt, sym)
+    kin = await asyncio.to_thread(lab_entries, mkt)
     return view | {"symbol": sym, "market": mkt, "price": price, "plans": plans, "errors": errors, "lab": lab,
-                   "catalyst": cat, "created_at": now.isoformat(timespec="seconds")}
+                   "lab_entries": kin, "catalyst": cat, "created_at": now.isoformat(timespec="seconds")}
 
 
 def opinion_text(o: dict) -> str:
@@ -273,10 +348,17 @@ def opinion_text(o: dict) -> str:
                 " : le premier exécuté annule l'autre"
     lines.append(head)
     lines += [f"• {r}" for r in o["reasons"]]
+    kinds = set()
     for p in o["plans"]:
         if not against_trend(p):
             side = "Long" if p["side"] == "long" else "Short"
             lines += [f"{side} · {entry_line(x)}{'' if x['ok'] else ' (R/R trop court)'}" for x in p["entries"]]
+            kinds |= {x["kind"] for x in p["entries"] if x["kind"] != "maintenant"}
+    grade = next((p["grade"] for p in o["plans"] if p.get("grade")), None)
+    if grade:  # le risque réel que le grade permet, comme sous un plan (0 % tant que la méthode n'a rien prouvé)
+        from app.lab import grade as GRADE  # import tardif : le labo importe le moteur de plans
+
+        lines.append(GRADE.plan_line(grade))
     for p in o["plans"]:
         lines.append(f"-# Checklist EmperorBTC {_side(p['side'])} : {p['checklist']['verdict']} "
                      f"({p['checklist']['score']}/{p['checklist']['max_score']}) · note {p['score']['composite']:g}/10 "
@@ -290,8 +372,8 @@ def opinion_text(o: dict) -> str:
         now_entry = orders[0]["kind"] == "maintenant"
         lines.append(f"-# {'Pour le suivre' if now_entry else 'Une fois exécuté'} : "
                      + " ou ".join(take_command(sym, e, with_entry=not now_entry) for e in orders))
-    if any(x["kind"] != "maintenant" for p in o["plans"] for x in p["entries"]):
-        lines.append(LAB_NOTE)
+    if kinds:
+        lines.append(entries_note(o.get("lab_entries"), kinds, o["market"]))
     if o["market"] == "stock":
         lines.append(f"-# Tout sur la société : `!societe {sym}`")
     return "\n".join(lines)
@@ -446,8 +528,18 @@ def advise(trade: dict, price: float, bars: list[dict], daily: list[dict] | None
     return a
 
 
-def add_line(c: dict) -> str:
+def _signed(x: float) -> str:
+    return "0" if abs(x) < 1e-9 else f"{'+' if x > 0 else '-'}{S._num(abs(x))}"  # bruit de calcul : zéro
+
+
+def add_line(c: dict, opened: float, market: str) -> str:
+    """Un renfort en prix, jugé sur toute la position (avis de GPT, 2026-10-08) : au stop qui suivra le renfort,
+    ce que perd chaque part ajoutée et ce que devient chaque part déjà détenue."""
     buy = "achat" if c["side"] == "long" else "vente"
+    unit = "action" if market == "stock" else "unité"
+    held = (c["stop"] - opened) * (1 if c["side"] == "long" else -1)  # par part déjà détenue, au stop
+    risk = (f" · au stop : {_signed(-abs(c['entry'] - c['stop']))} par {unit} ajoutée, {_signed(held)} par {unit} "
+            "déjà détenue")
     if c["kind"] == "repli":
         word = "support" if c["side"] == "long" else "résistance"
         text = f"sur repli : {buy} limite **{S._num(c['entry'])}** ({word} {c['zone'].label()}), même stop"
@@ -456,7 +548,7 @@ def add_line(c: dict) -> str:
                 f"{c['zone'].label()})")
         if c.get("new_stop") is not None:
             text += f", puis stop de toute la position à {S._num(c['new_stop'])} (sous la zone cassée)"
-    return f"• Renforcer {text} · R/R {' / '.join(f'{x:g}' for x in c['rr'])}"
+    return f"• Renforcer {text} · R/R {' / '.join(f'{x:g}' for x in c['rr'])}{risk}"
 
 
 def advice_text(a: dict) -> str:
@@ -479,9 +571,9 @@ def advice_text(a: dict) -> str:
         else:
             stop += " : garde-le, la structure ne le remonte pas encore"
         lines.append(stop + " ; ne l'éloigne jamais.")
-        lines += [add_line(c) for c in a["adds"]]
+        lines += [add_line(c, a["entry"], a["market"]) for c in a["adds"]]
         if a["adds"]:
-            lines.append(LAB_NOTE)
+            lines.append(entries_note(a.get("lab_entries"), {c["kind"] for c in a["adds"]}, a["market"], adds=True))
     lines += [f"-# {f}" for f in a["facts"]]
     return "\n".join(lines)
 
@@ -544,7 +636,14 @@ async def advise_trade(trade: dict, now: datetime | None = None) -> dict:
     """Conseil sur un trade suivi (prix : le dernier lu par le suivi des TP/SL)."""
     now = now or datetime.now(timezone.utc)
     bars, daily, cat = await _inputs(trade["symbol"], trade["market"], now)
-    return advise(trade, trade["last_price"], bars, daily, cat, now)
+    return await _with_lab(advise(trade, trade["last_price"], bars, daily, cat, now))
+
+
+async def _with_lab(a: dict) -> dict:
+    """Ce que le labo dit des entrées proches, lu seulement quand le conseil propose des renforts."""
+    if a["adds"]:
+        a["lab_entries"] = await asyncio.to_thread(lab_entries, a["market"])
+    return a
 
 
 async def advise_book(trades: list[dict], now: datetime | None = None) -> list[dict]:
@@ -578,7 +677,7 @@ async def advise_position(symbol: str, market: str, side: str, entry: float, sto
     ref = stop if stop is not None else P._invalidation(m["bars"][:-1], side, entry, m["atr"])[0]
     trade = {"symbol": symbol, "market": market, "side": side, "entry": entry, "stop": ref,
              "stop_current": stop, "targets": [], "targets_hit": 0}
-    return advise(trade, price, m["bars"], daily, cat, now, m)
+    return await _with_lab(advise(trade, price, m["bars"], daily, cat, now, m))
 
 
 def closing_due(now: datetime, last_day: str | None) -> bool:

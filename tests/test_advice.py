@@ -235,11 +235,79 @@ def test_mesure_du_labo_lit_la_table_des_trades(tmp_path):
     assert A.lab_measure("stock", "NVDA", str(tmp_path / "absente.db")) is None
 
 
+def strategy(nom, z, ci, days=64, candidate=False):
+    return {"nom": nom, "jours": days, "ic95": ci, "ic95_ibkr": ci, "candidate": candidate, "temoin": {"z": z}}
+
+
+def lab_table(tmp_path, name, stock, crypto=None):
+    """Base du labo réduite au tableau des stratégies en cache (comme l'écrit le worker)."""
+    from app.lab import stats as STATS
+
+    path = tmp_path / f"{name}.db"
+    conn = sqlite3.connect(path)
+    conn.executescript("CREATE TABLE stats_cache (key TEXT PRIMARY KEY, created_at TEXT NOT NULL, trades INTEGER, "
+                       "data TEXT NOT NULL);")
+    STATS.store(conn, "strategies", {"declaration": {"numero": 3, "z_candidate": 3.24},
+                                     "strategies": {"stock": stock, "crypto": crypto or {}}}, 10, "2026-10-08T00:00:00")
+    conn.commit()
+    conn.close()
+    return str(path)
+
+
+def test_note_des_entrees_dit_ce_que_le_labo_a_mesure_face_au_hasard(tmp_path):
+    path = lab_table(tmp_path, "actions", {
+        "rebond_confirme": strategy("Rebond sur une zone", -1.64, [-0.22, -0.07]),
+        "pullback": strategy("Pullback", -3.04, [-0.27, -0.12]),
+        "orb15": strategy("Cassure du range d'ouverture (15 min)", 1.49, [-0.13, 0.05]),
+        "cassure_retest": strategy("Cassure de la veille puis retest", -3.58, [-0.43, -0.29]),
+        "v1": strategy("v1", 5.0, [0.1, 0.2])})  # pas une entrée sur repli ni sur cassure
+    lab = A.lab_entries("stock", path)
+    assert lab["repli"] == {"versions": 2, "nom": "Rebond sur une zone", "z": -1.64, "jours": 64, "prouvee": False,
+                            "perd": True}
+    assert lab["cassure"]["versions"] == 2 and lab["cassure"]["z"] == 1.49 and not lab["cassure"]["perd"]
+    note = A.entries_note(lab, {"repli", "cassure"}, "stock")
+    assert note.startswith("-# Entrées : prix de la méthode EmperorBTC, pas une prédiction. Au labo (actions, 64 j")
+    assert ("sur repli : pas mieux que le hasard, et perd après frais (meilleure des 2 versions testées, z -1.6)"
+            in note and "sur cassure : pas mieux que le hasard (meilleure des 2 versions testées, z +1.5)" in note)
+    assert "Renforts : prix de la méthode EmperorBTC, jamais testés au labo comme renforts. Comme entrées" in \
+        A.entries_note(lab, {"cassure"}, "stock", adds=True)
+    no_average(note)
+    # Pire que le hasard, mieux sans preuve, prouvée : la version la plus favorable de chaque type décide.
+    lab = A.lab_entries("crypto", lab_table(tmp_path, "crypto", {}, {
+        "pullback": strategy("Pullback", -2.5, [-0.6, -0.3], 62),
+        "cassure_zone_retest": strategy("Cassure d'une zone puis retest", 2.9, [-0.85, -0.56], 49)}))
+    note = A.entries_note(lab, {"repli", "cassure"}, "crypto")
+    assert "(crypto, 62 j rejoués), sur repli : pire que le hasard, et perd après frais" in note
+    assert "sur cassure : mieux que le hasard, sans preuve (il faut z 3.24), et perd après frais" in note
+    lab = A.lab_entries("stock", lab_table(tmp_path, "prouvee", {
+        "orb30": strategy("ORB 30", 3.5, [0.02, 0.2], candidate=True), "orb15": strategy("ORB 15", 3.9, [-0.1, 0.1])}))
+    assert "sur cassure : « ORB 30 » est prouvée ✅" in A.entries_note(lab, {"cassure", "repli"}, "stock")
+    assert "sur repli : pas encore mesuré" in A.entries_note(lab, {"cassure", "repli"}, "stock")
+    assert A.lab_entries("stock", str(tmp_path / "absente.db")) is None
+    assert "labo indisponible, aucune mesure face au hasard" in A.entries_note(None, {"repli"}, "stock")
+
+
+def test_renfort_juge_sur_toute_la_position():
+    zone = L.Zone(282.9, 283.3, ["creux 15 min du 7 oct."], 2, True)
+    repli = {"kind": "repli", "side": "long", "entry": 283.5, "stop": 278.89, "zone": zone, "rr": [1.2, 2.3, 4.0]}
+    assert A.add_line(repli, 281.0, "stock").endswith(
+        "· au stop : -4.61 par action ajoutée, -2.11 par action déjà détenue")
+    cassure = {"kind": "cassure", "side": "long", "entry": 287.19, "stop": 285.56, "new_stop": 285.56, "zone": zone,
+               "rr": [2.9, 7.8, 22.6]}
+    line = A.add_line(cassure, 281.0, "stock")
+    assert "puis stop de toute la position à 285.56" in line and line.endswith(
+        "au stop : -1.63 par action ajoutée, +4.56 par action déjà détenue")
+    short = {"kind": "repli", "side": "short", "entry": 95.0, "stop": 100.0, "zone": zone, "rr": [1, 2, 3]}
+    assert A.add_line(short, 100.0, "crypto").endswith("au stop : -5 par unité ajoutée, 0 par unité déjà détenue")
+
+
 async def test_avis_complet_sur_des_bougies(monkeypatch):
     hourly = wave(3600, n=500)
 
     async def build(symbol, market, side, entry=None, stop=None, targets=None, now=None, cat=None, **kw):
-        return S.plan_from_bars(symbol, market, side, hourly, None, None, now, cat)
+        p = S.plan_from_bars(symbol, market, side, hourly, None, None, now, cat)
+        return p | {"grade": {"grade": "F", "risque_propose": 0.0, "observation": True,
+                              "raison": "grade F : pas de capital réel tant que la méthode n'est pas au moins D"}}
 
     async def candles(symbol, market, interval, *a, **k):
         return hourly
@@ -251,12 +319,16 @@ async def test_avis_complet_sur_des_bougies(monkeypatch):
     monkeypatch.setattr(S, "candles", candles)
     monkeypatch.setattr(S, "_optional_candles", nothing)
     monkeypatch.setattr(A, "lab_measure", lambda market, symbol: None)
+    monkeypatch.setattr(A, "lab_entries", lambda market: None)
     o = await A.opinion("btc", "crypto", NOW)
     assert len(o["plans"]) == 2 and all(p["entries"] for p in o["plans"])
     assert o["decision"].startswith(("ENTRER", "LONG", "SHORT", "ATTENDRE"))
     text = A.opinion_text(o)
     assert text.startswith("🧭 **Avis de JARVIS sur BTC**") and "Long · Maintenant : achat au marché" in text
     assert "Short · " in text and "R/R" in text and "Labo indisponible" in text
+    assert "🏅 Grade JARVIS **F** · risque proposé **0 %** : plan en observation" in text
+    shown = any(x["kind"] != "maintenant" for p in o["plans"] if not A.against_trend(p) for x in p["entries"])
+    assert shown == ("-# Entrées : prix de la méthode EmperorBTC, pas une prédiction ; labo indisponible" in text)
     no_average(text)
 
 

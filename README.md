@@ -353,7 +353,9 @@ zone cassée), stops entre 1 et 3 ATR. JARVIS entre maintenant si le plan est GO
 tient (`rr_min` moins la tolérance), sinon il donne les ordres conditionnels qui tiennent (en groupe OCA chez
 IBKR), sinon il attend. Jamais contre la tendance de fond, jamais à moins de 48 h de résultats, pas de long
 avec une augmentation de capital dans les actus. La commande `!prends` à taper une fois l'ordre exécuté est
-jointe.
+jointe, avec le grade de JARVIS (risque réel proposé : 0 % tant que la méthode n'a rien prouvé). Sous les
+entrées sur repli ou sur cassure (et sous les renforts), une note dit ce que le labo a mesuré sur les stratégies
+les plus proches face au témoin aléatoire (`!strategies`) : ce sont les prix de la méthode, pas des prédictions.
 
 `!position NVDA 132.5` (ou `GET /api/trading/position?symbol=NVDA&entry=132.5`), `!positions`, le bouton
 « Que faire ? » du cockpit, `GET /api/trading/advice` et le message 30 min avant la clôture US
@@ -366,6 +368,8 @@ jointe.
 - si la position gagne, les **renforts** EmperorBTC (« ajout sur un retest, ajout lors de la rupture swing ») :
   sur repli vers un support au-dessus du stop et du prix d'entrée (jamais pour baisser son prix moyen), ou
   sur cassure de la prochaine résistance, le stop de toute la position passant alors sous la zone cassée ;
+  chacun est jugé sur toute la position : au stop qui le suit, ce que perd chaque part ajoutée et ce que
+  devient chaque part déjà détenue ;
 
 et la décision du moment :
 
