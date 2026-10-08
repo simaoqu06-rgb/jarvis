@@ -207,3 +207,18 @@ def test_regle_garder_sur_le_regime_sans_spy_ne_vide_pas_le_scanner():
     spy = daily_bars(400, date(2026, 10, 6), start=400, step=-0.05)
     out = LIVE.verdict_for(fake_plan("BBB"), None, daily, spy, NOW, Settings(None), champ)
     assert out["garde"] is False and "haussier seulement" in out["regles"]
+
+
+async def test_scanner_montre_le_potentiel_plus_10(champ_file, scan_env, monkeypatch, tmp_path):
+    """Lot B : sous chaque plan, la part des séances du labo au même gap qui ont touché +8 % (mesure seule)."""
+    from app.lab import potentiel as PO
+
+    path = tmp_path / "lab_potentiel.json"
+    path.write_text(json.dumps({"par_gap": {"gap +2 à +5 %": {"n": 120, "zone_pct": 9.2, "plus10_pct": 4.1}}}),
+                    encoding="utf-8")
+    monkeypatch.setenv("JARVIS_LAB_POTENTIEL", str(path))
+    PO._cache.update(key=None, data=None)
+    result = await scanner.scan(NOW, Settings(None), save=False)
+    assert result["picks"] and all(p["potentiel"] for p in result["picks"])   # gap de pré-ouverture +2 %
+    assert ("🎯 Potentiel +10 : 9,2 % des séances à gap +2 à +5 % ont touché +8 % depuis l'ouverture "
+            "(4,1 % +10 %), sur 120 séances du labo") in scanner.text(result)

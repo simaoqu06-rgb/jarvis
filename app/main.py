@@ -29,6 +29,7 @@ from app.lab import method as lab_method
 from app.lab import morning as lab_morning
 from app.lab import page as lab_page
 from app.lab import stats as lab_stats
+from app.lab import potentiel as lab_potentiel
 from app.lab import strat_stats as lab_strategies
 from app.lab import status as lab_status
 from app.lab import summary as lab_summary
@@ -722,6 +723,17 @@ def lab_strategies_get():
     conn = _lab_conn()
     try:
         return lab_strategies.cached(conn) or lab_strategies.report(conn)
+    finally:
+        conn.close()
+
+
+@app.get("/api/lab/potentiel", dependencies=[Depends(lab_key)])
+def lab_potentiel_get():
+    """Potentiel +10 : part des séances qui touchent +8 % (et +10 %) depuis l'ouverture selon le gap, et
+    fiches catalyseurs classées par type. Mesure seulement. Cache du worker, sinon calcul direct."""
+    conn = _lab_conn()
+    try:
+        return lab_potentiel.cached(conn) or lab_potentiel.report(conn)
     finally:
         conn.close()
 

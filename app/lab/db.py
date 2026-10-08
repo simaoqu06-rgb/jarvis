@@ -130,6 +130,11 @@ CREATE TABLE IF NOT EXISTS grades (
     id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, market TEXT NOT NULL, version TEXT,
     rank INTEGER, measured INTEGER, source TEXT NOT NULL, reason TEXT, metrics TEXT, soiree TEXT
 );
+-- Lot B (derivs.py) : funding et open interest des perpétuels Bybit, par paire OKX du labo.
+CREATE TABLE IF NOT EXISTS derivs (
+    symbol TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('funding', 'oi')), t INTEGER NOT NULL, value REAL,
+    PRIMARY KEY (symbol, kind, t)
+) WITHOUT ROWID;
 -- Bloc scellé (seal.py) : mêmes tables, jamais lues par les statistiques, la routine ni le grade.
 {trades_sealed}
 {strat}

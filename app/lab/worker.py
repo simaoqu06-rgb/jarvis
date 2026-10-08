@@ -20,6 +20,9 @@ Toutes les ~10 min :
 7. Labo v2 (strategies.py) : les stratégies à déclencheur sont calculées dans le même passage que v1
    (runner.run_day) ; les jours traités avant elles sont rattrapés hors séance (rattrapage.py, bougies
    relues et gardées en mémoire) ; leur tableau (strat_stats.py) est mis en cache à l'étape « strategies ».
+8. Lot B : « potentiel » (potentiel.py, part des séances qui touchent +8 % selon le gap, fichier
+   lab_potentiel.json lu par le scanner) et « derives » (derivs.py, funding et open interest Bybit, lus
+   par le tableau des stratégies crypto), dans le budget derivs_calls de la période.
 Le battement (lab.heartbeat) porte l'étape en cours, affichée par /api/lab/status et !labo.
 Le rejeu couvre JARVIS_LAB_REPLAY_DAYS séances (504 ≈ 2 ans) avant le premier lancement du worker ;
 le direct prend le relais à partir de ce jour-là. JARVIS_LAB_ENABLED=off met le worker en veille.
@@ -33,11 +36,13 @@ from zoneinfo import ZoneInfo
 
 from app.lab import catalysts as CAT
 from app.lab import collector as CO
+from app.lab import derivs as DER
 from app.lab import generator as G
 from app.lab import grade as GRADE
 from app.lab import heartbeat
 from app.lab import lessons as L
 from app.lab import method as M
+from app.lab import potentiel as PO
 from app.lab import rattrapage as RAT
 from app.lab import regime as REG
 from app.lab import runner as R
@@ -64,9 +69,9 @@ KEY_WARNING_SECONDS = 3600
 # Labo 2 : jours de mouvements calculés, appels Finnhub, règles validées et âge maximal des
 # statistiques en cache (secondes), par période.
 LAB2_BUDGET = {
-    "nuit": {"moves_days": 30, "news_calls": 40, "rules": 3, "stats_age": 3600},
-    "jour": {"moves_days": 5, "news_calls": 10, "rules": 1, "stats_age": 3 * 3600},
-    "seance": {"moves_days": 2, "news_calls": 0, "rules": 0, "stats_age": 6 * 3600},
+    "nuit": {"moves_days": 30, "news_calls": 40, "rules": 3, "stats_age": 3600, "derivs_calls": 300},
+    "jour": {"moves_days": 5, "news_calls": 10, "rules": 1, "stats_age": 3 * 3600, "derivs_calls": 100},
+    "seance": {"moves_days": 2, "news_calls": 0, "rules": 0, "stats_age": 6 * 3600, "derivs_calls": 30},
 }
 _key_warned_at: float | None = None
 
@@ -360,6 +365,9 @@ async def lab2(db: LabDB, now: datetime, collect: bool = True) -> dict:
 
     await step("regimes", lambda: sum(REG.refresh(db, m) for m in R.MARKETS))
     await step("mouvements", lambda: CAT.backfill_moves(db, now, budget["moves_days"]))
+    await step("potentiel", lambda: PO.step(db))
+    if collect:
+        await step("derives", lambda: DER.collect(db, now, budget["derivs_calls"]))
     if collect and not CO.CAL.session_open(now):
         await step("actus", lambda: CAT.fetch_news(db, now, budget["news_calls"]))
     await step("file_regles", lambda: V.ingest_queue(db))

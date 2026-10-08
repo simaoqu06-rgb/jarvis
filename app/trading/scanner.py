@@ -8,6 +8,8 @@ Repris de l'agent scanner d'OpenClaw, mais calculé au lieu d'être deviné, et 
   à +5-10 % soient réalistes ; ni liquidité ni capitalisation minimales (choix de Simão) ;
 - dans la tendance : au-dessus des MM 20 et 50 jours, RSI 14 jours entre 45 et 75 ;
 - catalyseur réel (Finnhub) : pas d'augmentation de capital, pas de résultats dans les 48 h.
+Lot B : sous chaque plan, la part des séances du labo ouvertes au même gap qui ont touché +8 % depuis
+l'ouverture (app/lab/potentiel.py, lab_potentiel.json) ; une mesure affichée, jamais un filtre.
 Tous ces seuils sont dans app/trading/settings.py et se changent sans toucher au code.
 Chaque passage est gardé dans data/scans.jsonl avec les mesures de chaque valeur retenue :
 le forward-test (paper.py) s'en sert pour dire quels critères ont vraiment payé.
@@ -27,6 +29,7 @@ from zoneinfo import ZoneInfo
 from app import config
 from app.core.http import SourceError
 from app.lab import live as LAB
+from app.lab import potentiel as PO
 from app.sources import alpaca
 from app.trading import catalyst as C
 from app.trading import indicators as I
@@ -175,7 +178,7 @@ async def scan(now: datetime | None = None, s=settings, save: bool = True) -> di
                 filtered.append({"symbol": symbol, "version": verdict["version"], "regles": verdict["regles"],
                                  "composite": plan["score"]["composite"]})
                 continue
-        picks.append({"symbol": symbol, "features": f, "plan": plan})
+        picks.append({"symbol": symbol, "features": f, "plan": plan, "potentiel": PO.hint(f["gap_pct"])})
         if len(picks) == s["scan_max_results"]:
             break
     picks.sort(key=lambda p: p["plan"]["score"]["composite"], reverse=True)
@@ -234,6 +237,8 @@ def text(result: dict) -> str:
             + (f", ~{T.duration_fr(t['minutes_median'])})" if t["minutes_median"] else ")")
             for t in plan["targets"])
         lines.append(f"entrée {T._num(plan['entry'])} · SL {T._num(plan['stop'])} ({plan['stop_pct']:+.1f} %) · {tps}")
+        if p.get("potentiel"):
+            lines.append(p["potentiel"])
         news = (plan.get("catalyst") or {}).get("news") or []
         if news:
             lines.append(f"📰 [{news[0]['title'][:100]}](<{news[0]['url']}>)")
