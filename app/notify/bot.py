@@ -13,6 +13,7 @@ qu'aux comptes listés dans JARVIS_DISCORD_OWNER_ID et ignore tout le reste sans
   !positions            que faire des trades suivis avant la clôture : sortir, alléger ou garder
   !position NVDA 132.5  même conseil pour une position prise hors de JARVIS (« short », `stop 128` en plus)
   !scan                 scanner pré-ouverture tout de suite
+  !confirmations        GO du scanner confirmés ou pas après l'ouverture, et ce que ça rapporte
   !bilan                bilan du forward-test sur le compte fictif
   !desaccords           trades pris contre l'avis de JARVIS (plans NO GO) comparés aux autres
   !propositions         réglages que JARVIS propose et qui attendent ta réponse
@@ -321,6 +322,11 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
         if cmd == "bilan":
             from app import scheduler
             return paper.report_text(paper.stats(scheduler.paper_book))
+        if cmd in ("confirmations", "confirmation"):
+            from app import scheduler
+            from app.trading import confirm as CONFIRM
+
+            return CONFIRM.report_text(CONFIRM.read_log(), scheduler.confirm_state)
         if cmd in ("desaccords", "désaccords"):
             from app import scheduler
             return trading.disagreements_text(trading.disagreements(scheduler.book))
