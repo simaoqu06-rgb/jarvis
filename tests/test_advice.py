@@ -1,7 +1,8 @@
 """Tests hors ligne de l'avis sur un actif et du conseil sur les positions ouvertes (sortir, alléger, garder)."""
 import sqlite3
-import pytest
 from datetime import datetime, timezone
+
+import pytest
 
 from app.lab import db as lab_db
 from app.notify import bot
