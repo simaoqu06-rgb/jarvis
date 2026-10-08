@@ -1,5 +1,6 @@
 """Tests hors ligne de l'avis sur un actif et du conseil sur les positions ouvertes (sortir, alléger, garder)."""
 import sqlite3
+import pytest
 from datetime import datetime, timezone
 
 from app.lab import db as lab_db
@@ -141,10 +142,32 @@ def test_message_avant_la_cloture_une_fois_par_seance():
 
 def test_commandes_lisent_le_prix_d_entree_et_le_stop():
     assert bot.parse_trade(["nvda", "132,5", "stop", "128"]) == {
-        "symbol": "NVDA", "market": "stock", "side": "long", "entry": 132.5, "stop": 128.0}
+        "symbol": "NVDA", "market": "stock", "side": "long", "entry": 132.5, "stop": 128.0, "targets": None}
     req = bot.parse_trade(["eth", "short", "2500"])
     assert req["market"] == "crypto" and req["side"] == "short" and req["entry"] == 2500 and req["stop"] is None
     assert bot.parse_trade(["NVDA"])["entry"] is None
+    req = bot.parse_trade(["mrvl", "281", "stop", "273,9", "tp", "286.8", "290,5", "299.5"])
+    assert (req["entry"], req["stop"], req["targets"]) == (281.0, 273.9, [286.8, 290.5, 299.5])
+    req = bot.parse_trade(["mrvl", "tp", "286.8", "290.5", "281", "stop", "273.9"])
+    assert req["targets"] == [286.8, 290.5, 281.0] and req["entry"] is None  # tout nombre après tp est un objectif
+    with pytest.raises(ValueError):
+        bot.parse_trade(["mrvl", "281", "tp"])
+
+
+def test_rouvre_un_trade_dont_le_stop_n_a_pas_ete_execute():
+    book = S.Book(None)
+    plan = {"symbol": "MRVL", "side": "long", "entry": 281.0, "stop": 279.5, "targets": [],
+            "created_at": "2026-10-07T13:30:00+00:00"}
+    old = book.add(plan)
+    book.close(old["id"], 276.75)
+    assert S.reopen(book, "MRVL", plan) is None  # clôturé à la main : rien à rouvrir
+    old["events"][-1]["kind"] = "stop"
+    old["stop_current"] = 279.5
+    new_plan = plan | {"stop": 273.9, "created_at": "2026-10-08T13:50:00+00:00"}
+    assert S.reopen(book, "mrvl", new_plan)["id"] == old["id"]
+    assert len(book.trades) == 1
+    t = book.trades[0]
+    assert t["status"] == "open" and t["stop_current"] == 273.9 and "non exécuté" in t["note"]
 
 
 async def test_positions_sans_trade_suivi(monkeypatch):

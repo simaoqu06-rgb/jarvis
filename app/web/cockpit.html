@@ -236,6 +236,7 @@ dialog .actions { display: flex; gap: 8px; justify-content: flex-end; }
         <input type="radio" name="side" id="s-s" value="short"><label for="s-s">Short</label></div></div>
       <label>Entrée<input name="entry" type="number" step="any" inputmode="decimal" placeholder="cours actuel"></label>
       <label>Stop<input name="stop" type="number" step="any" inputmode="decimal" placeholder="auto (invalidation)"></label>
+      <label>Objectifs<input name="targets" inputmode="decimal" placeholder="auto (ex. 286.8 290.5 299.5)"></label>
       <label>Capital<input name="capital" type="number" step="any" inputmode="decimal" placeholder="facultatif"></label>
       <button type="submit">Calculer le plan</button>
     </form>
@@ -681,6 +682,8 @@ $("#plan-form").addEventListener("submit", async (ev) => {
   const data = Object.fromEntries(new FormData(ev.target));
   const body = { symbol: data.symbol.trim().toUpperCase(), market: data.market, side: data.side };
   for (const k of ["entry", "stop", "capital"]) if (data[k]) body[k] = Number(data[k]);
+  const targets = (data.targets || "").replace(/,/g, ".").split(/[\s;]+/).filter(Boolean).map(Number);
+  if (targets.length) body.targets = targets;
   const button = $("button[type=submit]", ev.target);
   button.disabled = true; button.textContent = "Calcul…";
   $("#preview").innerHTML = `<div class="preview"><div class="skeleton" style="height:160px"></div><div class="small muted" style="margin-top:8px">Historique, délais rejoués et checklist en cours…</div></div>`;
