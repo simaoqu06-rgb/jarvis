@@ -198,8 +198,9 @@ def parse_trade(args: list[str]) -> dict:
     else:
         market = "crypto" if symbol in CRYPTO | set(config.WATCHLIST_CRYPTO) else "stock"
     side = "short" if "short" in words else "long"
+    # « kill » : un KILL de Killmode pris, mesuré par son journal et pas par `!desaccords`
     return {"symbol": symbol, "market": market, "side": side, "entry": entry, "stop": stop,
-            "targets": targets or None}
+            "targets": targets or None} | ({"killmode": True} if "kill" in words else {})
 
 
 def settings_text() -> str:
@@ -298,9 +299,11 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
             req = parse_trade(args)
             plan = await trading.build_plan(req["symbol"], req["market"], req["side"], req["entry"], req["stop"],
                                             req["targets"])
+            if req.get("killmode"):
+                plan["killmode"] = True
             async with lock or asyncio.Lock():
                 from app import scheduler  # import tardif : scheduler importe ce module
-                scheduler.book.add(plan, "via Discord")
+                scheduler.book.add(plan, "via Killmode" if req.get("killmode") else "via Discord")
             head = trading.disagreement_text(plan) + "\n" if trading.against_jarvis(plan) else ""
             return head + "📌 Trade suivi\n" + trading.plan_text(plan)
         if cmd == "rouvre":

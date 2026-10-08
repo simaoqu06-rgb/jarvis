@@ -733,8 +733,9 @@ def summary(trade: dict) -> dict:
 # « contre l'avis de JARVIS » et !desaccords compare ces trades aux autres pour voir qui avait raison.
 
 def against_jarvis(p: dict) -> bool:
-    """Vrai si le plan était noté NO GO (un plan sans note n'est ni pour ni contre)."""
-    return bool(p.get("score")) and not p["score"]["go"]
+    """Vrai si le plan était noté NO GO (un plan sans note n'est ni pour ni contre). Un KILL de Killmode pris
+    (`!prends … kill`) n'est ni pour ni contre : sa mesure est le journal de Killmode."""
+    return bool(p.get("score")) and not p["score"]["go"] and not p.get("killmode")
 
 
 def disagreement_text(p: dict) -> str:
@@ -766,7 +767,7 @@ def disagreements(book: Book) -> dict:
     """Trades pris avec et contre l'avis de JARVIS : nombre, réussite et gain moyen des trades terminés."""
     groups = {"avec": [], "contre": []}
     for t in book.trades:
-        if t.get("score"):
+        if t.get("score") and not t.get("killmode"):
             groups["contre" if against_jarvis(t) else "avec"].append(t)
     out = {}
     for name, trades in groups.items():
