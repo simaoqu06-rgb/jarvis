@@ -534,8 +534,8 @@ def lab_item() -> dict | None:
         log.warning("Killmode : tableau du labo illisible : %s", exc)
         return None
     it = ((rep.get("strategies") or {}).get("stock") or {}).get("killmode") or {}
-    if it.get("jours_suivants"):
-        return it["jours_suivants"] | {"jours_non_vus": True}
+    if "jours_vus_jusqu_au" in it or it.get("jours_suivants"):  # None tant qu'aucun jour non vu n'est rejoué
+        return (it.get("jours_suivants") or {}) | {"jours_non_vus": True}
     return it
 
 

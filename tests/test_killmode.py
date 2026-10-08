@@ -302,6 +302,8 @@ def test_ligne_du_labo(monkeypatch):
     monkeypatch.setattr(K.SS, "cached", lambda conn: rep)
     got = K.lab_item()
     assert got["declenches"] == 12 and "jours non vus au choix de la règle" in K.lab_line(got)
+    rep["strategies"]["stock"]["killmode"] = it | {"jours_vus_jusqu_au": "2025-01-27", "jours_suivants": None}
+    assert "pas encore de trade rejoué sur les jours non vus" in K.lab_line(K.lab_item())
 
 
 async def test_affichage_honnete(paths, monkeypatch):
