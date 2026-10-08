@@ -26,29 +26,74 @@ au risque), sans rien filtrer : c'est la mesure qui dira si un plafond de frais 
 Rien de tout ça ne promeut quoi que ce soit : ni le scellé, ni la quantité de rejeu (au moins un an,
 deux régimes) ne sont encore là.
 
+Déclaration n° 6 (règles de sortie de Gemini, actions) : chaque sortie ajoutée est comparée à la sortie de
+référence sur les mêmes trades (écart apparié, z en grappes par jour) ; elle « aide » si l'écart est positif
+avec z ≥ candidate_z() et au moins MIN_N trades. Le filtre d'entrée VWAP de GPT n'est qu'une mesure :
+espérance de référence par tranche (décision avant 10 h 30, après au-dessus du VWAP, après en dessous).
+La n° 6 complète aussi la règle « candidate » comme le plan l'exigeait (plan-labo-v2.md, lot 1, point 7) :
+la référence doit rester positive sous chaque test de robustesse (glissement ×2 et ×3, retard, ordres limites
+manqués, nets de la commission IBKR) et sur chaque moitié chronologique des jours. Killmode et la n° 4
+(strategies.POST_SEEN) sont jugées sur les jours après strategies.SEEN_UNTIL (« jours_suivants »). Mesure de
+Killmode, sans essai : espérance des stratégies v2 actions par tranche de gap, d'ATR, de volume des 15 premières
+minutes, de place pour 2 R et de stop touché avant l'entrée (TRANCHES, bornes figées) ; trois comparaisons qui
+séparent sa sélection, ses conditions de prix et sa limite de 11 h (_kill_compare) ; part des actions en gap
+≥ 4 % et ATR ≥ 4 % présentes dans l'univers du labo (universe.killmode_coverage).
+
 Diagnostic v1 (Lot 1 du plan) : espérance par gap d'ouverture, par mode d'entrée, par raison de sortie,
 et brut contre net de frais, pour vérifier « v1 achète la faiblesse » et « les frais expliquent la perte ».
 """
 import json
+import math
 import sqlite3
 from collections import defaultdict
+from datetime import date, datetime
 from statistics import NormalDist
 
+from app.lab import collector as CO
 from app.lab import derivs as DER
 from app.lab import seal as SEAL
 from app.lab import simulator as SIM
 from app.lab import stats as STATS
 from app.lab import strategies as ST
+from app.lab import universe as U
 
 MIN_N = 30
 ALPHA = 0.05
 COLUMNS = ("r_net", "r_sans_be", "r_2r", "r_suiveur", "r_emperor", "r_emperor_alerte", "r_emperor_confirme",
-           "r_glisse_x2", "r_glisse_x3", "r_retard", "r_manque", "r_gross")
+           "r_vwap", "r_1430", "r_spy", "r_glisse_x2", "r_glisse_x3", "r_retard", "r_manque", "r_gross")
 RANK_BUCKETS = ((1, 50, "rang 1-50"), (51, 150, "rang 51-150"), (151, 10**9, "rang 151+"))
 IBKR_PER_SHARE = 0.005      # IBKR Pro, plan Fixe (/mnt/project-files/trading/plateforme-actions-us.md)
 IBKR_MAX_PCT = 0.01         # plafond : 1 % de la valeur de l'ordre
 COST_BUCKETS = ((0.0, 0.1, "frais < 0,1 R"), (0.1, 0.2, "frais 0,1-0,2 R"), (0.2, 0.4, "frais 0,2-0,4 R"),
                 (0.4, 1e9, "frais ≥ 0,4 R"))
+VWAP_BUCKETS = ("avant 10 h 30", "après 10 h 30, au-dessus du VWAP", "après 10 h 30, sous le VWAP")
+# n° 6 : la référence doit rester positive sous ces conditions (et sur chaque moitié des jours) pour qu'une
+# stratégie soit « candidate » (plan-labo-v2.md, lot 1, point 7 : ×2 et ×3, retard, ordres limites manqués).
+ROBUST = ("r_glisse_x2", "r_glisse_x3", "r_retard", "r_manque")
+# n° 6, mesure de Killmode : tranches figées avant tout résultat (bornes basses comprises, hautes exclues).
+TRANCHES = {
+    "gap": ((-1e9, -5.0, "gap < −5 %"), (-5.0, -2.0, "gap −5 à −2 %"), (-2.0, -0.5, "gap −2 à −0,5 %"),
+            (-0.5, 0.5, "gap ±0,5 %"), (0.5, 2.0, "gap +0,5 à +2 %"), (2.0, 4.0, "gap +2 à +4 %"),
+            (4.0, 5.0, "gap +4 à +5 %"), (5.0, 10.0, "gap +5 à +10 %"), (10.0, 1e9, "gap ≥ +10 %")),
+    "atr": ((-1e9, 2.0, "ATR < 2 %"), (2.0, 4.0, "ATR 2-4 %"), (4.0, 6.0, "ATR 4-6 %"), (6.0, 10.0, "ATR 6-10 %"),
+            (10.0, 1e9, "ATR ≥ 10 %")),
+    "vol15": ((-1e9, 0.25, "vol15 < 0,25"), (0.25, 0.5, "vol15 0,25-0,5"), (0.5, 1.0, "vol15 0,5-1"),
+              (1.0, 1e9, "vol15 ≥ 1")),
+    "place_2r": ((-1e9, 0.5, "2 R < 0,5 ATR"), (0.5, 1.0, "2 R entre 0,5 et 1 ATR"), (1.0, 1e9, "2 R ≥ 1 ATR")),
+    "stop_avant_entree": ((0, 1, "stop intact avant l'entrée"), (1, 2, "stop touché avant l'entrée")),
+}
+_vwap_from: dict[str, int] = {}
+
+
+def _vwap_bucket(day: str, signal_at: int | None, above: int | None) -> str | None:
+    """n° 6 : tranche horaire et VWAP de la décision (actions) ; None si on ne sait pas."""
+    if signal_at is None:
+        return None
+    if day not in _vwap_from:
+        _vwap_from[day] = int(datetime.combine(date.fromisoformat(day), ST.VWAP_EXIT_FROM, CO.NEW_YORK).timestamp())
+    if signal_at < _vwap_from[day]:
+        return VWAP_BUCKETS[0]
+    return None if above is None else VWAP_BUCKETS[1] if above else VWAP_BUCKETS[2]
 
 
 def candidate_z(trials: int | None = None) -> float:
@@ -113,89 +158,265 @@ class Mean:
                 "z": round(m / se, 2) if m is not None and se else None, "jours": len(self.days)}
 
 
+def _acc() -> dict:
+    return {"signaux": 0, "declenches": 0, "gagnants": 0, "tp1": 0, "sorties": defaultdict(Mean), "temoin": Mean(),
+            "ecart": Mean(), "regimes": defaultdict(Mean), "rangs": defaultdict(Mean), "manques": 0, "ibkr": Mean(),
+            "commission": Mean(), "frais": defaultdict(Mean), "funding": defaultdict(Mean), "oi": defaultdict(Mean),
+            "ecarts": defaultdict(Mean), "vwap": defaultdict(Mean), "robuste": defaultdict(Mean),
+            "tranches": defaultdict(lambda: defaultdict(Mean))}
+
+
+def _feed(a: dict, r: dict) -> None:
+    """Ajoute une ligne déclenchée aux accumulateurs d'une stratégie (`r` : champs préparés par _strategies)."""
+    day, values, ref, comm = r["day"], r["values"], r["ref"], r["comm"]
+    a["declenches"] += 1
+    a["gagnants"] += (values["r_net"] or 0) > 0
+    a["tp1"] += bool(r["tp1"])
+    for c in COLUMNS:
+        a["sorties"][c].add(day, values[c])
+    a["manques"] += values["r_manque"] is None
+    a["regimes"][r["label"]].add(day, ref)
+    a["rangs"][_rank_bucket(r["rank"])].add(day, ref)
+    a["ibkr"].add(day, ref)
+    for c in ROBUST:  # n° 6 : la règle « candidate » exige que la référence tienne sous ces conditions
+        a["robuste"][c].add(day, values[c] - comm if values[c] is not None else None)
+    if r["market"] == "stock":
+        a["commission"].add(day, comm)
+    a["frais"][r["frais"]].add(day, ref)
+    for c in r["ecarts"]:
+        a["ecarts"][c].add(day, r["ecarts"][c])
+    if r["vwap"]:
+        a["vwap"][r["vwap"]].add(day, ref)
+    for family, band in r["bandes"].items():
+        a["tranches"][family][band].add(day, ref)
+    if r["market"] == "crypto":
+        a["funding"][r["funding"]].add(day, ref)
+        a["oi"][r["oi"]].add(day, ref)
+    if r["ecart_temoin"] is not None:
+        a["temoin"].add(day, r["temoin"])
+        a["ecart"].add(day, r["ecart_temoin"])
+
+
+def _halves(mean: Mean) -> tuple[float | None, float | None]:
+    """Espérance des deux moitiés chronologiques des jours (⌊J/2⌋ premiers jours, puis le reste)."""
+    days = sorted(mean.days)
+    if len(days) < 2:
+        return None, None
+
+    def avg(part: list[str]) -> float | None:
+        n = sum(mean.days[d][1] for d in part)
+        return round(sum(mean.days[d][0] for d in part) / n, 4) if n else None
+
+    return avg(days[:len(days) // 2]), avg(days[len(days) // 2:])
+
+
+def _item(market: str, name: str, a: dict, z_min: float) -> dict:
+    n = a["declenches"]
+    main = a["sorties"]["r_net"].result()
+    brut = a["sorties"]["r_gross"].result()["esperance_r"]
+    ecart = a["ecart"].result()
+    ibkr = a["ibkr"].result() if market == "stock" else None
+    ref = ibkr or main
+    rob = {c: a["robuste"][c].result()["esperance_r"] for c in ROBUST}
+    halves = _halves(a["ibkr"])
+    holds = all(v is not None and v > 0 for v in (*rob.values(), *halves))
+    item = {
+        "nom": ST.LABELS.get(name, name), "signaux": a["signaux"], "declenches": n,
+        "taux_declenchement": round(n / a["signaux"], 4) if a["signaux"] else None,
+        "jours": main["jours"], **{k: main[k] for k in ("esperance_r", "ic95")},
+        "reussite": round(a["gagnants"] / n, 4) if n else None, "tp1": round(a["tp1"] / n, 4) if n else None,
+        "sorties": {c: a["sorties"][c].result() for c in ST.exits(market)},
+        "brut_r": brut,
+        "frais_r": round(brut - main["esperance_r"], 4) if brut is not None and main["esperance_r"] is not None
+        else None,
+        "par_rang": {k: a["rangs"][k].result() for _, _, k in (*RANK_BUCKETS, (0, 0, "rang inconnu"))
+                     if k in a["rangs"]},
+        "commission_ibkr_r": a["commission"].result()["esperance_r"] if market == "stock" else None,
+        "esperance_ibkr_r": ibkr["esperance_r"] if ibkr else None,
+        "ic95_ibkr": ibkr["ic95"] if ibkr else None,
+        "esperance_ref_r": ref["esperance_r"],
+        "par_frais": {k: a["frais"][k].result() for _, _, k in (*COST_BUCKETS, (0, 0, "frais inconnus"))
+                      if k in a["frais"]},
+        "par_funding": {k: a["funding"][k].result() for _, _, k in (*DER.FUNDING_BUCKETS, (0, 0, "inconnu"))
+                        if k in a["funding"]} if market == "crypto" else None,
+        "par_oi": {k: a["oi"][k].result() for _, _, k in (*DER.OI_BUCKETS, (0, 0, "inconnu"))
+                   if k in a["oi"]} if market == "crypto" else None,
+        "ecarts_sorties": {c: _helps(a["ecarts"][c].result(), z_min) for c in ST.STOCK_EXITS}
+        if market == "stock" else None,
+        "par_vwap": {k: a["vwap"][k].result() for k in VWAP_BUCKETS if k in a["vwap"]}
+        if market == "stock" else None,
+        "tranches": _tranches(a["tranches"]) if market == "stock" and name != ST.REFERENCE else None,
+        "robustesse": {c: a["sorties"][c].result() for c in ("r_glisse_x2", "r_glisse_x3", "r_retard", "r_manque")},
+        "robuste": {**rob, "moitie_1": halves[0], "moitie_2": halves[1], "tient": holds},
+        "ordres_limites_retires": a["manques"],
+        "temoin": {"esperance_r": a["temoin"].result()["esperance_r"], "ecart_r": ecart["esperance_r"],
+                   "ic95": ecart["ic95"], "z": ecart["z"], "n": ecart["n"]},
+        "regimes": {k: v.result() for k, v in sorted(a["regimes"].items())},
+        "echantillon_faible": n < MIN_N,
+    }
+    ci = ref["ic95"]
+    item["candidate"] = bool(ci and ci[0] > 0 and (ecart["z"] or 0) >= z_min and n >= MIN_N and holds)
+    return item
+
+
+def _tranches(acc: dict) -> dict:
+    return {family: {label: acc[family][label].result() for _, _, label in bands if label in acc[family]}
+            for family, bands in TRANCHES.items()}
+
+
+def _bands(gap, atr_pct, vol15, risk_pct, stop_before) -> dict:
+    """n° 6 : tranche de chaque mesure de Killmode connue à la décision (bornes figées dans la déclaration)."""
+    room = 2 * risk_pct / atr_pct if risk_pct is not None and atr_pct else None
+    values = {"gap": gap, "atr": atr_pct, "vol15": vol15, "place_2r": room, "stop_avant_entree": stop_before}
+    out = {}
+    for family, x in values.items():
+        if x is not None:
+            out[family] = next(label for lo, hi, label in TRANCHES[family] if lo <= x < hi)
+    return out
+
+
 def _strategies(conn: sqlite3.Connection) -> dict:
     out: dict = {}
     sql = (f"SELECT s.market, s.strategy, s.day, s.triggered, s.tp1_hit, s.temoin_r, s.temoin_triggered, s.rank, "
-           f"s.entry, s.stop, s.symbol, s.signal_at, {', '.join('s.' + c for c in COLUMNS)}, r.label "
+           f"s.entry, s.stop, s.symbol, s.signal_at, s.sur_vwap, s.gap_open_pct, s.atr_pct, s.vol15_adv, "
+           f"s.stop_avant_entree, s.risk_pct, {', '.join('s.' + c for c in COLUMNS)}, r.label "
            "FROM strat_trades s LEFT JOIN regimes r ON r.market = s.market AND r.day = s.day")
     acc: dict = {}
     z_min = candidate_z()
     derivs = DER.load(conn)
+    pooled = {"ecarts": defaultdict(Mean), "par_vwap": defaultdict(Mean)}  # n° 6, toutes stratégies actions
+    pooled_bands: dict = defaultdict(lambda: defaultdict(Mean))           # n° 6, stratégies v2 actions
+    sessions: dict = defaultdict(dict)                                      # n° 6 : orb15 et killmode par séance
     for row in conn.execute(sql):
-        market, name, day, trig, tp1, wit, wit_trig, rank, entry, stop, symbol, signal_at = row[:12]
-        values = dict(zip(COLUMNS, row[12:12 + len(COLUMNS)]))
-        label = row[-1] or "inconnu"
-        a = acc.setdefault((market, name), {"signaux": 0, "declenches": 0, "gagnants": 0, "tp1": 0,
-                                            "sorties": defaultdict(Mean), "temoin": Mean(), "ecart": Mean(),
-                                            "regimes": defaultdict(Mean), "rangs": defaultdict(Mean), "manques": 0,
-                                            "ibkr": Mean(), "commission": Mean(), "frais": defaultdict(Mean),
-                                            "funding": defaultdict(Mean), "oi": defaultdict(Mean)})
-        a["signaux"] += 1
-        if not trig:
-            continue
-        a["declenches"] += 1
-        a["gagnants"] += (values["r_net"] or 0) > 0
-        a["tp1"] += bool(tp1)
-        for c in COLUMNS:
-            a["sorties"][c].add(day, values[c])
-        a["manques"] += values["r_manque"] is None
-        a["regimes"][label].add(day, values["r_net"])
-        a["rangs"][_rank_bucket(rank)].add(day, values["r_net"])
+        (market, name, day, trig, tp1, wit, wit_trig, rank, entry, stop, symbol, signal_at, above, gap, atr_pct,
+         vol15, stop_before, risk_pct) = row[:18]
+        values = dict(zip(COLUMNS, row[18:18 + len(COLUMNS)]))
+        keys = [(market, name)]
+        if name in ST.POST_SEEN and day > ST.SEEN_UNTIL[market]:
+            keys.append((market, name, "suivants"))
+        for key in keys:
+            acc.setdefault(key, _acc())["signaux"] += 1
         comm = (ibkr_commission_r(entry, stop) or 0.0) if market == "stock" else 0.0
         ref = values["r_net"] - comm if values["r_net"] is not None else None
-        a["ibkr"].add(day, ref)
-        if market == "stock":
-            a["commission"].add(day, comm)
-        a["frais"][_cost_bucket(expected_cost_r(market, entry, stop, rank))].add(day, ref)
+        if market == "stock" and name in ("orb15", "killmode"):
+            sessions[(symbol, day)][name] = {"trig": bool(trig), "ref": ref, "gap": gap, "atr": atr_pct,
+                                             "ecart": values["r_net"] - wit
+                                             if trig and wit_trig and wit is not None and values["r_net"] is not None
+                                             else None}
+        if not trig:
+            continue
+        r = {"market": market, "day": day, "tp1": tp1, "rank": rank, "values": values, "label": row[-1] or "inconnu",
+             "ref": ref, "comm": comm, "frais": _cost_bucket(expected_cost_r(market, entry, stop, rank)),
+             "ecarts": {}, "vwap": None, "bandes": {}, "temoin": wit,
+             "ecart_temoin": values["r_net"] - wit if wit_trig and wit is not None and values["r_net"] is not None
+             else None}
+        if market == "stock":  # n° 6 : sorties de Gemini contre la référence, VWAP et mesures de Killmode
+            r["ecarts"] = {c: values[c] - values["r_net"] for c in ST.STOCK_EXITS
+                           if values[c] is not None and values["r_net"] is not None}
+            r["vwap"] = _vwap_bucket(day, signal_at, above)
+            if name != ST.REFERENCE:
+                r["bandes"] = _bands(gap, atr_pct, vol15, risk_pct, stop_before)
+            for c, x in r["ecarts"].items():
+                pooled["ecarts"][c].add(day, x)
+            if r["vwap"]:
+                pooled["par_vwap"][r["vwap"]].add(day, ref)
+            for family, band in r["bandes"].items():
+                pooled_bands[family][band].add(day, ref)
         if market == "crypto":  # lot B : positionnement des dérivés au signal, sans rien filtrer
             funding, oi_chg = DER.context(derivs, symbol, signal_at)
-            a["funding"][DER.bucket(funding, DER.FUNDING_BUCKETS)].add(day, ref)
-            a["oi"][DER.bucket(oi_chg, DER.OI_BUCKETS)].add(day, ref)
-        if wit_trig and wit is not None and values["r_net"] is not None:
-            a["temoin"].add(day, wit)
-            a["ecart"].add(day, values["r_net"] - wit)
-    for (market, name), a in acc.items():
-        n = a["declenches"]
-        main = a["sorties"]["r_net"].result()
-        brut = a["sorties"]["r_gross"].result()["esperance_r"]
-        ecart = a["ecart"].result()
-        ibkr = a["ibkr"].result() if market == "stock" else None
-        ref = ibkr or main
-        item = {
-            "nom": ST.LABELS.get(name, name), "signaux": a["signaux"], "declenches": n,
-            "taux_declenchement": round(n / a["signaux"], 4) if a["signaux"] else None,
-            "jours": main["jours"], **{k: main[k] for k in ("esperance_r", "ic95")},
-            "reussite": round(a["gagnants"] / n, 4) if n else None, "tp1": round(a["tp1"] / n, 4) if n else None,
-            "sorties": {c: a["sorties"][c].result() for c in ST.EXITS},
-            "brut_r": brut,
-            "frais_r": round(brut - main["esperance_r"], 4) if brut is not None and main["esperance_r"] is not None
-            else None,
-            "par_rang": {k: a["rangs"][k].result() for _, _, k in (*RANK_BUCKETS, (0, 0, "rang inconnu"))
-                         if k in a["rangs"]},
-            "commission_ibkr_r": a["commission"].result()["esperance_r"] if market == "stock" else None,
-            "esperance_ibkr_r": ibkr["esperance_r"] if ibkr else None,
-            "ic95_ibkr": ibkr["ic95"] if ibkr else None,
-            "esperance_ref_r": ref["esperance_r"],
-            "par_frais": {k: a["frais"][k].result() for _, _, k in (*COST_BUCKETS, (0, 0, "frais inconnus"))
-                          if k in a["frais"]},
-            "par_funding": {k: a["funding"][k].result() for _, _, k in (*DER.FUNDING_BUCKETS, (0, 0, "inconnu"))
-                            if k in a["funding"]} if market == "crypto" else None,
-            "par_oi": {k: a["oi"][k].result() for _, _, k in (*DER.OI_BUCKETS, (0, 0, "inconnu"))
-                       if k in a["oi"]} if market == "crypto" else None,
-            "robustesse": {c: a["sorties"][c].result() for c in ("r_glisse_x2", "r_glisse_x3", "r_retard", "r_manque")},
-            "ordres_limites_retires": a["manques"],
-            "temoin": {"esperance_r": a["temoin"].result()["esperance_r"], "ecart_r": ecart["esperance_r"],
-                       "ic95": ecart["ic95"], "z": ecart["z"], "n": ecart["n"]},
-            "regimes": {k: v.result() for k, v in sorted(a["regimes"].items())},
-            "echantillon_faible": n < MIN_N,
-        }
-        ci = ref["ic95"]
-        item["candidate"] = bool(ci and ci[0] > 0 and (ecart["z"] or 0) >= z_min and n >= MIN_N)
+            r["funding"] = DER.bucket(funding, DER.FUNDING_BUCKETS)
+            r["oi"] = DER.bucket(oi_chg, DER.OI_BUCKETS)
+        for key in keys:
+            _feed(acc[key], r)
+    for key, a in acc.items():
+        if len(key) == 3:
+            continue
+        market, name = key
+        item = _item(market, name, a, z_min)
+        if name in ST.POST_SEEN:  # n° 6 : jugée sur les jours qui suivent ceux déjà lus quand elle a été choisie
+            sub = acc.get((market, name, "suivants"))
+            item["jours_vus_jusqu_au"] = ST.SEEN_UNTIL[market]
+            item["jours_suivants"] = _item(market, name, sub, z_min) if sub else None
+            item["candidate"] = bool(item["jours_suivants"] and item["jours_suivants"]["candidate"])
         out.setdefault(market, {})[name] = item
     for market, items in out.items():
         out[market] = dict(sorted(items.items(), key=lambda kv: -(kv[1]["esperance_ref_r"]
                                                                    if kv[1]["esperance_ref_r"] is not None else -99)))
+    if pooled["ecarts"] or pooled["par_vwap"]:
+        out["_n6"] = {"ecarts": {c: pooled["ecarts"][c].result() for c in ST.STOCK_EXITS if c in pooled["ecarts"]},
+                      "par_vwap": {k: pooled["par_vwap"][k].result() for k in VWAP_BUCKETS if k in pooled["par_vwap"]}}
+    if pooled_bands or sessions:
+        out["_kill"] = {"tranches": _tranches(pooled_bands), **_kill_compare(sessions),
+                        "couverture": coverage(conn)}
     return out
+
+
+def _diff(a: Mean, b: Mean) -> dict:
+    """Écart des espérances de deux groupes, z approché (erreurs en grappes, groupes supposés indépendants)."""
+    m1, se1, _ = STATS.mean_ci(a.days, a.total, a.n)
+    m2, se2, _ = STATS.mean_ci(b.days, b.total, b.n)
+    if m1 is None or m2 is None:
+        return {"ecart_r": None, "z": None}
+    se = math.hypot(se1 or 0, se2 or 0)
+    return {"ecart_r": round(m1 - m2, 4), "z": round((m1 - m2) / se, 2) if se else None}
+
+
+def _kill_compare(sessions: dict) -> dict:
+    """n° 6 : trois comparaisons qui décomposent Killmode (orb15 est son squelette : même entrée, même stop).
+    1. sélection : écart orb15 − témoin sur les séances à gap et ATR forts, contre les autres ;
+    2. conditions de prix : parmi ces séances, orb15 quand Killmode a une ligne, contre sans ;
+    3. limite de 11 h : par séance à ligne Killmode, R Killmode − R orb15 (0 sans trade). Les deux ordres sont
+       identiques jusqu'à 11 h : l'écart vient des seuls trades d'orb15 exécutés entre 11 h et 12 h."""
+    sel = {"forts": Mean(), "autres": Mean()}
+    cond = {"avec": Mean(), "sans": Mean()}
+    limit, differ = Mean(), 0
+    for (_, day), s in sessions.items():
+        o, k = s.get("orb15"), s.get("killmode")
+        if o and o["gap"] is not None and o["atr"] is not None:
+            strong = o["gap"] >= ST.KILL_GAP_PCT and o["atr"] >= ST.KILL_ATR_PCT
+            if o["ecart"] is not None:
+                sel["forts" if strong else "autres"].add(day, o["ecart"])
+            if strong and o["trig"]:
+                cond["avec" if k else "sans"].add(day, o["ref"])
+        if k:
+            rk = k["ref"] if k["trig"] else 0.0
+            ro = o["ref"] if o and o["trig"] else 0.0
+            if rk is not None and ro is not None:
+                limit.add(day, rk - ro)
+                differ += rk != ro
+    return {"selection": {"gap_atr_forts": sel["forts"].result(), "autres": sel["autres"].result(),
+                          **_diff(sel["forts"], sel["autres"])},
+            "conditions": {"avec_killmode": cond["avec"].result(), "sans": cond["sans"].result(),
+                           **_diff(cond["avec"], cond["sans"])},
+            "limite_11h": limit.result() | {"seances_differentes": differ}}
+
+
+def coverage(conn: sqlite3.Connection) -> dict | None:
+    """n° 6 : part des actions ouvertes en gap ≥ 4 % avec un ATR ≥ 4 % présentes dans l'univers du labo, par
+    prix de la veille (comptes du worker, universe.coverage_step) ; None tant que rien n'est compté."""
+    totals: dict = {}
+    days = 0
+    for (value,) in conn.execute("SELECT value FROM progress WHERE job = ?", (U.COVERAGE_JOB,)):
+        counts = json.loads(value)
+        days += bool(counts)  # vide : séance sans journalier en base
+        for label, (total, present) in counts.items():
+            cell = totals.setdefault(label, [0, 0])
+            cell[0] += total
+            cell[1] += present
+    if not totals:
+        return None
+    total, present = sum(c[0] for c in totals.values()), sum(c[1] for c in totals.values())
+    return {"seances": days, "gappers": total, "dans_univers": present,
+            "part": round(present / total, 4) if total else None,
+            "par_prix": {label: {"gappers": totals[label][0], "dans_univers": totals[label][1],
+                                 "part": round(totals[label][1] / totals[label][0], 4) if totals[label][0] else None}
+                         for _, _, label in U.PRICE_BUCKETS if label in totals}}
+
+
+def _helps(res: dict, z_min: float) -> dict:
+    """Écart apparié d'une sortie à la référence ; « aide » si positif avec z ≥ seuil et assez de trades."""
+    return res | {"aide": bool(res["esperance_r"] is not None and res["esperance_r"] > 0
+                               and (res["z"] or 0) >= z_min and res["n"] >= MIN_N)}
 
 
 def _bucket(gap: float | None) -> str:
@@ -234,11 +455,13 @@ def diagnostic_v1(conn: sqlite3.Connection) -> dict:
 
 def report(conn: sqlite3.Connection) -> dict:
     out = {"declaration": {"numero": ST.DECLARATION, "le": ST.REGISTERED_ON, "essais": len(ST.trials()),
-                           "z_candidate": candidate_z(), "sorties": ST.EXITS, "robustesse": ST.STRESS,
-                           "doc": "docs/labo-strategies.md"},
-           "scelle": SEAL.describe(), "strategies": {}, "diagnostic_v1": {}}
+                           "z_candidate": candidate_z(), "sorties": ST.EXITS, "sorties_actions": ST.STOCK_EXITS,
+                           "robustesse": ST.STRESS, "doc": "docs/labo-strategies.md"},
+           "scelle": SEAL.describe(), "strategies": {}, "sorties_gemini": None, "killmode": None, "diagnostic_v1": {}}
     try:  # base pas encore migrée par le worker (lecture seule) : tableau vide plutôt qu'une erreur
         out["strategies"] = _strategies(conn)
+        out["sorties_gemini"] = out["strategies"].pop("_n6", None)
+        out["killmode"] = out["strategies"].pop("_kill", None)
         out["diagnostic_v1"] = diagnostic_v1(conn)
     except sqlite3.Error as exc:
         out["erreur"] = f"base pas encore prête : {exc}"
@@ -251,7 +474,8 @@ CACHE_KEY = "strategies"
 
 
 def signature(conn: sqlite3.Connection) -> list:  # worker seulement (base migrée)
-    return list(conn.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM strat_trades").fetchone())
+    sig = list(conn.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM strat_trades").fetchone())
+    return sig + [conn.execute("SELECT COUNT(*) FROM progress WHERE job = ?", (U.COVERAGE_JOB,)).fetchone()[0]]
 
 
 def cached(conn: sqlite3.Connection) -> dict | None:
@@ -267,14 +491,45 @@ def _r(x) -> str:
     return "n/d" if x is None else f"{x:+.2f}".replace(".", ",")
 
 
+def _z(x) -> str:
+    return "n/d" if x is None else f"{x:g}".replace(".", ",")
+
+
+def _after_seen(it: dict) -> str:
+    """n° 6 : Killmode et la n° 4 sont jugés sur les jours qui suivent ceux déjà lus quand ils ont été choisis."""
+    if "jours_vus_jusqu_au" not in it:
+        return ""
+    sub = it.get("jours_suivants")
+    seen = date.fromisoformat(it["jours_vus_jusqu_au"]).strftime("%d/%m/%Y")
+    if not sub or not sub["declenches"]:
+        return f" · jugée après le {seen} : pas encore de trade"
+    ref = sub["esperance_ibkr_r"] if sub.get("esperance_ibkr_r") is not None else sub["esperance_r"]
+    return f" · jugée après le {seen} : {_r(ref)} R, {sub['declenches']} trades, z témoin {_z(sub['temoin']['z'])}"
+
+
+def _kill_text(kill: dict) -> str:
+    """n° 6 : décomposition de Killmode (mesures, pas des essais) et couverture de l'univers."""
+    sel, cond, lim = kill["selection"], kill["conditions"], kill["limite_11h"]
+    parts = [f"gap et ATR forts {_r(sel['ecart_r'])} R sur l'écart d'orb15 à son témoin (z {_z(sel['z'])})",
+             f"conditions de prix {_r(cond['ecart_r'])} R (z {_z(cond['z'])})",
+             f"limite de 11 h {_r(lim['esperance_r'])} R par séance (z {_z(lim['z'])}, "
+             f"{lim['seances_differentes']} séance(s) changée(s) sur {lim['n']})"]
+    cov = kill.get("couverture")
+    if cov and cov["part"] is not None:
+        parts.append(f"univers : {round(100 * cov['part'])} % des actions en gap ≥ 4 % et ATR ≥ 4 % "
+                     f"({cov['dans_univers']}/{cov['gappers']}, {cov['seances']} séances)")
+    return "Killmode décomposé (n° 6, mesure) : " + " · ".join(parts)
+
+
 def text(rep: dict | None) -> str:
     if not rep:
         return "🧪 **Stratégies du labo v2** : pas encore de mesure (le rejeu n'a pas encore traité de jour avec elles)."
     decl = rep["declaration"]
     lines = [f"🧪 **Stratégies du labo v2** · {decl['essais']} essais déclarés (déclaration n° "
              f"{decl.get('numero', 1)}) · espérance nette en R par trade [IC 95 %], actions après commission "
-             f"IBKR estimée · ✅ = IC au-dessus de 0 et témoin battu à z ≥ "
-             f"{str(decl.get('z_candidate', 2)).replace('.', ',')}"]
+             f"IBKR estimée · ✅ = IC au-dessus de 0, témoin battu à z ≥ "
+             f"{str(decl.get('z_candidate', 2)).replace('.', ',')} et robuste (glissement ×2 et ×3, retard, "
+             f"deux moitiés des jours)"]
     for market, items in (rep.get("strategies") or {}).items():
         lines.append(f"**{MARKET_FR.get(market, market)}**")
         for name, it in items.items():
@@ -289,7 +544,25 @@ def text(rep: dict | None) -> str:
                          f"{it['jours']} j · réussite {round(100 * (it['reussite'] or 0))} % · frais "
                          f"{_r(-(it.get('frais_r') or 0)) if it.get('frais_r') is not None else 'n/d'} R{comm} · "
                          f"vs témoin {_r(wit.get('ecart_r'))} R (z {wit.get('z') if wit.get('z') is not None else 'n/d'})"
-                         + (" · échantillon faible" if it.get("echantillon_faible") else ""))
+                         + (" · échantillon faible" if it.get("echantillon_faible") else "") + _after_seen(it))
+    n6 = rep.get("sorties_gemini")
+    if n6:
+        names = {"r_vwap": "VWAP après 10 h 30", "r_1430": "time stop 14 h 30", "r_spy": "avalement de SPY"}
+        stock = (rep.get("strategies") or {}).get("stock") or {}
+        parts = []
+        for c, res in n6["ecarts"].items():
+            helped = sum(bool(((it.get("ecarts_sorties") or {}).get(c) or {}).get("aide")) for it in stock.values())
+            parts.append(f"{names.get(c, c)} {_r(res['esperance_r'])} R (z {_z(res['z'])}"
+                         + (f", ✅ sur {helped} stratégie{'s' if helped > 1 else ''}" if helped else "") + ")")
+        if parts:
+            lines.append("Sorties de Gemini (n° 6), écart à la sortie v1, toutes stratégies actions : "
+                         + " · ".join(parts))
+        if n6["par_vwap"]:
+            lines.append("Entrée selon l'heure et le VWAP (mesure, pas un essai) : " + " · ".join(
+                f"{k} {_r(v['esperance_r'])} R ({v['n']})" for k, v in n6["par_vwap"].items()))
+    kill = rep.get("killmode")
+    if kill:
+        lines.append(_kill_text(kill))
     diag = (rep.get("diagnostic_v1") or {}).get("stock")
     if diag:
         gaps = " · ".join(f"{k} {_r(v['esperance_r'])} ({v['n']})" for k, v in diag["par_gap"].items())

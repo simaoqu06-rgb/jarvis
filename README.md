@@ -325,11 +325,17 @@ résistances seules, plus sortie sur alerte de retournement, ou sur alerte confi
 Liste, seuils et sorties sont déclarés d'avance : [docs/labo-strategies.md](docs/labo-strategies.md).
 
 - Chaque trade est mesuré avec sept sorties (gestion v1, sans break-even, 2 R, stop suiveur, trois
-  EmperorBTC), trois tests de robustesse (glissement ×2 et ×3, entrée retardée, ordres limités à peine
+  EmperorBTC), plus trois en actions (déclaration n° 6, règles de Gemini : clôture sous le VWAP après
+  10 h 30, time stop à 14 h 30, avalement baissier de SPY),
+  trois tests de robustesse (glissement ×2 et ×3, entrée retardée, ordres limités à peine
   touchés) et un **témoin aléatoire** (même stop, mêmes objectifs, entrée au hasard, moyenne de 5
   tirages) : une stratégie qui ne bat pas son témoin n'a pas d'avantage d'entrée.
 - Classement à l'espérance nette en R (intervalle en grappes par jour), jamais au taux de réussite ; en
   actions, après la commission IBKR Fixe estimée (0,005 $ par action), avec les frais par tranche.
+  « Candidate » exige aussi de tenir sous les tests de robustesse et sur chaque moitié des jours (n° 6).
+- Killmode décomposé (n° 6, sans essai) : tranches de gap, d'ATR, de volume des 15 premières minutes et de
+  stop touché avant l'entrée, trois comparaisons avec `orb15`, part des gappers présents dans l'univers.
+  Killmode et la n° 4 sont jugées sur les jours qui suivent ceux déjà lus quand elles ont été choisies.
 - Diagnostic de v1 : espérance par gap d'ouverture, mode d'entrée, raison de sortie, brut contre net.
 - **Bloc scellé** : le rejeu du 6 avril au 5 octobre 2026 est calculé mais rangé à part, invisible des
   statistiques, du brief, du grade et du validateur (`app/lab/seal.py`). Il sert une seule fois.

@@ -54,20 +54,24 @@ Chacun compte, gagnant ou non, dans toute correction statistique future.
 - `r_retard` : ordre posé une bougie plus tard ;
 - `r_manque` : un ordre limité (v1) traversé de moins de 0,1 % est compté comme non exécuté.
 
+Depuis la déclaration n° 6, ces tests comptent dans la règle « candidate » (voir « Lecture des résultats »).
+
 ## Témoin aléatoire
 
 Pour chaque trade déclenché : même jour, même fenêtre, même stop en %, mêmes objectifs en R, entrée au
 marché à une bougie tirée au hasard (graine fixe, reproductible). L'écart stratégie − témoin, apparié
 trade par trade, dit si l'**entrée** apporte quelque chose. Une stratégie qui ne bat pas son témoin n'a
-pas d'avantage d'entrée, quelle que soit son espérance.
+pas d'avantage d'entrée, quelle que soit son espérance. Exception depuis la n° 6 : le témoin de `killmode`
+tire ses entrées entre 9 h 45 et 11 h, la vie de son ordre.
 
 ## Lecture des résultats
 
 - Classement par **espérance nette en R** avec son intervalle de confiance à 95 % en grappes par jour.
   Le taux de réussite est affiché, jamais utilisé pour classer.
 - « Candidate » (✅) = borne basse de l'intervalle au-dessus de zéro, au moins 30 trades, et écart au
-  témoin avec z ≥ 2 (relevé au seuil corrigé du nombre d'essais par la déclaration n° 2). Ce n'est pas
-  une promotion.
+  témoin avec z ≥ 2 (relevé au seuil corrigé du nombre d'essais par la déclaration n° 2). Depuis la n° 6,
+  il faut aussi que l'espérance de référence reste positive sous chaque test de robustesse (nets de la
+  commission IBKR) et sur chaque moitié chronologique des jours. Ce n'est pas une promotion.
 - Aucune promotion avant : au moins un an de rejeu couvrant au moins deux régimes de marché, puis une
   seule ouverture du bloc scellé, puis le forward-test.
 
@@ -305,6 +309,134 @@ de plus (7 essais), qui réutilise bougies, simulateur et témoin ; le rattrapag
 comme à la n° 4. Critique : la tonalité des actus est lue par mots-clés et l'univers du labo compte peu de
 petites valeurs, où les gaps de +4 % sont les plus fréquents : le rejeu verra moins de trades Killmode que la
 réalité, d'où le journal des appels en direct pour juger le mode complet.
+
+**Corrections du 8 octobre (fil « JARVIS Killmode », écrites avec la n° 6, avant tout résultat de Killmode)** :
+- « Aucun résultat n'a orienté ces paramètres » : vrai pour la règle de Killmode elle-même, faux pour son
+  squelette. Son entrée et son stop sont ceux d'`orb15`, lue sur 64 jours avant de le choisir, et le seuil de
+  gap a été posé après la lecture du potentiel +10 (70 jours). D'où le jugement sur les jours suivants (n° 6).
+- « Ce que Simão reçoit et ce que le labo mesure ne peuvent pas diverger » : faux au moment de la n° 5. Le
+  direct exigeait 51 séances d'historique contre 15, triait d'abord sur un ATR simple et sur le gap du moment
+  (clôture IEX), et lit Twelve Data au lieu d'Alpaca SIP. Les trois premiers écarts sont corrigés dans la PR
+  du fil Killmode ; le direct lit toujours Twelve Data (bougies en temps réel), noté dans chaque appel du
+  journal.
+- « La note composite de v1, qui compte déjà le catalyseur » : vrai en direct, faux au rejeu, où la note est
+  calculée sans sa part catalyseur (`app/lab/status.py`, limites).
+- Fait à écrire : l'ordre stop d'achat n'est pas annulé si le stop est touché avant l'entrée, au labo
+  (`simulator.py`) comme en direct. La colonne `stop_avant_entree` de la n° 6 compte ces cas.
+- Règle de lecture du journal des appels (codée dans `!kill bilan`, PR du fil Killmode) : à 30 appels 🔪 KILL
+  déclenchés et soldés, intervalle à 95 % en grappes par jour. Borne haute sous zéro : « JARVIS recommande
+  d'éteindre Killmode ; à toi de décider ». Borne basse au-dessus de zéro : on continue. Sinon on continue
+  jusqu'à 100 appels ; à 100 sans écart démontré à zéro, JARVIS dit qu'il ne voit pas d'avantage et Simão
+  décide. Les appels sont comptés par règle (`killmode.RULE` et seuils) : une déclaration qui change la règle
+  de Killmode passe `killmode.RULE` à son numéro. Le journal tient aussi un groupe « témoin catalyseur »
+  (mêmes piliers sauf le catalyseur), seule mesure possible de l'apport du catalyseur, qui ne se rejoue pas.
+
+## Déclaration n° 6 (8 octobre 2026) : trois règles de sortie de Gemini, actions
+
+Demande de Simão (carte du 8 octobre, 00 h 44 UTC, « Les tester », fil « Avis sur un actif et positions
+ouvertes ») : mesurer trois règles que Gemini présente comme acquises, avant que JARVIS en utilise une.
+Ce qu'on en sait avant de mesurer : Gemini cite une baisse de 15 à 20 % du taux de réussite sous le VWAP
+sans source, et justifie le time stop par « ±0,03 R, comme tu l'as mesuré », qui est l'écart entre nos
+sorties, pas le résultat de garder après 14 h 30 ; GPT a retiré ces deux règles faute de preuve. Au tableau
+de la n° 3 (octobre-décembre 2024), les sept sorties finissent à moins de 0,05 R les unes des autres en
+actions. Demande complète : `/mnt/project-files/labo/demande-tests-regles-gemini.md`.
+
+Chaque règle s'ajoute **seule** à la gestion de référence (`r_net` : un tiers à chaque objectif, stop à
+l'entrée après TP1), sur les mêmes trades, pour toutes les stratégies actions et v1 :
+
+| Colonne | Règle | Exécution |
+|---|---|---|
+| `r_vwap` | Une bougie de 5 min close à partir de 10 h 30 New York finit sous le VWAP de séance : sortie de toute la position | à la clôture de la bougie suivante |
+| `r_1430` | Position encore ouverte à 14 h 30 New York sans TP1 touché : sortie | à 14 h 30 |
+| `r_spy` | Avalement baissier de SPY en 5 min (bougie rouge dont le corps englobe celui de la verte précédente) | à la clôture de la bougie suivante |
+
+- Une bougie de retard pour le VWAP et SPY : ce sont des alertes, Simão passe l'ordre à la main (même
+  convention que `r_emperor_alerte`). Le time stop est une heure connue d'avance : pas de retard.
+- Une règle qui ne se déclenche pas pendant que la position est ouverte laisse le résultat de `r_net`.
+- Pas de condition de volume sur le VWAP : le « volume vendeur » de Gemini ne se lit pas sur des bougies
+  OHLCV, et une variante de plus coûterait des essais. SPY et pas QQQ : c'est déjà l'indice du labo, et en
+  prendre un seul évite de choisir après coup. Les bougies de 5 min de SPY de la séance sont collectées en
+  plus (une requête Alpaca par jour) ; un jour sans elles, `r_spy` n'est pas mesuré.
+- Non testé : la sortie forcée à 14 h 30 sans condition (GPT) ; la « sortie à la clôture si ni stop ni
+  objectif » est déjà la règle du labo (tout est soldé à la clôture).
+
+**Jugement, fixé avant le premier résultat** : pour chaque stratégie, écart apparié de la règle à `r_net`,
+trade par trade, avec son z en grappes par jour. La règle « aide » si l'écart est positif avec z au-dessus
+du seuil « candidate » et au moins 30 trades. Rien ne change dans JARVIS en direct avant la règle de
+promotion habituelle (un an de rejeu, deux régimes, une ouverture du bloc scellé, le forward-test).
+
+**Essais déclarés : 139** (112 + 9 couples actions × 3 sorties, Killmode compris) ; seuil « candidate » : **z ≥ 3,38**.
+
+**Mesure sans essai** : le filtre d'entrée VWAP que GPT propose (pas d'entrée avant 10 h 30, puis seulement
+au-dessus du VWAP). La position de la décision par rapport au VWAP est gardée (`sur_vwap`) et le tableau
+donne l'espérance de référence par tranche : décision avant 10 h 30, après au-dessus du VWAP, après en
+dessous (v1, décidée à 9 h 10, est toujours « avant »). Tester le filtre comme essai aurait doublé les
+stratégies actions ; une tranche qui tiendrait deviendrait une déclaration à part.
+
+Les jours déjà traités sont recalculés par le rattrapage (`progress_job` change avec le numéro).
+
+### Mesure de Killmode, sans essai de plus (fil « JARVIS Killmode », 8 octobre)
+
+Le fil Killmode a passé au council les astuces de Gemini et de GPT (GO modifié) : aucune règle de prix ne
+change, aucune stratégie ni sortie de plus, donc toujours **139 essais**. Ce qui suit rend la mesure de
+Killmode décomposable. Elle part avec la n° 6 : une colonne ajoutée plus tard coûterait un rattrapage complet
+de plus (toutes les bougies de 5 min relues à la source).
+
+- **Trois colonnes** sur chaque ligne actions, sans rien filtrer : `atr_pct` (ATR 14 jours de la veille en %
+  du cours, v1 comprise), `vol15_adv` (volume des 15 premières minutes rapporté au volume journalier moyen des
+  20 séances d'avant, connu à 9 h 45, donc pas pour v1 décidée à 9 h 10) et `stop_avant_entree` (1 si le stop
+  est touché entre la décision et la bougie d'exécution exclue, sur un ordre stop déclenché : le « stop
+  balayé puis cassure » que l'ordre de Killmode, valable jusqu'à 11 h sans annulation, achète déjà ; c'est
+  l'idée « piège d'ouverture » de Gemini, mesurée sans essai). Crypto : vides.
+- **Témoin de Killmode** limité à la vie de son ordre (entrées tirées entre 9 h 45 et 11 h) : son ordre
+  expire à 11 h, un témoin tiré jusqu'à 15 h mêlerait l'effet du signal et celui de l'heure. Son z ne se
+  compare donc plus à celui d'`orb15` (voté 2 contre 1, le Critique voulait garder le témoin commun).
+- **Jours suivants** : `killmode`, `cassure_zone_retest_15m` et `cassure_zone_retest_1h` ne sont jugées que
+  sur les jours après le **27 janvier 2025** (actions) et le **3 mars 2025** (crypto), derniers jours rejoués
+  affichés par le labo quand elles ont été choisies (8 octobre, 1 h 45 UTC). Leur « candidate » se calcule
+  sur ces jours seulement (`jours_suivants` dans le tableau, avec les mêmes clés).
+- **Robustesse dans la règle « candidate »**, pour toutes les stratégies : la référence doit rester positive
+  sous le glissement ×2 et ×3, l'entrée retardée et les ordres limites manqués (nets de la commission IBKR),
+  et sur chaque moitié chronologique des jours. Le plan l'exigeait (lot 1, point 7 : « une stratégie qui ne
+  tient pas sous ces conditions est écartée ») et le tableau ne l'appliquait pas. Aucune stratégie n'est
+  candidate aujourd'hui : aucun statut ne tombe après coup. Limite : le glissement suit des paliers de prix
+  et pèse peu en R sur les ranges larges des gappers, le test est donc faible pour Killmode.
+- **Tranches**, bornes figées ici, sur les lignes déclenchées des stratégies v2 actions (v1 exclue), en
+  espérance de référence avec intervalle en grappes, par stratégie et toutes ensemble :
+  gap à l'ouverture < −5, −5 à −2, −2 à −0,5, ±0,5, +0,5 à +2, +2 à +4, +4 à +5, +5 à +10, ≥ +10 % ;
+  ATR < 2, 2-4, 4-6, 6-10, ≥ 10 % ; `vol15_adv` < 0,25, 0,25-0,5, 0,5-1, ≥ 1 ; place pour 2 R
+  (2 × risque en % / ATR en %) < 0,5, 0,5-1, ≥ 1 ; stop touché avant l'entrée ou non.
+- **Trois comparaisons** (z en grappes par jour ; pour deux groupes, z approché en les supposant
+  indépendants) : 1. la sélection, écart `orb15` − témoin sur les séances à gap ≥ +4 % et ATR ≥ 4 % contre
+  les autres ; 2. les conditions de prix, parmi ces séances, `orb15` quand Killmode a une ligne contre sans ;
+  3. la limite de 11 h, par séance où Killmode a une ligne, R Killmode − R `orb15` (0 sans trade).
+- **Couverture de l'univers** : pour chaque séance rejouée (hors bloc scellé), parmi toutes les actions du
+  journalier Alpaca ouvertes en gap ≥ +4 % avec un ATR de Wilder ≥ 4 %, la part présente dans l'univers du
+  labo, par prix de la veille (< 1 $, 1-5, 5-20, ≥ 20 $). Comptage seulement (`universe.killmode_coverage`,
+  quelques séances par passage du worker). Si la part est faible, Simão choisira entre un univers de gappers
+  réservé à Killmode et rien.
+- Personne ne lit ces tranches ni ces comparaisons avant le déploiement : les lignes d'`orb15` à gap ≥ +4 %
+  sont déjà en base et contiennent presque tous les futurs trades Killmode avec le même R. Un seuil qui en
+  sortirait serait une déclaration suivante, jugée sur les jours suivants.
+
+Avis de ce fil sur ces propositions (esprit critique, avant de les écrire) : gardées telles quelles, les
+colonnes, le témoin, les jours suivants, les tranches et la couverture. Deux points corrigés :
+- la règle de robustesse compte aussi le glissement ×3 et les ordres limites manqués, comme le plan
+  l'écrit, au lieu du seul ×2 proposé ;
+- la comparaison de la limite de 11 h telle que proposée (R Killmode − R `orb15` sur les séances où Killmode
+  s'exécute) vaut toujours zéro. Les deux ordres sont identiques jusqu'à 11 h, donc quand Killmode s'exécute,
+  `orb15` s'exécute à la même bougie avec le même résultat. L'effet de la limite vient des seuls trades
+  d'`orb15` exécutés entre 11 h et 12 h, d'où la mesure par séance avec 0 sans trade.
+Aussi, sur la remarque du fil, les ventilations par régime et par rang se lisent désormais en espérance de
+référence (après commission IBKR en actions), comme le classement.
+
+**Council** (Sceptique, Pragmatique, Critique : GO modifié). Sceptique : les chiffres de Gemini sont sans
+source et l'étude que cite GPT (Gao, Han, Li et Zhou, « Market intraday momentum », Journal of Financial
+Economics, 2018) va plutôt contre le time stop : la première demi-heure prédit en partie la dernière. On
+s'attend à ce qu'aucune règle n'aide ; c'est justement pour cela qu'on mesure avant de les appliquer.
+Pragmatique : le coût est faible (mêmes trades simulés, une requête SPY par jour, seuil de 3,32 à 3,38) et
+la réponse arrive avec le rattrapage. Critique : une variable à la fois sur `r_net` ; volume et QQQ écartés
+pour ne pas multiplier les variantes ; le filtre d'entrée reste une mesure.
 
 ## Bloc scellé
 

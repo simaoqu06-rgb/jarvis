@@ -23,6 +23,8 @@ Toutes les ~10 min :
 8. Lot B : « potentiel » (potentiel.py, part des séances qui touchent +8 % selon le gap, fichier
    lab_potentiel.json lu par le scanner) et « derives » (derivs.py, funding et open interest Bybit, lus
    par le tableau des stratégies crypto), dans le budget derivs_calls de la période.
+9. Déclaration n° 6 : « couverture » (universe.coverage_step), part des actions ouvertes en gap ≥ 4 % avec un
+   ATR ≥ 4 % présentes dans l'univers du labo, quelques séances par passage (coverage_days).
 Le battement (lab.heartbeat) porte l'étape en cours, affichée par /api/lab/status et !labo.
 Le rejeu couvre JARVIS_LAB_REPLAY_DAYS séances (504 ≈ 2 ans) avant le premier lancement du worker ;
 le direct prend le relais à partir de ce jour-là. JARVIS_LAB_ENABLED=off met le worker en veille.
@@ -49,6 +51,7 @@ from app.lab import runner as R
 from app.lab import stats as STATS
 from app.lab import strat_stats as SS
 from app.lab import summary as SUM
+from app.lab import universe as U
 from app.lab import validator as V
 from app.lab.db import LabDB, now_iso
 from app.sources import alpaca
@@ -69,9 +72,12 @@ KEY_WARNING_SECONDS = 3600
 # Labo 2 : jours de mouvements calculés, appels Finnhub, règles validées et âge maximal des
 # statistiques en cache (secondes), par période.
 LAB2_BUDGET = {
-    "nuit": {"moves_days": 30, "news_calls": 40, "rules": 3, "stats_age": 3600, "derivs_calls": 300},
-    "jour": {"moves_days": 5, "news_calls": 10, "rules": 1, "stats_age": 3 * 3600, "derivs_calls": 100},
-    "seance": {"moves_days": 2, "news_calls": 0, "rules": 0, "stats_age": 6 * 3600, "derivs_calls": 30},
+    "nuit": {"moves_days": 30, "news_calls": 40, "rules": 3, "stats_age": 3600, "derivs_calls": 300,
+             "coverage_days": 60},
+    "jour": {"moves_days": 5, "news_calls": 10, "rules": 1, "stats_age": 3 * 3600, "derivs_calls": 100,
+             "coverage_days": 10},
+    "seance": {"moves_days": 2, "news_calls": 0, "rules": 0, "stats_age": 6 * 3600, "derivs_calls": 30,
+               "coverage_days": 2},
 }
 _key_warned_at: float | None = None
 
@@ -366,6 +372,7 @@ async def lab2(db: LabDB, now: datetime, collect: bool = True) -> dict:
     await step("regimes", lambda: sum(REG.refresh(db, m) for m in R.MARKETS))
     await step("mouvements", lambda: CAT.backfill_moves(db, now, budget["moves_days"]))
     await step("potentiel", lambda: PO.step(db))
+    await step("couverture", lambda: U.coverage_step(db, budget["coverage_days"]))
     if collect:
         await step("derives", lambda: DER.collect(db, now, budget["derivs_calls"]))
     if collect and not CO.CAL.session_open(now):
