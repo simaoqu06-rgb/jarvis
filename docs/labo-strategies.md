@@ -270,6 +270,42 @@ bougies longues viennent des 5 min déjà chargées) ; le rattrapage refait les 
 n° 3. Critique : pas de 1 h en actions plutôt que de rallonger l'historique (et les appels Alpaca) du rejeu ;
 le témoin reste celui des autres stratégies, pour que l'écart mesure bien l'entrée.
 
+## Déclaration n° 5 (8 octobre 2026) : JARVIS Killmode
+
+Demande de Simão : une version parallèle de JARVIS, « Killmode », pour les trades à haute volatilité, qui ne
+propose que des setups complets (catalyseur, lecture de graphique, données complètes, fiche société), qu'il
+allume lui-même, hors de toute routine, et qui a sa place au labo. Le code en direct est
+`app/trading/killmode.py` (`!kill …` sur Discord, éteint par défaut). Aucun résultat n'a orienté ces
+paramètres : ils sont posés avant le premier rejeu de la stratégie.
+
+Killmode a deux parties, mesurées chacune là où elle peut l'être sans voir l'avenir :
+
+| Nom | Marchés | Règle |
+|---|---|---|
+| `killmode` | actions | Jour retenu si le gap à l'ouverture est d'au moins **+4 %** et l'ATR 14 jours connu la veille d'au moins **4 %** du cours. Range des 15 premières minutes : sa dernière bougie clôture au-dessus du VWAP de la séance et son plus bas reste au-dessus de la clôture de la veille (gap pas comblé). Ordre stop d'achat 1 pas au-dessus du plus haut du range, valable jusqu'à **11 h New York** ; stop 1 pas sous le plus bas du range ; objectifs 1, 2 et 3 R. |
+
+- **Rejeu** : la règle de prix ci-dessus, comme stratégie du labo v2 (mêmes sorties, tests de robustesse,
+  témoin, commission IBKR). La même fonction (`strategies.killmode_check`) sert en direct : ce que Simão reçoit
+  et ce que le labo mesure ne peuvent pas diverger.
+- **Journal des appels** : le catalyseur (actu positive de moins de 48 h ou résultats battus, sans
+  augmentation de capital ni résultats dans les 24 h) et la fiche société ne se rejouent pas, Finnhub gratuit
+  ne remontant qu'un an. Chaque 🔪 KILL proposé en direct est noté (`data/killmode_calls.json`) et soldé après
+  la clôture par `!kill bilan` avec le simulateur du labo : ordre stop d'achat posé à l'heure de l'appel,
+  sortie v1, soldé à la clôture, net de la commission IBKR. Lecture à partir de 30 appels soldés.
+- En direct, un setup dont le prix est déjà à plus de 0,5 R au-dessus de l'entrée n'est pas proposé (on ne
+  court pas après) ; le journal mesure ce qui a été proposé, à l'heure où il l'a été.
+
+**Essais déclarés : 112** (105 + 1 couple × 7 sorties) ; seuil « candidate » : **z ≥ 3,32**.
+Les jours déjà traités sont recalculés par le rattrapage (`progress_job` change avec le numéro).
+
+**Council** (Sceptique, Pragmatique, Critique : GO modifié). Sceptique : « setup complet » ne veut pas dire
+« setup gagnant » ; la note composite de v1, qui compte déjà le catalyseur, n'a rien prédit (GO ≈ NO GO ≈
+−0,24 R), donc Killmode est une hypothèse à mesurer, pas un avantage acquis. Pragmatique : une seule stratégie
+de plus (7 essais), qui réutilise bougies, simulateur et témoin ; le rattrapage refait les jours déjà traités,
+comme à la n° 4. Critique : la tonalité des actus est lue par mots-clés et l'univers du labo compte peu de
+petites valeurs, où les gaps de +4 % sont les plus fréquents : le rejeu verra moins de trades Killmode que la
+réalité, d'où le journal des appels en direct pour juger le mode complet.
+
 ## Bloc scellé
 
 Le rejeu du **6 avril au 5 octobre 2026** est calculé mais rangé à part (`trades_sealed`,
