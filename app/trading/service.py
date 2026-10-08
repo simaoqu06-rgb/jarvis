@@ -521,6 +521,18 @@ class Book:
         return [t for t in self.trades if t["status"] == "open"]
 
 
+def reopen(book: Book, symbol: str, plan: dict) -> dict | None:
+    """Remplace le dernier trade de `symbol` terminé par son stop (stop non exécuté chez le courtier,
+    position toujours tenue) par un trade ouvert sur `plan`. Renvoie l'ancien trade, ou None s'il n'y en a pas."""
+    old = next((t for t in reversed(book.trades) if t["symbol"] == symbol.upper() and t["status"] == "closed"
+                and t["events"] and t["events"][-1]["kind"] == "stop"), None)
+    if old is None:
+        return None
+    book.trades.remove(old)
+    book.add(plan, f"rouvert : stop {_num(old['stop_current'])} non exécuté chez le courtier")
+    return old
+
+
 def _event(trade: dict, kind: str, price: float, at: int) -> None:
     trade["events"].append({"kind": kind, "price": price,
                             "at": datetime.fromtimestamp(at, timezone.utc).isoformat(timespec="seconds")})
