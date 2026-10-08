@@ -115,6 +115,8 @@ Deux ajouts dans `.env`, puis `docker compose up -d` :
    ```
 
    Le bot ne répond qu'à ce compte (plusieurs identifiants possibles, séparés par des virgules).
+   Il t'envoie aussi en privé une copie des alertes de tes trades suivis (`JARVIS_TRADE_DM=off` pour la couper) :
+   le salon ne mentionne personne, le message privé sonne.
 
 ## Labo de performance
 

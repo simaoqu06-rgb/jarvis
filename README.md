@@ -100,7 +100,7 @@ Actions : bougies de 15 min sur environ 190 séances (Twelve Data), horizon 2 s�
 comptant que les heures de cotation.
 
 **Suivi.** Chaque minute pour la crypto, et toutes les 2 minutes pendant la séance pour les actions (limite gratuite de Twelve Data), les bougies d'1 minute disent si un TP ou le stop a été touché ;
-Discord reçoit l'alerte avec le prochain TP et son délai. Le stop reste en place après le TP1 et
+Discord reçoit l'alerte avec le prochain TP et son délai, sur le salon et en message privé (bot configuré). Le stop reste en place après le TP1 et
 remonte à l'entrée après le TP2. Un TP en retard sur ce que 3 cas passés sur 4 avaient fait, ou un
 signe de retournement (divergence, anomalie de volume, bougie de retournement), déclenche une
 alerte de sortie anticipée. Les trades sont gardés dans `data/trades.json` (`JARVIS_TRADES_PATH`).
@@ -417,5 +417,14 @@ Au premier lancement, les séismes et actus déjà publiés sont mémorisés san
 - `POST /api/notify/test` envoie un message de test.
 - `POST /api/notify/brief` envoie le point du matin tout de suite.
 - `GET /api/notify/brief/preview` montre le point du matin sans l'envoyer.
-- `JARVIS_NOTIFICATIONS=off` coupe tous les envois. Sans webhook ou avec `off`, le suivi des trades (TP/SL),
-  le compte fictif et le scanner tournent quand même, sans rien envoyer.
+- `JARVIS_NOTIFICATIONS=off` coupe tous les envois sur le salon. Sans webhook ou avec `off`, le suivi des
+  trades (TP/SL), le compte fictif et le scanner tournent quand même, sans rien envoyer sur le salon.
+
+**En message privé** (bot Discord configuré), et seulement pour ça :
+
+- copie des alertes des trades suivis : TP, stop, sortie anticipée, objectif en retard, conseil avant la
+  clôture US (`JARVIS_TRADE_DM=off` pour la couper ; le salon ne mentionne personne, le privé sonne) ;
+- changement de lettre du grade de JARVIS (un − / + dans la même lettre n'envoie rien), méthode déclarée
+  morte, nouvelle méthode en place, challenger retiré ;
+- réglages proposés avec boutons Approuver / Refuser (bilan du compte fictif, hausse de lettre du grade)
+  et message du matin du labo (`JARVIS_LAB_DM=on`).

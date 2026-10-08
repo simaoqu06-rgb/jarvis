@@ -1,8 +1,9 @@
 """Boucles de fond qui envoient les notifications Discord pendant que le serveur tourne.
 
 Le suivi des trades (TP/SL), le compte fictif et le scanner tournent toujours ; les alertes (point du
-matin, cours, séismes, actus) et tous les envois ne partent que si DISCORD_WEBHOOK_URL est définie
-(et JARVIS_NOTIFICATIONS n'est pas « off »).
+matin, cours, séismes, actus) et tous les envois sur le salon ne partent que si DISCORD_WEBHOOK_URL est
+définie (et JARVIS_NOTIFICATIONS n'est pas « off »). Les alertes des trades suivis partent aussi en
+message privé par le bot (JARVIS_TRADE_DM, activé par défaut), webhook ou pas.
 """
 import asyncio
 import logging
@@ -52,6 +53,14 @@ def _queue(texts: list[str] | str, kind: str = "alerte", **kw) -> None:
     """Met en file seulement si les envois sont actifs (sinon la file grossirait sans jamais partir)."""
     if enabled():
         outbox.add(texts, kind, **kw)
+
+
+def _dm_trades(texts: list[str] | str) -> None:
+    """Copie en privé des alertes des trades suivis : le salon ne mentionne personne, le message privé
+    sonne. Ne dépend pas du webhook (JARVIS_TRADE_DM=off pour la couper)."""
+    if bot.enabled() and bot.trade_dm_on():
+        for text in [texts] if isinstance(texts, str) else texts:
+            bot.offer_trade_text(text)
 
 
 def _kick_outbox() -> None:
@@ -135,6 +144,7 @@ async def tick_disk() -> None:
 async def tick_trades() -> None:
     messages = await trading.check_trades(book, save=False)
     _queue(messages, "trade")  # sur disque avant l'état des trades : un TP/SL ne se perd plus
+    _dm_trades(messages)
     book.save()
     _kick_outbox()
     if enabled() and os.getenv("JARVIS_DISCORD_COCKPIT", "on").lower() != "off" and (book.trades or state.data.get("cockpit_message_id")):
@@ -169,6 +179,7 @@ async def tick_closing(now: datetime | None = None) -> None:
         book.save()
         text = advice.closing_text(advices, advice.advice_stats(book.trades), (close - now).total_seconds() / 60)
         _queue(text, "conseil de clôture", expires_at=close)
+        _dm_trades(text)
         _kick_outbox()
 
 
