@@ -200,8 +200,10 @@ async def test_comptes_sans_contenu(db, news, tmp_path):
     c = ARC.counts(db.conn)
     assert c == {"seances": 1, "du": D.isoformat(), "au": D.isoformat(), "sans_journalier": 0, "gappers": 2,
                  "archives": 2, "a_chercher": 0, "erreurs": 0, "hors_profondeur": 0, "prochaine_seance": None,
-                 "dates_resultats": 0, "dates_resultats_erreurs": 0, "profils": 0, "societes": 2}
-    assert "Archive des actus (n° 8) : 2/2 gappers sur 1 séances" in ARC.line(c)
+                 "dates_resultats": 0, "dates_resultats_erreurs": 0, "profils": 0, "societes": 2, "rejouees": 0}
+    assert "Archive des actus (n° 8) : 2/2 gappers sur 1 séances" in ARC.line(c) and "rejoué" not in ARC.line(c)
+    db.set(ARC.KILL_JOB, D.isoformat(), {"gappers": 2, "archives": 2, "signaux": 0})
+    assert ARC.line(ARC.counts(db.conn)).endswith("Killmode complet rejoué sur 1 séances")
     st = STATUS.status(str(tmp_path / "lab.db"))
     assert st["archive_actus"]["archives"] == 2 and "Archive des actus" in STATUS.text(st)
     assert ARC.counts(LabDB(":memory:").conn) is None

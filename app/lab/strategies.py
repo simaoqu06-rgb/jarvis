@@ -102,6 +102,13 @@ objectifs et note recalculés, donc ses propres GO), seulement sur les jours cal
 rattrapage n'a pas les ~60 séances de bougies de 15 min qu'il faudrait. Le générateur le garde dans trades.plan
 (« plancher ») pour les rattrapages des déclarations suivantes. Chaque ligne garde le statut du GO
 (confirmation : confirme, annule, expire) ; strat_stats compare, GO par GO, « confirmé ou rien » au brut.
+Déclaration n° 8 (8 octobre 2026, docs/labo-strategies.md) : trois bras de plus sur le GO confirmé au stop d'origine,
+après le trade FRSH arrêté au stop (GO_FILTERS, go_filter, lus à la clôture de la bougie de confirmation, même ordre
+que go_confirme quand le filtre passe, sinon pas d'ordre : statut « filtre », ou « indetermine » s'il ne peut pas être
+jugé) : V2, VWAP plus haut qu'il y a 3 bougies et clôture ≥ VWAP + 0,25 ATR de 5 min ; V3, clôture au-dessus du plus
+haut de la séance jusque-là ; V4, variation depuis l'ouverture meilleure que celle de SPY (index_move). Chaque trade
+exécuté garde aussi r_3c (stress de 3 cents de Gemini) et r_20e (mise de Simão), cost_variants. Killmode complet
+(kill_complet.py) compte pour deux essais (KILL_COMPLETE_TRIALS).
 Objectifs : 1, 2 et 3 R. Fenêtre des signaux : actions de 9 h 45 à 15 h New York (soldé à la
 clôture) ; crypto de 0 h à 20 h UTC (soldé 24 h après le signal).
 v1 est rejouée avec les mêmes sorties et tests, sur ses propres objectifs : c'est la référence.
@@ -133,9 +140,9 @@ from app.trading import signals as S
 REGISTERED_ON = "2026-10-08"
 # Déclaration en vigueur (docs/labo-strategies.md). En changer relance le rattrapage de tous les jours déjà
 # traités (progress_job), pour que chaque stratégie soit mesurée sur les mêmes jours.
-DECLARATION = 7
-# Dernière déclaration qui change les lignes crypto : la n° 7 (actions seulement) laisse le rattrapage crypto
-# continuer celui de la n° 6. Une déclaration qui touche la crypto le remonte à son numéro.
+DECLARATION = 8
+# Dernière déclaration qui change les lignes crypto : les n° 7 et 8 (actions seulement) laissent le rattrapage
+# crypto continuer celui de la n° 6. Une déclaration qui touche la crypto le remonte à son numéro.
 CRYPTO_DECLARATION = 6
 BAR = CO.BASE_TF * 60
 REFERENCE = "v1"
@@ -165,9 +172,27 @@ STRATEGIES = {
                          "markets": ("stock",), "go": "plancher", "arm": "brut", "exits": ("r_sans_be",)},
     "go_confirme_plancher": {"label": "GO du direct confirmé (stop plancher 1/3 ATR jour)", "markets": ("stock",),
                              "go": "plancher", "arm": "confirme", "exits": ("r_sans_be",)},
+    # Déclaration n° 8 (trade FRSH arrêté au stop, fil « Avis sur FRSH en pré-market ») : le bras confirmé (stop
+    # d'origine) avec un filtre de plus à la bougie de confirmation ; sans le filtre, pas d'ordre (go_rows).
+    "go_confirme_v2": {"label": "GO confirmé + VWAP qui monte, clôture ≥ VWAP + 0,25 ATR (stop d'origine)",
+                       "markets": ("stock",), "go": "origine", "arm": "confirme_v2", "filtre": "v2",
+                       "exits": ("r_sans_be",)},
+    "go_confirme_v3": {"label": "GO confirmé + clôture au-dessus du plus haut de la séance (stop d'origine)",
+                       "markets": ("stock",), "go": "origine", "arm": "confirme_v3", "filtre": "v3",
+                       "exits": ("r_sans_be",)},
+    "go_confirme_v4": {"label": "GO confirmé + plus fort que SPY depuis l'ouverture (stop d'origine)",
+                       "markets": ("stock",), "go": "origine", "arm": "confirme_v4", "filtre": "v4",
+                       "exits": ("r_sans_be",)},
 }
 GO_STRATEGIES = tuple(k for k, v in STRATEGIES.items() if "go" in v)  # n° 7
 GO_STATUS = {"confirmé": "confirme", "annulé": "annule"}               # n° 7 : sinon « expire »
+GO_FILTERS = {v["filtre"]: k for k, v in STRATEGIES.items() if "filtre" in v}  # n° 8
+GO_FILTER_VWAP_BARS = 3     # n° 8, V2 : VWAP plus haut qu'il y a 3 bougies
+GO_FILTER_ATR = 0.25        # n° 8, V2 : clôture au moins 0,25 ATR (5 min) au-dessus du VWAP
+# n° 8, D1 : Killmode complet (pilier catalyseur rejoué sur l'archive des actus, kill_complet.py) : son espérance
+# à la mise de Simão, et son écart au témoin propre apparié par jour. Deux essais de plus, hors STRATEGIES.
+KILL_COMPLETE_TRIALS = ({"market": "stock", "strategy": "killmode_complet", "exit": "r_20e"},
+                        {"market": "stock", "strategy": "killmode_complet_ecart_temoin", "exit": "r_20e"})
 LABELS = {REFERENCE: "v1 (achat à heure fixe, référence)", **{k: v["label"] for k, v in STRATEGIES.items()}}
 EXITS = {
     "r_net": "sortie v1 : un tiers à chaque objectif, stop à l'entrée après TP1",
@@ -263,7 +288,7 @@ def trials() -> list[dict]:
     for market in ("stock", "crypto"):
         names = [REFERENCE] + [k for k, v in STRATEGIES.items() if market in v["markets"]]
         out += [{"market": market, "strategy": n, "exit": e} for n in names for e in strategy_exits(market, n)]
-    return out
+    return out + list(KILL_COMPLETE_TRIALS)
 
 
 # --- Indicateurs sur bougies de 5 min ---------------------------------------------------------
@@ -350,6 +375,7 @@ class Day:
         self._swing_highs: list[tuple[int, float]] | None = None
         self._frames: dict[int, "Day"] = {}
         self.index_down: list[int] | None = None  # n° 6 : clôtures des avalements baissiers de SPY (stock_day)
+        self.index_move: dict[int, float] | None = None  # n° 8, V4 : variation de SPY depuis l'ouverture, par bougie
         self._kill_ctx: dict | None = None
 
     def frame(self, tf: int | None) -> "Day":
@@ -781,6 +807,23 @@ def _gemini(d: Day, plan: dict, decided_at: int, entry_until: int, exit_at: int,
     return out
 
 
+def cost_variants(market: str, res: dict) -> dict:
+    """n° 8, D2 : le trade exécuté `res` (sortie de référence) recompté autrement que par le simulateur.
+    r_3c : stress de Gemini (3 cents de plus à l'entrée, de moins à chaque sortie au marché : stop, stop à
+    l'entrée, clôture ; objectifs au prix de l'ordre ; commission IBKR par action), killmode.stressed_r.
+    r_20e : à la mise de Simão (20 € de risque au change EURUSD_DEFAULT, un bracket IBKR par objectif avec son
+    minimum par ordre, plan Fixe, glissement du labo), killmode.real_r. Actions seulement."""
+    if market != "stock" or not res.get("triggered") or not res.get("exits"):
+        return {"r_3c": None, "r_20e": None}
+    from app.trading import killmode as K  # import tardif : killmode importe ce module
+
+    o = res["order_prices"]
+    call = {"entry": o["entry"], "stop": o["stop"], "targets": o["targets"] or [o["entry"]]}
+    done = {"declenche": True, "remplissage": res["fill_price"], "eurusd": K.EURUSD_DEFAULT, "plan_ibkr": "fixe",
+            "sorties": [{"part": e["part"], "prix": e["price"], "raison": e["reason"]} for e in res["exits"]]}
+    return {"r_3c": K.stressed_r(call, done), "r_20e": K.real_r(call, done)}
+
+
 def measure(d: Day, plan: dict, decided_at: int, entry_until: int, cost: dict, order: str, last_price: float,
             res: dict | None = None, emperor_plan: dict | None = None) -> dict:
     """Toutes les sorties et tous les tests d'un plan (ordre `order`) décidé à `decided_at`.
@@ -807,6 +850,7 @@ def measure(d: Day, plan: dict, decided_at: int, entry_until: int, cost: dict, o
     late = _sim(d, plan, decided_at + BAR, entry_until + BAR, exit_at, cost, order, last_price)
     out["r_retard"] = late["r_net"] if late["triggered"] else None
     out["r_manque"] = None if _missed(res, d) else res["r_net"]
+    out.update(cost_variants(d.market, res))  # n° 8, D2
     return out
 
 
@@ -943,6 +987,36 @@ def confirm_event(d: Day, entry: float, stop: float, targets: list[float]) -> di
     return CF.evaluate(go, bars, datetime.fromtimestamp(d.start_ts, timezone.utc))
 
 
+def go_filter(d: Day, name: str, k: int) -> bool | None:
+    """n° 8 : filtre FRSH lu à la clôture de la bougie de confirmation k ; None s'il ne peut pas être jugé.
+    v2 : VWAP plus haut qu'il y a GO_FILTER_VWAP_BARS bougies et clôture ≥ VWAP + GO_FILTER_ATR × ATR 5 min ;
+    v3 : clôture au-dessus du plus haut des bougies de la séance d'avant ;
+    v4 : variation depuis l'ouverture meilleure que celle de SPY à la même bougie (pas d'ETF de secteur au labo)."""
+    if not d.d0 < k < len(d.t):
+        return None
+    if name == "v2":
+        j = k - GO_FILTER_VWAP_BARS
+        if j < d.d0 or d.vwap[k] is None or d.vwap[j] is None or d.atr[k] is None:
+            return None
+        return d.vwap[k] > d.vwap[j] and d.c[k] >= d.vwap[k] + GO_FILTER_ATR * d.atr[k]
+    if name == "v3":
+        return d.c[k] > max(d.h[d.d0:k])
+    if name == "v4":
+        spy = (d.index_move or {}).get(d.t[k])
+        if spy is None or d.o[d.d0] <= 0:
+            return None
+        return d.c[k] / d.o[d.d0] - 1 > spy
+    raise ValueError(f"filtre {name} inconnu")
+
+
+def index_move(index5: list[dict] | None, start_ts: int) -> dict[int, float] | None:
+    """n° 8, V4 : variation de SPY depuis l'ouverture de la séance à la clôture de chaque bougie de 5 min."""
+    bars = CO.regular_hours(sorted(index5 or [], key=lambda b: b["t"]))
+    if not bars or bars[0]["t"] != start_ts or bars[0]["o"] <= 0:
+        return None
+    return {b["t"]: b["c"] / bars[0]["o"] - 1 for b in bars}
+
+
 def go_measure(d: Day, plan: dict, decided_at: int, entry_until: int, cost: dict, order: str,
                last_price: float) -> dict:
     """n° 7 : la seule sortie déclarée (tiers aux objectifs, stop fixe, reste à la clôture : r_sans_be) et ses
@@ -957,7 +1031,8 @@ def go_measure(d: Day, plan: dict, decided_at: int, entry_until: int, cost: dict
             "r_gross": res["r_gross"], "tp1_hit": int(bool(res["tp_hits"] and res["tp_hits"][0])),
             "mfe_r": res["mfe_r"], "mae_r": res["mae_r"], "r_sans_be": res["r_net"],
             "r_glisse_x2": SIM.net_r(res, cost, slip_factor=2.0), "r_glisse_x3": SIM.net_r(res, cost, slip_factor=3.0),
-            "r_retard": late["r_net"] if late["triggered"] else None, "r_manque": res["r_net"]}
+            "r_retard": late["r_net"] if late["triggered"] else None, "r_manque": res["r_net"],
+            **cost_variants(d.market, res)}  # n° 8, D2
 
 
 def go_plans(v1: dict | None) -> dict:
@@ -990,6 +1065,7 @@ def go_rows(d: Day, symbol: str, plans: dict, rank=None, gap: float | None = Non
         status = GO_STATUS.get(ev["kind"], "expire") if ev else "expire"
         opened, start = d.o[d.d0], d.t[d.d0]
         arms = {"brut": (_plan(opened, stop, targets), start, start + BAR, "market", opened, (d.first, d.last))}
+        statuses = {"brut": status, "confirme": status}
         if status == "confirme":
             decided = ev["t"] + BAR
             arms["confirme"] = (_plan(ev["trigger"], stop, targets), decided, until, "stop",
@@ -997,6 +1073,15 @@ def go_rows(d: Day, symbol: str, plans: dict, rank=None, gap: float | None = Non
         else:  # pas d'ordre : la ligne garde l'entrée du plan et l'heure où le GO est tombé
             arms["confirme"] = (_plan(plan["entry"], stop, targets), ev["t"] + BAR if ev else until, until, None,
                                 None, None)
+        for filt, name in GO_FILTERS.items():  # n° 8 : le même ordre, seulement si le filtre passe
+            if STRATEGIES[name]["go"] != variant:
+                continue
+            arm = STRATEGIES[name]["arm"]
+            ok = go_filter(d, filt, bisect_left(d.t, ev["t"])) if status == "confirme" else None
+            statuses[arm] = status if status != "confirme" else "confirme" if ok else \
+                "filtre" if ok is False else "indetermine"
+            arms[arm] = arms["confirme"] if statuses[arm] == "confirme" else \
+                (arms["confirme"][0], arms["confirme"][1], until, None, None, None)
         for arm, (p, decided, entry_until, order, last, window) in arms.items():
             name = f"go_{arm}{suffix}"
             entry = p["entry"]
@@ -1009,7 +1094,7 @@ def go_rows(d: Day, symbol: str, plans: dict, rank=None, gap: float | None = Non
                 wit = witness(d, (d.market, symbol, d.day, name), risk / entry * 100,
                               [round((t - entry) / risk, 4) for t in targets],
                               lambda px: SIM.costs("stock", px, rank), window, exit_mode="sans_be")
-            rows.append(_row(d, symbol, name, 0, p, decided, m, wit, gap, rank) | {"confirmation": status})
+            rows.append(_row(d, symbol, name, 0, p, decided, m, wit, gap, rank) | {"confirmation": statuses[arm]})
     return rows
 
 
@@ -1039,6 +1124,7 @@ def stock_day(day: date, symbol: str, hist5: list[dict], session: list[dict], da
     bars = CO.regular_hours(hist5[-STOCK_WARMUP_BARS * 2:])[-STOCK_WARMUP_BARS:] + session
     d = Day("stock", day, bars, daily)
     d.index_down = index_down(index5)
+    d.index_move = index_move(index5, d.start_ts)  # n° 8, V4
     prev = d.prev_close
     gap = round((session[0]["o"] / prev - 1) * 100, 3) if session and prev else None
     rows = strategy_rows(d, symbol, rank, gap)

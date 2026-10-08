@@ -389,7 +389,7 @@ def test_nouvelle_declaration_relance_le_rattrapage(tmp_path, monkeypatch):
 
 def test_seuil_candidate_corrige_du_nombre_d_essais():
     assert SS.candidate_z(32) == pytest.approx(2.96, abs=0.01) and SS.candidate_z(60) == pytest.approx(3.14, abs=0.01)
-    assert SS.candidate_z() == pytest.approx(3.39, abs=0.001)  # 143 essais (déclaration n° 7)
+    assert SS.candidate_z() == pytest.approx(3.40, abs=0.001)  # 148 essais (déclaration n° 8)
     db = LabDB(":memory:")
     _rows(db, "pullback", 0.3, 0.2, days=40)   # bat son témoin (z ≈ 2,5), mais trop peu pour 60 essais
     db.conn.execute("UPDATE strat_trades SET temoin_r = r_net - (0.1 + CASE WHEN CAST(substr(day, 9, 2) AS INTEGER) "
@@ -467,10 +467,12 @@ def test_essais_declares():
     # Déclaration n° 1 : 32 essais ; n° 2 : + 2 stratégies sur deux marchés et la sortie EmperorBTC partout ;
     # n° 3 : la sortie EmperorBTC en trois variantes ; n° 4 : la cassure de zone en 15 min (deux marchés)
     # et en 1 h (crypto), soit 3 couples de plus ; n° 5 : Killmode (actions), un couple de plus ; n° 6 : 3 sorties
-    # de plus sur les 9 couples des actions ; n° 7 : 2 bras × 2 stops, avec la seule sortie stop fixe.
-    assert len(t) == 143 and len(ST.EXITS) == 7 and len(ST.STOCK_EXITS) == 3
+    # de plus sur les 9 couples des actions ; n° 7 : 2 bras × 2 stops, avec la seule sortie stop fixe ; n° 8 : les
+    # 3 filtres FRSH du bras confirmé (stop d'origine) et Killmode complet (espérance, écart au témoin propre).
+    assert len(t) == 148 and len(ST.EXITS) == 7 and len(ST.STOCK_EXITS) == 3
+    assert t[-2:] == list(ST.KILL_COMPLETE_TRIALS)
     assert {x["exit"] for x in t if x["market"] == "crypto"} == set(ST.EXITS)
-    assert {x["exit"] for x in t if x["market"] == "stock"} == set(ST.EXITS) | set(ST.STOCK_EXITS)
+    assert {x["exit"] for x in t if x["market"] == "stock"} == set(ST.EXITS) | set(ST.STOCK_EXITS) | {"r_20e"}
     assert [x for x in t if x["strategy"] in ST.GO_STRATEGIES] == [
         {"market": "stock", "strategy": n, "exit": "r_sans_be"} for n in ST.GO_STRATEGIES]
 
@@ -577,15 +579,15 @@ def _rows(db, strategy, r, wit, days=40, per_day=3):
         rows = [{"symbol": f"S{j}", "strategy": strategy, "slot": 0, "triggered": 1, "r_net": r + 0.1 * ((j + k) % 3 - 1),
                  "r_sans_be": r, "r_2r": r, "r_suiveur": r, "r_glisse_x2": r - 0.05, "r_glisse_x3": r - 0.1,
                  "r_retard": r, "r_manque": r, "temoin_r": wit + 0.1 * ((j * 2 + k) % 3 - 1), "temoin_triggered": 1,
-                 "tp1_hit": 1} for j in range(per_day)]
+                 "tp1_hit": 1, "r_3c": r - 0.05, "r_20e": r - 0.1} for j in range(per_day)]
         out.append((day, rows))
     for day, rows in out:
         db.conn.executemany(
             "INSERT INTO strat_trades (origin, market, symbol, day, strategy, slot, triggered, r_net, r_sans_be, r_2r, "
-            "r_suiveur, r_glisse_x2, r_glisse_x3, r_retard, r_manque, temoin_r, temoin_triggered, tp1_hit) "
-            "VALUES ('replay', 'stock', ?, ?, ?, 0, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)",
+            "r_suiveur, r_glisse_x2, r_glisse_x3, r_retard, r_manque, temoin_r, temoin_triggered, tp1_hit, r_3c, r_20e) "
+            "VALUES ('replay', 'stock', ?, ?, ?, 0, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?)",
             [(x["symbol"], day, strategy, x["r_net"], x["r_sans_be"], x["r_2r"], x["r_suiveur"], x["r_glisse_x2"],
-              x["r_glisse_x3"], x["r_retard"], x["r_manque"], x["temoin_r"]) for x in rows])
+              x["r_glisse_x3"], x["r_retard"], x["r_manque"], x["temoin_r"], x["r_3c"], x["r_20e"]) for x in rows])
 
 
 def test_tableau_classe_par_esperance_et_exige_de_battre_le_temoin():
@@ -629,4 +631,4 @@ def test_route_api_des_strategies(tmp_path, monkeypatch):
     _rows(db, "pullback", 0.3, -0.2)
     r = TestClient(main.app).get("/api/lab/strategies", headers={"X-Lab-Key": "cle"})
     assert r.status_code == 200 and "pullback" in r.json()["strategies"]["stock"]
-    assert r.json()["declaration"]["essais"] == 143 and r.json()["declaration"]["z_candidate"] == 3.39
+    assert r.json()["declaration"]["essais"] == 148 and r.json()["declaration"]["z_candidate"] == 3.4

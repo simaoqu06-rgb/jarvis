@@ -44,7 +44,7 @@ STRAT_COLUMNS = ("origin", "market", "symbol", "day", "strategy", "slot", "signa
                  "tp1_hit", "mfe_r", "mae_r", "r_sans_be", "r_2r", "r_suiveur", "r_glisse_x2", "r_glisse_x3",
                  "r_retard", "r_manque", "temoin_r", "temoin_triggered", "gap_open_pct", "rank", "r_emperor",
                  "r_emperor_alerte", "r_emperor_confirme", "r_vwap", "r_1430", "r_spy", "sur_vwap", "atr_pct",
-                 "vol15_adv", "stop_avant_entree", "confirmation")
+                 "vol15_adv", "stop_avant_entree", "confirmation", "r_3c", "r_20e")
 STRAT_DDL = """CREATE TABLE IF NOT EXISTS {name} (
     id INTEGER PRIMARY KEY,
     origin TEXT NOT NULL CHECK (origin IN ('replay', 'live')),
@@ -55,7 +55,7 @@ STRAT_DDL = """CREATE TABLE IF NOT EXISTS {name} (
     r_sans_be REAL, r_2r REAL, r_suiveur REAL, r_glisse_x2 REAL, r_glisse_x3 REAL, r_retard REAL, r_manque REAL,
     temoin_r REAL, temoin_triggered INTEGER, gap_open_pct REAL, rank INTEGER, r_emperor REAL,
     r_emperor_alerte REAL, r_emperor_confirme REAL, r_vwap REAL, r_1430 REAL, r_spy REAL, sur_vwap INTEGER,
-    atr_pct REAL, vol15_adv REAL, stop_avant_entree INTEGER, confirmation TEXT,
+    atr_pct REAL, vol15_adv REAL, stop_avant_entree INTEGER, confirmation TEXT, r_3c REAL, r_20e REAL,
     UNIQUE (origin, market, symbol, day, strategy, slot)
 );
 CREATE INDEX IF NOT EXISTS {name}_day ON {name} (market, day);"""
@@ -150,6 +150,14 @@ CREATE TABLE IF NOT EXISTS earnings_days (
     day TEXT PRIMARY KEY, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, n INTEGER, items TEXT,
     fetched_at TEXT, note TEXT
 );
+-- Déclaration n° 8, D1 (kill_complet.py) : Killmode complet rejoué, un signal de la règle de prix par gapper
+-- et séance, avec le groupe que le pilier catalyseur (rejoué sur l'archive) lui donne.
+CREATE TABLE IF NOT EXISTS kill_complet (
+    day TEXT NOT NULL, symbol TEXT NOT NULL, groupe TEXT NOT NULL, codes TEXT, motif TEXT, empreinte TEXT NOT NULL,
+    gap_pct REAL, atr_pct REAL, entry REAL, stop REAL, signal_at INTEGER, triggered INTEGER NOT NULL,
+    exit_reason TEXT, r_net REAL, r_20e REAL, r_3c REAL, actus INTEGER, cout TEXT,
+    PRIMARY KEY (day, symbol)
+);
 -- Bloc scellé (seal.py) : mêmes tables, jamais lues par les statistiques, la routine ni le grade.
 {trades_sealed}
 {strat}
@@ -160,7 +168,7 @@ CREATE TABLE IF NOT EXISTS earnings_days (
 STRAT_MIGRATIONS = (("r_emperor", "REAL"), ("r_emperor_alerte", "REAL"), ("r_emperor_confirme", "REAL"),
                     ("r_vwap", "REAL"), ("r_1430", "REAL"), ("r_spy", "REAL"), ("sur_vwap", "INTEGER"),
                     ("atr_pct", "REAL"), ("vol15_adv", "REAL"), ("stop_avant_entree", "INTEGER"),
-                    ("confirmation", "TEXT"))
+                    ("confirmation", "TEXT"), ("r_3c", "REAL"), ("r_20e", "REAL"))
 MIGRATIONS = {
     "rules": (("pourquoi", "TEXT"), ("council", "TEXT"), ("soiree", "TEXT"), ("decision", "TEXT"),
               ("decided_at", "TEXT")),

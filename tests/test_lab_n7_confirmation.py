@@ -53,7 +53,7 @@ def test_confirme_rejoue_la_regle_du_direct():
     ev = ST.confirm_event(d, 100.0, 98.0, [103.0, 105.0, 107.0])
     assert ev["kind"] == "confirmé" and ev["t"] == OPEN + 15 * 60 and ev["trigger"] == 101.01
     rows = by_name(ST.go_rows(d, "AAA", {"origine": PLAN}, 3, 1.0))
-    assert set(rows) == {"go_brut", "go_confirme"}
+    assert set(rows) == {"go_brut", "go_confirme", "go_confirme_v2", "go_confirme_v3", "go_confirme_v4"}  # n° 8
     brut, conf = rows["go_brut"], rows["go_confirme"]
     assert brut["confirmation"] == conf["confirmation"] == "confirme"
     # Brut : au marché à l'ouverture (101), stop et objectifs du plan, sortie stop fixe.
@@ -233,16 +233,16 @@ def test_tableau_de_la_confirmation():
     assert n7["par_statut"]["expiré"]["brut"]["esperance_r"] == pytest.approx(-0.2, abs=0.01)
     diff = n7["ecart_par_go"]
     assert diff["n"] == 120 and diff["esperance_r"] == pytest.approx((0.7 + 0.2 + 0.2) / 3, abs=0.01)
-    assert diff["aide"] is (diff["z"] >= SS.candidate_z())
+    assert diff["aide"] is (diff["z"] >= SS.candidate_t(diff["jours"]))  # n° 8, D4 : seuil en t
     assert "plancher" not in rep["confirmation_go"]
     text = SS.text(rep)
     assert "Confirmation des GO (n° 7, stop d'origine) : 120 GO" in text and "confirmés 40" in text
 
 
 def test_la_crypto_garde_son_rattrapage():
-    # La n° 7 ne touche que les actions : le rattrapage crypto de la n° 6 continue (rien n'y change). Une déclaration
-    # qui ajoute des essais crypto doit remonter CRYPTO_DECLARATION (ce test la rappelle).
-    assert ST.progress_job("stock") == "strats:stock:d7" and ST.progress_job("crypto") == "strats:crypto:d6"
+    # Les n° 7 et 8 ne touchent que les actions : le rattrapage crypto de la n° 6 continue (rien n'y change). Une
+    # déclaration qui ajoute des essais crypto doit remonter CRYPTO_DECLARATION (ce test la rappelle).
+    assert ST.progress_job("stock") == "strats:stock:d8" and ST.progress_job("crypto") == "strats:crypto:d6"
     assert len([t for t in ST.trials() if t["market"] == "crypto"]) == 49 and ST.CRYPTO_DECLARATION == 6
 
 
