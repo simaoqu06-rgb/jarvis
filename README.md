@@ -377,6 +377,7 @@ trade terminé, comparé à une sortie au moment du conseil (ligne « Bilan des 
 | `!lecons` | carnet des leçons du labo : confirmées, à confirmer, démenties, avec leur preuve chiffrée |
 | `!grade` | grade de JARVIS (F- à S+) par marché, de quoi il est fait, risque permis, derniers changements |
 | `!strategies` | labo v2 : stratégies à déclencheur contre v1, sorties, témoin aléatoire, diagnostic de v1 |
+| `!kill …` | **JARVIS Killmode**, éteint par défaut : `!kill on` / `!kill off`, `!kill NVDA` (analyse complète : volatilité, catalyseur, graphique, données, fiche société), `!kill scan` (plus forts gaps, setups complets seulement), `!kill bilan` (setups proposés soldés après la clôture + stratégie `killmode` du labo). Hors de toute routine, aucun ordre passé. Détail : `app/trading/killmode.py`, déclaration n° 5 de [docs/labo-strategies.md](docs/labo-strategies.md) |
 | `!aide` | liste des commandes |
 
 Le bot ne répond qu'aux comptes de `JARVIS_DISCORD_OWNER_ID`. Mise en place : [DEPLOY.md](DEPLOY.md).
