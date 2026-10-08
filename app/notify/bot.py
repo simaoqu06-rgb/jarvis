@@ -22,6 +22,9 @@ qu'aux comptes listés dans JARVIS_DISCORD_OWNER_ID et ignore tout le reste sans
   !strategies           labo v2 : stratégies à déclencheur contre v1 et leur témoin aléatoire
   !aide                 cette liste
 
+Les alertes des trades suivis (TP, stop, sortie anticipée, objectif en retard, conseil avant la clôture)
+arrivent aussi en message privé, copie de celles du salon qui ne mentionne personne (JARVIS_TRADE_DM=off
+pour couper la copie).
 Les propositions de réglages arrivent en message privé, avec des boutons Approuver / Refuser.
 Les règles validées par le labo arrivent groupées dans un seul message privé entre 8 h et 9 h
 (app/lab/morning.py ; JARVIS_LAB_DM=on, sinon rodage : gardées sans envoi), avec un bouton Approuver
@@ -57,11 +60,39 @@ RETRY_FIRST, RETRY_MAX = 5.0, 600.0  # attente entre deux essais d'envoi en priv
 MAX_ATTEMPTS = 12  # ensuite on abandonne l'envoi privé : la proposition reste dans !propositions et le cockpit
 LAB_TICK = 30.0  # secondes entre deux passages de l'envoi du labo (message du matin, annonces)
 lab_texts: asyncio.Queue = asyncio.Queue()  # annonces du labo (méthode en place, challenger retiré)
+trade_texts: asyncio.Queue = asyncio.Queue()  # alertes des trades suivis (TP, stop, sortie anticipée, clôture)
 
 
 def offer_lab_text(text: str) -> None:
     """Annonce du labo à envoyer en privé au propriétaire (au plus une fois)."""
     lab_texts.put_nowait(text)
+
+
+def trade_dm_on() -> bool:
+    return os.getenv("JARVIS_TRADE_DM", "on").strip().lower() not in ("off", "0", "false", "non", "faux")
+
+
+def offer_trade_text(text: str) -> None:
+    """Copie en privé d'une alerte d'un trade suivi : le salon ne mentionne personne, le message privé
+    sonne. Envoyée au plus une fois, dès que le bot est connecté ; l'original reste sur le salon."""
+    trade_texts.put_nowait(text)
+
+
+async def send_private(text: str, owner_ids: set[int], fetch_user, users: dict) -> bool:
+    """Envoie un texte en privé à chaque propriétaire (découpé à 2000 caractères) ; False si un envoi échoue."""
+    ok = True
+    for oid in sorted(owner_ids):
+        try:
+            users[oid] = users.get(oid) or await fetch_user(oid)
+            for chunk in split_message(text):
+                await users[oid].send(chunk)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            users.pop(oid, None)  # un compte introuvable sera recherché à nouveau
+            log.warning("Alerte de trade non envoyée en privé au compte %s : %s (%s)", oid, exc, text)
+            ok = False
+    return ok
 
 
 def offer(proposal: dict) -> None:
@@ -331,6 +362,14 @@ async def run(lock: asyncio.Lock | None = None) -> None:
                 users.clear()
             await asyncio.sleep(LAB_TICK)
 
+    async def deliver_trades():
+        """Alertes des trades suivis : copie en privé dès qu'elle arrive (au plus une fois)."""
+        await client.wait_until_ready()
+        users: dict = {}
+        while True:
+            text = await trade_texts.get()
+            await send_private(text, allowed, client.fetch_user, users)
+
     async def deliver():
         await client.wait_until_ready()
         queue_pending()
@@ -420,10 +459,16 @@ async def run(lock: asyncio.Lock | None = None) -> None:
     lab_sender.add_done_callback(
         lambda t: t.cancelled() or not t.exception() or log.error("Envoi du labo arrêté", exc_info=t.exception())
     )
+    trade_sender = asyncio.create_task(deliver_trades())
+    trade_sender.add_done_callback(
+        lambda t: t.cancelled() or not t.exception() or log.error("Envoi privé des alertes de trade arrêté",
+                                                                  exc_info=t.exception())
+    )
     try:
         await client.start(config.secret(TOKEN_NAME))
     finally:
         sender.cancel()
         lab_sender.cancel()
+        trade_sender.cancel()
         if not client.is_closed():
             await client.close()
