@@ -529,6 +529,27 @@ essais de plus seulement. Critique : un seul stop aurait été plus simple, mais
 (annulation sous le stop, risque en R) et Simão trade le plancher depuis la PR #36 ; un stop plancher avec les
 objectifs d'origine serait un plan que personne ne trade, d'où le plan refait en entier, exact, sur moins de jours.
 
+## Archive des actus des gappers, avant la déclaration n° 8 (8 octobre 2026)
+
+Demande du fil « JARVIS Killmode » (avis de GPT et Gemini), choix de Simão « Archiver » sur la carte D1 :
+rejouer le pilier catalyseur de Killmode. Finnhub gratuit ne garde qu'environ un an d'actus et perd une
+séance par jour, donc l'archive passe avant la déclaration, **sans rien lire**.
+
+- Population : toutes les actions de la base (journalier Alpaca), pas l'univers du labo, ouvertes en gap
+  ≥ 3,5 % (4 % moins une marge pour l'écart entre ouverture journalière et première bougie de 5 min) avec un
+  ATR de Wilder 14 j ≥ 4 %, sur chaque séance non scellée encore dans la profondeur de Finnhub, la plus
+  ancienne d'abord (du 9 octobre 2025 au 2 avril 2026, puis les séances après le bloc scellé).
+- Archivé : les actus publiées au plus tard à 9 h 45 New York sur les 7 jours d'avant (la fenêtre de
+  `catalyst.check`), le calendrier des résultats de toutes les sociétés de J − 10 à J + 30, et le profil de
+  chaque société (nom, pour reconnaître ses actus).
+- Rien n'est lu : ni tonalité, ni critère, ni résultat de trade. Aucune route ne montre ces tables ; `!labo`
+  et `/api/lab/status` n'en donnent que les comptes. Le bloc scellé n'est pas archivé.
+- Limites déjà connues, à reprendre dans la déclaration : calendrier et profils tels que Finnhub les donne
+  aujourd'hui (remplis après coup) ; une société retirée de la cote peut ne plus avoir de profil ; une liste
+  vide vaut aussi bien « aucune actu » que « symbole inconnu de Finnhub » ; la fidélité des heures de
+  publication est à vérifier sur un échantillon ; la profondeur réelle du calendrier des résultats en
+  gratuit n'est pas connue (les dates en échec ou vides un jour de semaine le diront).
+
 ## Bloc scellé
 
 Le rejeu du **6 avril au 5 octobre 2026** est calculé mais rangé à part (`trades_sealed`,

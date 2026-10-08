@@ -69,6 +69,9 @@ def status(path: str | None = None) -> dict:
         except sqlite3.Error:
             pass
         out["labo_v2"] = labo_v2(conn)
+        from app.lab import archive as ARC  # import tardif, comme runner
+
+        out["archive_actus"] = ARC.counts(conn)
         from app.lab import method as M  # import tardif, comme runner
 
         out["methode"] = M.state(conn)
@@ -162,6 +165,10 @@ def text(st: dict) -> str:
         lines.append(f"Labo v2 : {sum((v2.get('lignes') or {}).values())} lignes de stratégies (`!strategies`)"
                      + (f" · rattrapage : {left.get('stock', 0)} jours actions, {left.get('crypto', 0)} jours crypto"
                         if any(left.values()) else ""))
+    if st.get("archive_actus"):
+        from app.lab import archive as ARC
+
+        lines.append(ARC.line(st["archive_actus"]))
     sc = st.get("scelle")
     if sc:
         n = sum((sc.get("trades") or {}).values())

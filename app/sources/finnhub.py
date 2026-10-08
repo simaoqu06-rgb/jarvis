@@ -133,6 +133,23 @@ async def earnings(symbol: str, start: date, end: date) -> list[dict]:
     ]
 
 
+async def earnings_calendar(start: date, end: date) -> list[dict]:
+    """Toutes les publications de résultats entre deux dates, toutes sociétés : même source que `earnings`,
+    avec le symbole. Utilisé par le labo (archive des gappers, déclaration n° 8)."""
+    payload = await get_json(
+        f"{BASE}/calendar/earnings", params={"from": start.isoformat(), "to": end.isoformat(), "token": _key()},
+    )
+    if not isinstance(payload, dict) or not isinstance(payload.get("earningsCalendar"), list):
+        raise SourceError("réponse inattendue du calendrier des résultats")
+    return [
+        {"symbol": e.get("symbol"), "date": e.get("date"), "hour": e.get("hour") or None,
+         "quarter": e.get("quarter"), "year": e.get("year"),
+         "eps_estimate": to_float(e.get("epsEstimate")), "eps_actual": to_float(e.get("epsActual")),
+         "revenue_estimate": to_float(e.get("revenueEstimate")), "revenue_actual": to_float(e.get("revenueActual"))}
+        for e in payload["earningsCalendar"] if isinstance(e, dict) and e.get("date") and e.get("symbol")
+    ]
+
+
 async def profile(symbol: str) -> dict:
     """Nom, secteur et capitalisation (en dollars) d'une société."""
     p = await get_json(f"{BASE}/stock/profile2", params={"symbol": symbol, "token": _key()})
