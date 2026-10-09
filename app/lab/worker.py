@@ -31,6 +31,8 @@ Toutes les ~10 min :
 11. Déclaration n° 8 : « cout » (cout.py), R net des trades v1 d'actions recalculé une fois au coût du demi-pas
    (D3) ; « killmode_complet » (kill_complet.py), séances dont l'archive est complète, bougies Alpaca relues et
    gardées en mémoire, hors séance US, kill_complet_seconds par passage.
+12. Déclaration n° 9 : « potentiel_plus10 » (plus10.py), listes S+10 et Rebond sur toute la base, bougies de 5 min
+   non ajustées relues et gardées en mémoire, hors séance US, plus10_seconds par passage.
 Le battement (lab.heartbeat) porte l'étape en cours, affichée par /api/lab/status et !labo.
 Le rejeu couvre JARVIS_LAB_REPLAY_DAYS séances (504 ≈ 2 ans) avant le premier lancement du worker ;
 le direct prend le relais à partir de ce jour-là. JARVIS_LAB_ENABLED=off met le worker en veille.
@@ -52,6 +54,7 @@ from app.lab import grade as GRADE
 from app.lab import heartbeat
 from app.lab import kill_complet as KC
 from app.lab import lessons as L
+from app.lab import plus10 as P10
 from app.lab import method as M
 from app.lab import potentiel as PO
 from app.lab import rattrapage as RAT
@@ -82,11 +85,14 @@ KEY_WARNING_SECONDS = 3600
 # statistiques en cache (secondes), par période.
 LAB2_BUDGET = {
     "nuit": {"moves_days": 30, "news_calls": 40, "rules": 3, "stats_age": 3600, "derivs_calls": 300,
-             "coverage_days": 60, "archive_seconds": 1200, "archive_days": 40, "kill_complet_seconds": 600},
+             "coverage_days": 60, "archive_seconds": 1200, "archive_days": 40, "kill_complet_seconds": 600,
+             "plus10_seconds": 600},
     "jour": {"moves_days": 5, "news_calls": 10, "rules": 1, "stats_age": 3 * 3600, "derivs_calls": 100,
-             "coverage_days": 10, "archive_seconds": 600, "archive_days": 10, "kill_complet_seconds": 120},
+             "coverage_days": 10, "archive_seconds": 600, "archive_days": 10, "kill_complet_seconds": 120,
+             "plus10_seconds": 120},
     "seance": {"moves_days": 2, "news_calls": 0, "rules": 0, "stats_age": 6 * 3600, "derivs_calls": 30,
-               "coverage_days": 2, "archive_seconds": 0, "archive_days": 2, "kill_complet_seconds": 0},
+               "coverage_days": 2, "archive_seconds": 0, "archive_days": 2, "kill_complet_seconds": 0,
+               "plus10_seconds": 0},
 }
 _key_warned_at: float | None = None
 
@@ -387,6 +393,7 @@ async def lab2(db: LabDB, now: datetime, collect: bool = True) -> dict:
     await step("cout", lambda: COUT.step(db))
     if collect:
         await step("killmode_complet", lambda: KC.step(db, budget["kill_complet_seconds"]))
+        await step("potentiel_plus10", lambda: P10.step(db, now, budget["plus10_seconds"]))
         await step("derives", lambda: DER.collect(db, now, budget["derivs_calls"]))
     if collect and not CO.CAL.session_open(now):
         await step("actus", lambda: CAT.fetch_news(db, now, budget["news_calls"]))

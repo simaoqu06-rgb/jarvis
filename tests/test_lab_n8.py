@@ -415,6 +415,6 @@ def test_worker_branche_les_etapes_de_la_n8():
     assert {p: b["kill_complet_seconds"] for p, b in W.LAB2_BUDGET.items()} == {"nuit": 600, "jour": 120, "seance": 0}
     assert W.KC is KC and W.COUT is COUT
     db = LabDB(":memory:")
-    assert SS.signature(db.conn)[3:] == [KC.cost_fingerprint(), 0, 0]
+    assert SS.signature(db.conn)[3:] == [KC.cost_fingerprint(), 0, 0, 0]  # n° 9 : séances de plus10
     _kill_rows(db, ["2025-11-03"])
     assert SS.signature(db.conn)[4] == 4

@@ -158,6 +158,17 @@ CREATE TABLE IF NOT EXISTS kill_complet (
     exit_reason TEXT, r_net REAL, r_20e REAL, r_3c REAL, actus INTEGER, cout TEXT,
     PRIMARY KEY (day, symbol)
 );
+-- Déclaration n° 9 (plus10.py) : scanner « potentiel +10 », une ligne par valeur éligible (S+10 ou Rebond), essai et
+-- séance, rejouée sur les bougies de 5 min non ajustées (prix réellement négociés).
+CREATE TABLE IF NOT EXISTS plus10_trades (
+    day TEXT NOT NULL, symbol TEXT NOT NULL, essai TEXT NOT NULL, liste TEXT NOT NULL, rang INTEGER NOT NULL,
+    seances INTEGER, gap_pct REAL, atr_pct REAL, entry REAL, stop REAL, signal_at INTEGER, triggered INTEGER NOT NULL,
+    exit_reason TEXT, tp1_hit INTEGER, mfe_r REAL, mae_r REAL, temoin_r REAL, temoin_triggered INTEGER,
+    r_net REAL, r_gross REAL, r_sans_be REAL, r_2r REAL, r_suiveur REAL, r_emperor REAL, r_emperor_alerte REAL,
+    r_emperor_confirme REAL, r_vwap REAL, r_1430 REAL, r_spy REAL, r_glisse_x2 REAL, r_glisse_x3 REAL, r_retard REAL,
+    r_manque REAL, r_3c REAL, r_20e REAL,
+    PRIMARY KEY (day, symbol, essai)
+);
 -- Bloc scellé (seal.py) : mêmes tables, jamais lues par les statistiques, la routine ni le grade.
 {trades_sealed}
 {strat}

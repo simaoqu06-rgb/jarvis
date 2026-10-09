@@ -227,9 +227,12 @@ async def _alpaca_call(fn, *args, **kwargs):
     return await with_retry(fn, *args, limiter=ALPACA_LIMIT, **kwargs)
 
 
-async def alpaca_bars(symbols: list[str], tf: int, start: datetime, end: datetime, transport=None) -> dict[str, list[dict]]:
-    """Bougies SIP (historique de plus de 15 min) ; chaque page passe par la limite de débit."""
+async def alpaca_bars(symbols: list[str], tf: int, start: datetime, end: datetime, transport=None,
+                      adjustment: str = "split") -> dict[str, list[dict]]:
+    """Bougies SIP (historique de plus de 15 min) ; chaque page passe par la limite de débit. `adjustment` :
+    « split » (prix ajustés des divisions, par défaut) ou « raw » (prix réellement négociés, déclaration n° 9)."""
     end = min(end, datetime.now(timezone.utc) - alpaca.SIP_DELAY)
     if end <= start:
         return {s: [] for s in symbols}
-    return await alpaca.bars_range(symbols, tf, start, end, transport=transport, call=_alpaca_call)
+    return await alpaca.bars_range(symbols, tf, start, end, adjustment=adjustment, transport=transport,
+                                   call=_alpaca_call)

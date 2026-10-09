@@ -602,22 +602,24 @@ def diagnostic_v1(conn: sqlite3.Connection) -> dict:
 
 
 def report(conn: sqlite3.Connection) -> dict:
-    # import tardif : kill_complet importe ce module
+    # import tardif : kill_complet et plus10 importent ce module
     from app.lab import kill_complet as KC
+    from app.lab import plus10 as P10
 
     trials = len(ST.trials())
-    out = {"declaration": {"numero": ST.DECLARATION, "le": ST.REGISTERED_ON, "essais": trials,
+    out = {"declaration": {"numero": ST.LATEST_DECLARATION, "le": ST.REGISTERED_ON, "essais": trials,
                            "z_candidate": candidate_z(), "seuil": "t à G − 1 jours (candidate_t), Bonferroni",
                            "sorties": ST.EXITS, "sorties_actions": ST.STOCK_EXITS,
                            "robustesse": ST.STRESS, "doc": "docs/labo-strategies.md"},
            "scelle": SEAL.describe(), "strategies": {}, "sorties_gemini": None, "killmode": None,
-           "confirmation_go": None, "killmode_complet": None, "diagnostic_v1": {}}
+           "confirmation_go": None, "killmode_complet": None, "potentiel_plus10": None, "diagnostic_v1": {}}
     try:  # base pas encore migrée par le worker (lecture seule) : tableau vide plutôt qu'une erreur
         out["strategies"] = _strategies(conn)
         out["sorties_gemini"] = out["strategies"].pop("_n6", None)
         out["killmode"] = out["strategies"].pop("_kill", None)
         out["confirmation_go"] = out["strategies"].pop("_n7", None)
         out["killmode_complet"] = KC.report(conn, trials)
+        out["potentiel_plus10"] = P10.report(conn, trials)
         out["diagnostic_v1"] = diagnostic_v1(conn)
     except sqlite3.Error as exc:
         out["erreur"] = f"base pas encore prête : {exc}"
@@ -638,6 +640,7 @@ def signature(conn: sqlite3.Connection) -> list:  # worker seulement (base migr�
 
     cost = KC.cost_fingerprint()
     sig += [cost, conn.execute("SELECT COUNT(*) FROM kill_complet WHERE cout = ?", (cost,)).fetchone()[0]]
+    sig.append(conn.execute("SELECT COUNT(*) FROM progress WHERE job = 'plus10:n9'").fetchone()[0])  # n° 9
     return sig + [conn.execute("SELECT COUNT(*) FROM earnings_days WHERE status = 'ok'").fetchone()[0]]
 
 
@@ -760,6 +763,10 @@ def text(rep: dict | None) -> str:
         from app.lab import kill_complet as KC  # import tardif
 
         lines.append(KC.text(rep["killmode_complet"]))
+    if rep.get("potentiel_plus10"):
+        from app.lab import plus10 as P10  # import tardif
+
+        lines.append(P10.text(rep["potentiel_plus10"]))
     diag = (rep.get("diagnostic_v1") or {}).get("stock")
     if diag:
         gaps = " · ".join(f"{k} {_r(v['esperance_r'])} ({v['n']})" for k, v in diag["par_gap"].items())

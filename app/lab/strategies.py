@@ -109,6 +109,9 @@ jugé) : V2, VWAP plus haut qu'il y a 3 bougies et clôture ≥ VWAP + 0,25 ATR 
 haut de la séance jusque-là ; V4, variation depuis l'ouverture meilleure que celle de SPY (index_move). Chaque trade
 exécuté garde aussi r_3c (stress de 3 cents de Gemini) et r_20e (mise de Simão), cost_variants. Killmode complet
 (kill_complet.py) compte pour deux essais (KILL_COMPLETE_TRIALS).
+Déclaration n° 9 (9 octobre 2026) : scanner « potentiel +10 » (plus10.py), listes S+10 et Rebond, quatre essais
+(PLUS10_TRIALS) jugés sur ses propres lignes (table plus10_trades) ; les lignes du labo v2 ne changent pas
+(DECLARATION reste 8, pas de rattrapage).
 Objectifs : 1, 2 et 3 R. Fenêtre des signaux : actions de 9 h 45 à 15 h New York (soldé à la
 clôture) ; crypto de 0 h à 20 h UTC (soldé 24 h après le signal).
 v1 est rejouée avec les mêmes sorties et tests, sur ses propres objectifs : c'est la référence.
@@ -137,10 +140,12 @@ from app.trading import confirm as CF
 from app.trading import indicators as I
 from app.trading import signals as S
 
-REGISTERED_ON = "2026-10-08"
-# Déclaration en vigueur (docs/labo-strategies.md). En changer relance le rattrapage de tous les jours déjà
-# traités (progress_job), pour que chaque stratégie soit mesurée sur les mêmes jours.
+REGISTERED_ON = "2026-10-09"
+# Déclaration qui fixe les lignes du labo v2 (docs/labo-strategies.md). En changer relance le rattrapage de tous les
+# jours déjà traités (progress_job), pour que chaque stratégie soit mesurée sur les mêmes jours.
 DECLARATION = 8
+# Dernière déclaration (affichée) : la n° 9 (plus10.py) ajoute ses essais sans toucher aux lignes du labo v2.
+LATEST_DECLARATION = 9
 # Dernière déclaration qui change les lignes crypto : les n° 7 et 8 (actions seulement) laissent le rattrapage
 # crypto continuer celui de la n° 6. Une déclaration qui touche la crypto le remonte à son numéro.
 CRYPTO_DECLARATION = 6
@@ -193,6 +198,9 @@ GO_FILTER_ATR = 0.25        # n° 8, V2 : clôture au moins 0,25 ATR (5 min) au-
 # à la mise de Simão, et son écart au témoin propre apparié par jour. Deux essais de plus, hors STRATEGIES.
 KILL_COMPLETE_TRIALS = ({"market": "stock", "strategy": "killmode_complet", "exit": "r_20e"},
                         {"market": "stock", "strategy": "killmode_complet_ecart_temoin", "exit": "r_20e"})
+# n° 9 : scanner « potentiel +10 » (plus10.py), quatre essais sur ses listes S+10 et Rebond, hors STRATEGIES.
+PLUS10_TRIALS = tuple({"market": "stock", "strategy": name, "exit": "r_net"}
+                      for name in ("plus10_orb15", "plus10_kill", "rebond_orb15", "rebond_orb30"))
 LABELS = {REFERENCE: "v1 (achat à heure fixe, référence)", **{k: v["label"] for k, v in STRATEGIES.items()}}
 EXITS = {
     "r_net": "sortie v1 : un tiers à chaque objectif, stop à l'entrée après TP1",
@@ -288,7 +296,7 @@ def trials() -> list[dict]:
     for market in ("stock", "crypto"):
         names = [REFERENCE] + [k for k, v in STRATEGIES.items() if market in v["markets"]]
         out += [{"market": market, "strategy": n, "exit": e} for n in names for e in strategy_exits(market, n)]
-    return out + list(KILL_COMPLETE_TRIALS)
+    return out + list(KILL_COMPLETE_TRIALS) + list(PLUS10_TRIALS)
 
 
 # --- Indicateurs sur bougies de 5 min ---------------------------------------------------------

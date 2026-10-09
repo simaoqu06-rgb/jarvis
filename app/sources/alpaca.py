@@ -229,6 +229,12 @@ async def top_gainers(top: int = 50) -> list[str]:
     return [r["symbol"] for r in payload.get("gainers") or []]
 
 
+async def top_losers(top: int = 50) -> list[str]:
+    """Plus fortes baisses du jour (même screener) : la liste Rebond du potentiel +10 (déclaration n° 9)."""
+    payload = await _request("GET", f"{DATA}/v1beta1/screener/stocks/movers", {"top": top})
+    return [r["symbol"] for r in payload.get("losers") or []]
+
+
 # --- Compte fictif ------------------------------------------------------------------------
 
 async def account() -> dict:

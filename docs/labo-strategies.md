@@ -734,6 +734,72 @@ confirm.evaluate, real_r), sans second code à tenir. **Critique** : exiger le s
 accepté, parce que Simão trade surtout des petites valeurs volatiles et que ses `!prends … kill` mesureront le vrai
 glissement. GO modifié : D2 tranché « oui » ; `r_20e` affiché sans décider, sauf pour Killmode complet.
 
+## Déclaration n° 9 (9 octobre 2026) : scanner « potentiel +10 »
+
+Fil « Améliorer le scanner », choix de Simão « Scanner +10 ». Brouillon, deux tours d'avis de GPT et Gemini (accord des
+deux) et réaction : `/mnt/project-files/labo/declaration-9-scanner-plus10.md` et `reaction-avis-declaration-9.md`. Écrite
+avant tout résultat de trade de ces listes. Code : `app/lab/plus10.py` (labo), `app/trading/plus10.py` (direct).
+
+**Pourquoi** : le scanner de 15 h 10 cherche des valeurs calmes en tendance (MM20/MM50, RSI 45-75, prix ≥ 5 $) ; le
+8 octobre, 4 valeurs sur 137 sont passées, la première à −0,07 % de gap. La mesure `potentiel` (54 754 séances de
+l'univers du labo) montre que l'amplitude vient du gap : +8 % depuis l'ouverture touché dans 2,5 % des séances au gap de
+±0,5 %, 32 % de +5 à +10 %, 47 % au-delà de +10 %, 48 % à −5 % ou pire. Toucher +8 % mesure l'amplitude, pas un gain :
+la déclaration teste des entrées.
+
+**Listes, figées** (toutes les actions de la base, actifs inactifs d'Alpaca compris, sans filtre de prix, de liquidité
+ni de capitalisation ; gap d'ouverture contre la clôture de la veille et ATR de Wilder 14 j sur les séances terminées,
+journalier ajusté des divisions ; 15 séances au moins, celles de moins de 30 comptées à part) :
+
+| Liste | Critère | Classement |
+|---|---|---|
+| S+10 | gap ≥ +5 % et ATR ≥ 5 % | les 5 plus forts gaps (rangs 6+ : comparaison) |
+| Rebond | gap ≤ −5 % et ATR ≥ 5 % | les 5 plus forts gaps en baisse |
+
+Les seuils de 5 % sont **exploratoires** (choisis après la mesure `potentiel`, sur l'amplitude, jamais sur un résultat
+de trade) : gelés ici, aucun autre seuil ne sera essayé après coup.
+
+**Essais (4, total 152)** : entrées déjà codées (`strategies.strategy_rows`, mêmes coûts, sorties, robustesse et
+témoin), jugées sur le top 5 avec la règle « candidate » en vigueur (n° 8 : IC en t, écart au témoin au seuil corrigé,
+30 trades, robustesse dont le stress de 3 c, deux moitiés), référence `r_net` moins la commission IBKR :
+`plus10_orb15` et `plus10_kill` (règle de prix de Killmode) sur S+10, `rebond_orb15` et `rebond_orb30` sur Rebond.
+Les lignes du labo v2 ne changent pas (`DECLARATION` reste 8, pas de rattrapage) ; `LATEST_DECLARATION` = 9.
+
+**Prix réellement négociés** : les exécutions se rejouent sur les bougies de 5 min SIP **non ajustées**
+(`adjustment=raw`) et le journalier est remis à l'échelle de ces prix ; si le gap brut et le gap ajusté diffèrent de
+plus de 25 % (en rapport), une opération sur titre a eu lieu entre la veille et le jour : valeur écartée des trades,
+comptée à part. Les n° 5 et 8 se rejouent sur des bougies ajustées (`adjustment=split`) : non changé ici, à reprendre
+dans une déclaration suivante.
+
+**Mesures sans essai** (`!strategies`, `GET /api/lab/strategies`, clé `potentiel_plus10`) :
+- amplitude depuis l'ouverture (+8 %, +10 %, −8 %) : base, S+10 et Rebond (top 5, rangs 6+), filtres actuels de
+  15 h 10 rejoués au gap d'ouverture (`scanner.features` et `filter_reasons`) : le coût de ces filtres ;
+- par tranche de prix de la veille (< 1 $, 1-5 $, 5-20 $, ≥ 20 $), et `r_net`, `r_3c`, `r_20e` par tranche de prix
+  d'entrée ;
+- ce qui reste à prendre après la décision (9 h 45, 10 h pour orb30), MFE et MAE depuis l'entrée simulée, heure du
+  plus haut et du plus bas, lequel de +8 % et −8 % arrive en premier : rien d'avant l'entrée n'est crédité ;
+- classement : top 5 contre rangs 6+ et contre **20 tirages pré-déclarés** de 5 valeurs des rangs 6+ du même jour
+  (graines fixes ; moyenne et dispersion, par trade et écart par jour, jamais le meilleur tirage) ;
+- données : éligibles sans bougies de 5 min par liste, rang et tranche ; opérations sur titre ; gaps de plus de 30 %
+  listés pour un audit ; valeurs devenues inactives chez Alpaca ;
+- concordance du direct : part du top 5 du labo retrouvée dans la liste confirmée du direct (`data/plus10_scans.jsonl`).
+
+**En direct** (mesuré, ni GO ni note) : à 15 h 10 Paris, une liste d'attente « 🎯 Potentiel +10 » au gap de
+pré-ouverture, jamais présentée comme testée ; à 9 h 46 New York, la liste confirmée au gap d'ouverture (population :
+50 plus fortes hausses et 50 plus fortes baisses du screener, 100 plus actives, liste d'attente), avec les niveaux
+d'orb15 et de la règle Killmode lus sur les bougies IEX en temps réel ; à 10 h 01, ceux d'orb30 pour Rebond.
+
+**Limites** : la liste de 9 h 10 n'est pas rejouable (pas de pré-ouverture historique) ; le direct ne voit pas toute
+la base (concordance mesurée) et lit le range sur IEX (le labo, sur le SIP) ; bougies de sociétés disparues parfois
+absentes chez Alpaca (comptées) ; scissions et dividendes exceptionnels non ajustés (audit des gaps > 30 %) ; sous 1 $,
+le stress de 3 c (1 % par côté) peut rester sous l'écart réel achat-vente ; pas de catalyseur dans les essais ; environ
+380 séances non scellées : « pas d'avantage démontré » reste la lecture la plus probable et ne voudra pas dire « pas
+d'avantage ».
+
+**Council** : Analyste, garder (le défaut du scanner est sa cible, pas ses réglages). Sceptique : `plus10_kill` recoupe
+Killmode complet ; l'essai mesure ce que le classement et le seuil ajoutent, les rangs 6+ et les tirages le diront.
+Pragmatique : 4 essais, aucune règle de prix nouvelle. Critique : petits prix et Rebond après une mauvaise nouvelle ;
+jugés par le stress de 3 c, le témoin et les tranches de prix. GO, modifié après GPT et Gemini.
+
 ## Bloc scellé
 
 Le rejeu du **6 avril au 5 octobre 2026** est calculé mais rangé à part (`trades_sealed`,
