@@ -45,9 +45,10 @@ EXIT_MODES = ("v1", "sans_be", "suiveur")
 # Ordre dans une bougie ambiguë : « v1 » (le labo, inchangé), « prudente » (le pire ordre possible partout),
 # « favorable » (le meilleur, bougie par bougie : une sensibilité, pas un maximum). Journal de Killmode, 8 octobre.
 RESOLUTIONS = ("v1", "prudente", "favorable")
-# Bougie faite d'une seule transaction (journal de Killmode, méthode n° 3) : ces champs passent à la sortie ou au
-# remplissage qu'elle déclenche (horodatage en ns, pire bid et pire ask de l'ordre au marché qui en part).
-TICK_FIELDS = ("ns", "bid", "ask")
+# Bougie faite d'une seule transaction (journal de Killmode, méthodes n° 3 et 4) : ces champs passent à la sortie ou
+# au remplissage qu'elle déclenche (horodatage en ns, pire bid et pire ask de l'ordre au marché qui en part, instant
+# de la cotation suivante, taille de l'ask retenu, rang de la transaction dans sa minute).
+TICK_FIELDS = ("ns", "bid", "ask", "q_ns", "ask_size", "seq")
 
 
 def stock_slippage_bps(price: float) -> float:
@@ -131,6 +132,12 @@ def simulate(plan: dict, bars: list[dict], *, market: str, decided_at: int, entr
       favorable ;
     - une bougie faite d'une seule transaction (`ns`) transmet `TICK_FIELDS` au remplissage (`fill_tick`) et aux
       sorties qu'elle déclenche.
+
+    Quatrième avis de GPT (9 octobre), hors v1 : sur la transaction qui remplit l'achat, un objectif que le prix a
+    dépassé (ou que le meilleur bid atteint) ne part sur-le-champ que si le bid l'atteint (`bid`, le pire des deux
+    cotations ; l'ask pour une vente) ; sinon il reste posé et s'exécute quand le prix le dépasse ensuite d'un pas.
+    Quand une seule des deux cotations l'atteint (`bid_hi`, la meilleure), ou sans cotation lue, les deux sont
+    possibles : la minute est ambiguë (« objectif_pose »), posé par défaut, exécuté si sa minute est dans `flip`.
     """
     if entry_order not in ENTRY_ORDERS or exit_mode not in EXIT_MODES or resolution not in RESOLUTIONS:
         raise ValueError(f"ordre {entry_order}, sortie {exit_mode} ou résolution {resolution} inconnus")
@@ -238,6 +245,26 @@ def simulate(plan: dict, bars: list[dict], *, market: str, decided_at: int, entr
         if not v1 and not any(a["t"] == b["t"] for a in result["ambigus"]):
             result["ambigus"].append({"t": b["t"], "cas": case})
 
+    # Objectif dépassé par la transaction qui remplit l'achat, ou que le meilleur bid atteint (bougies d'une
+    # transaction, hors v1) : les ordres liés deviennent actifs avec l'achat, sous l'une des deux cotations. Exécuté
+    # sur-le-champ si le pire bid l'atteint, posé si aucun ne l'atteint, l'un ou l'autre (minute ambiguë) si seul le
+    # meilleur l'atteint ou si aucune cotation n'est lue.
+    fill_bar = window[fill_i]
+    single = not v1 and "ns" in fill_bar
+    release = fill_bar.get("bid" if sign == 1 else "ask") if single else None
+    release_best = fill_bar.get("bid_hi" if sign == 1 else "ask_lo", release) if single else None
+
+    def reached(i: int, tp: float) -> bool:
+        return i == fill_i and release_best is not None and (release_best - tp) * sign >= 0
+
+    def resting(i: int, tp: float) -> bool:
+        if i != fill_i or not single or (release is not None and (release - tp) * sign >= 0):
+            return False
+        if release is not None and (release_best - tp) * sign < 0:
+            return True
+        note(fill_bar, "objectif_pose")
+        return fill_bar["t"] not in flip
+
     last = window[fill_i]
     for i in range(fill_i, len(window)):
         b = window[i]
@@ -257,13 +284,15 @@ def simulate(plan: dict, bars: list[dict], *, market: str, decided_at: int, entr
         if not v1 and at_open:  # objectifs déjà dépassés à l'ouverture : exécutés avant tout le reste de la bougie
             opened = False
             while hit < len(targets) and ((b["o"] - targets[hit]) * sign
-                                          >= (tp_ticks - 1e-6) * tick_size(market, targets[hit])):
+                                          >= (tp_ticks - 1e-6) * tick_size(market, targets[hit])
+                                          or reached(i, targets[hit])) and not resting(i, targets[hit]):
                 hit += 1
                 opened = True
                 result["tp_hits"][hit - 1] = True
                 result["minutes_to_tp"][hit - 1] = _minutes(market, decided_at, b["t"] + bar_seconds // 2)
-                # Posé alors que le prix l'a dépassé (bougie d'entrée) : il part au prix d'entrée.
-                leave(fill_price if i == fill_i else targets[hit - 1], b, f"tp{hit}",
+                # Posé alors que le prix l'a dépassé (bougie d'entrée) : il part au prix d'entrée, jamais sous le sien.
+                tp = targets[hit - 1]
+                leave(fill_price if i == fill_i and (fill_price - tp) * sign >= 0 else tp, b, f"tp{hit}",
                       part if hit < len(targets) else remaining)
                 if exit_mode == "v1":
                     stop_now = entry
@@ -302,7 +331,7 @@ def simulate(plan: dict, bars: list[dict], *, market: str, decided_at: int, entr
         hit_now = False
         while hit < len(targets):
             tp = targets[hit]
-            if not crossed(b, tp):
+            if not (crossed(b, tp) or reached(i, tp)) or resting(i, tp):
                 break
             if v1:
                 price = b["o"] if (b["o"] - tp) * sign >= tick and i > fill_i else tp

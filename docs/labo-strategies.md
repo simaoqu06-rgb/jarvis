@@ -338,7 +338,7 @@ réalité, d'où le journal des appels en direct pour juger le mode complet.
   - au 30e KILL déclenché, un audit : borne haute de l'IC 95 % sous zéro → « JARVIS recommande d'éteindre » ;
     sinon « pas d'alerte », jamais un verdict positif ;
   - au 100e, la lecture finale, toujours faite : avantage démontré seulement si la borne basse tient en grappes
-    par jour, par semaine et avec 3 c de glissement par côté ; si l'alerte du 30e a été écartée, le pari se
+    par jour, par semaine et avec au moins 3 c de glissement par côté ; si l'alerte du 30e a été écartée, le pari se
     mesure sur les KILL 31 à 100 ;
   - une borne de dégât à chaque bilan dès 10 KILL : IC 99,9 % entièrement sous zéro → « JARVIS recommande
     d'éteindre » (environ 2 % de fausse alerte sur la vie du journal à espérance nulle, simulé) ;
@@ -401,8 +401,50 @@ réalité, d'où le journal des appels en direct pour juger le mode complet.
     exécutions partielles) à côté de « avec 3 c », la part des KILL au prix mesuré, le glissement mesuré à
     l'entrée et au stop, et les minutes encore à lire ;
   - non modélisé : le plancher de prix des ordres au marché d'IBKR (une suite d'ordres limites, non publiée), une
-    suspension qui dure jusqu'à la clôture (toujours marquée « données incomplètes »), le prix du fixing de
-    clôture.
+    suspension qui dure jusqu'à la clôture (marquée « données incomplètes » quand la séance n'a plus de bougie
+    dans sa dernière demi-heure ; deux dernières minutes depuis la méthode 4), le prix du fixing de clôture.
+- Méthode du solde n° 4 (9 octobre, quatrième avis de GPT, audit des scénarios « pessimistes », fil « JARVIS
+  Killmode »). Écrite après le premier `!kill bilan` (9 octobre vers 1 h 45 UTC, méthode 3) mais sans en voir
+  les chiffres. Elle ne touche ni la règle de prix, ni les piliers, ni la règle de lecture, ni le labo
+  (`resolution="v1"` et l'empreinte des coûts inchangées). Tout le journal est re-soldé sur les mêmes bougies
+  et transactions (`SETTLE_METHOD = 4`) :
+  - l'ordre est actif à la première minute pleine 60 s après l'**envoi** du message (`envoye_a`, à la seconde
+    supérieure), pas après le début de l'analyse ; les appels notés avant gardent `at` ;
+  - sur la transaction qui remplit l'achat, un objectif que le prix a déjà dépassé, ou que le bid atteint, est
+    exécuté sur-le-champ si le pire bid de l'ordre au marché (cotation en vigueur et suivante) l'atteint ; si aucun
+    ne l'atteint, il reste posé et s'exécute quand le prix le dépasse ensuite d'un pas (avant : il partait sur
+    cette transaction même, jamais sous son prix, et une transaction pile à l'objectif ne l'exécutait pas) ; si une
+    seule des deux cotations l'atteint, ou si aucune cotation n'est lue, les ordres liés deviennent actifs sous
+    l'une ou l'autre : les deux chemins sont joués (minute « objectif_pose ») et le pire décide ;
+  - après deux bougies qui commencent à 5 min ou plus l'une de l'autre (une pause LULD de 5 min laisse au moins
+    4 minutes pleines sans transaction), si la minute de la reprise a une transaction de réouverture (condition
+    5, ou O), c'était une suspension : les cotations d'avant la première transaction de cette minute sont celles
+    de la pause, sans exécution possible, et ne donnent plus le prix de l'ordre au marché qui part à la reprise (une seule cotation
+    large pendant la pause pouvait inventer des dizaines de R de perte, ou un achat très haut) ; le déclenchement
+    les lit encore, comme IBKR. Sans transaction de réouverture, l'action était seulement calme : son NBBO était
+    exécutable et le prix reste le pire des deux cotations ;
+  - un trade ouvert à la clôture sans bougie dans ses deux dernières minutes est « données incomplètes »
+    (avant : la dernière demi-heure ; une pause LULD des dix dernières minutes ne rouvre pas) ;
+  - « avec 3 c » devient « avec au moins 3 c » et n'est jamais plus doux que le chiffre qu'il éprouve : sur un
+    prix non mesuré au marché, le glissement du labo s'il dépasse 3 c (au-dessus de 100 $), 3 c en plus d'un prix
+    mesuré ; les objectifs gardent le glissement du chiffre sans stress (avant : au prix de l'ordre), ce qui change
+    r_3c de tout trade sorti sur un objectif. Le coût affiché dans le message d'un KILL suit la même règle ;
+  - l'écart KILL − témoin propre a un IC en grappes par jour communes aux deux groupes (un jour de marché pèse
+    sur les deux), correction et t au plus petit nombre de jours des deux groupes (avant : deux groupes
+    indépendants) ; un groupe dont tous les ordres ont expiré (0 R partout) ne supprime plus l'IC ;
+  - diagnostics comptés, sans changer le chiffre : trous (4 minutes pleines ou plus sans transaction, jusqu'à
+    l'expiration de l'ordre s'il n'y a plus de bougie) pendant que l'ordre ou la position vit, sorties déclenchées
+    entre la transaction qui déclenche l'achat et la cotation suivante (la fin de sa minute sans cotation lue ;
+    TP et SL liés peut-être pas encore actifs : IBKR ne les active qu'une fois l'achat rempli), achats
+    plus gros que la taille de l'ask retenu, et une ligne des indéterminés par groupe (insoldables, en attente,
+    données incomplètes, minutes non lues, trous) ;
+  - le pire de tous les ordres a été vérifié par deux oracles indépendants (plus de 200 000 séquences, à
+    plusieurs tailles, prix mesurés et non mesurés) : aucun désaccord, contre-exemple A de GPT compris. Le test
+    `tests/test_killmode_oracle.py` en garde un échantillon (bougies d'1 min sans transactions lues) ;
+  - les messages suivent le journal : stop d'achat en GTD jusqu'à 11:00:00 heure de New York (SL et TP liés en
+    ordres du jour), vente du reste au marché à la dernière minute de la séance après avoir annulé TP et SL ;
+  - toujours non modélisés : exécutions partielles et carnet au-delà du meilleur ask, état limite LULD avant
+    une pause (les transactions à la bande sont lues, la pause est comptée comme trou), fixing de clôture.
 
 ## Déclaration n° 6 (8 octobre 2026) : trois règles de sortie de Gemini, actions
 

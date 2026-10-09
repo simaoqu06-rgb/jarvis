@@ -234,4 +234,5 @@ async def test_un_kill_pris_se_vend_a_la_cloture(monkeypatch):
 
     monkeypatch.setattr(A, "advise_book", fake)
     await scheduler.tick_closing(NOW)
-    assert len(sent) == 1 and "vends le reste de ACME avant la clôture (16 h New York)" in sent[0]
+    assert len(sent) == 1
+    assert "vers 15 h 59 New York, annule les TP et SL de ACME puis vends le reste au marché" in sent[0]

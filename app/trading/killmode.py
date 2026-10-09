@@ -13,7 +13,8 @@ Un setup n'est proposé (🔪 KILL) que si les quatre piliers sont réunis :
    les 24 h (pari binaire), pas plus d'actus négatives que positives ;
 3. **Graphique** : la règle de prix de la déclaration n° 5 du labo (strategies.killmode_check, le même code
    qu'au labo) : range des 15 premières minutes clôturé au-dessus du VWAP sans combler le gap ; ordre stop
-   d'achat 1 pas au-dessus du range, valable jusqu'à 11 h New York (17 h Paris), stop 1 pas sous le range,
+   d'achat 1 pas au-dessus du range, valable jusqu'à 11 h New York (17 h Paris, 16 h les semaines où les
+   changements d'heure ne coïncident pas), stop 1 pas sous le range,
    objectifs à 1, 2 et 3 R. Pas proposé si le prix est déjà parti à plus de 0,5 R au-dessus de l'entrée ;
 4. **Données complètes** : cours, journalier, bougies de 5 min, profil de la société, calendrier des
    résultats et actus ont tous répondu. Rien n'est deviné : une source muette = pas de setup.
@@ -32,7 +33,8 @@ solde ; « propre » quand il ne manque qu'une actu positive), avec la version (
 catalyseur, version du direct), les actus comptées, le contexte (veille, volume, source, secteur) et les codes
 du catalyseur. `!kill bilan` (permis Killmode éteint) solde chaque appel après la clôture sur les bougies SIP
 d'Alpaca non ajustées d'1 min de toute la séance (gardées pour un re-solde) : ordre stop d'achat actif une minute
-pleine après l'appel, un tiers par objectif, stop à l'entrée après TP1, soldé à la clôture ; les minutes qui
+pleine après l'envoi du message (le début de l'analyse pour les appels notés avant la méthode 4), un tiers par
+objectif, stop à l'entrée après TP1, soldé à la clôture ; les minutes qui
 décident (achat, stop, ordre des prix inconnu) sont relues transaction par transaction comme IBKR les voit, au prix
 exécutable mesuré, et une minute restée ambiguë est jouée dans tous les ordres possibles (le pire décide, le
 meilleur est affiché). Le chiffre qui décide est
@@ -42,7 +44,7 @@ ordre, glissement d'au moins un demi-pas).
 Règle de lecture, écrite avant le premier appel et revue le 8 octobre avant tout KILL soldé (avis de GPT et
 Gemini, council) : au 30e KILL déclenché, un audit (borne haute de l'IC 95 % sous 0 → JARVIS recommande
 d'éteindre, sinon « pas d'alerte », jamais une validation) ; au 100e, la lecture finale (avantage démontré
-seulement si l'IC tient par jour, par semaine et avec 3 c de glissement par côté) ; une borne de dégât (IC
+seulement si l'IC tient par jour, par semaine et avec au moins 3 c de glissement par côté) ; une borne de dégât (IC
 99,9 %) dès 10 KILL. Simão décide toujours. Le journal ne voit qu'une catastrophe ou un gros écart ; la valeur
 prédictive du filtre catalyseur à règle de prix égale (écart au témoin, pas l'effet causal d'une actu) se mesure
 au labo.
@@ -55,6 +57,7 @@ import json
 import logging
 import math
 import os
+import time
 import uuid
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
@@ -123,7 +126,10 @@ SPLIT_GAP_PCT = 50.0   # gap de +50 % ou plus : clôture de la veille vérifiée
                        # d'actions pas encore ajusté donne au moins +100 %)
 SPLIT_TOLERANCE = 0.2
 SLIP_ALERT_R = 0.25    # risque réel : sortie à 0,25 R ou plus sous le stop actif
-LATE_GAP = 30 * 60     # solde : trade ouvert à la clôture sans bougie dans la dernière demi-heure = incomplet
+LATE_GAP = 60          # solde : trade ouvert à la clôture sans bougie dans ses 2 dernières minutes = incomplet (une
+                       # pause LULD des 10 dernières minutes ne rouvre pas ; un arrêt sur nouvelle peut durer)
+PAUSE_MIN = 300        # bougies qui commencent à 5 min ou plus l'une de l'autre (4 min pleines sans transaction au
+                       # moins : une pause LULD de 5 min en laisse autant) : suspension, ou rien d'échangé
 # Méthode du solde, datée dans docs/labo-strategies.md ; un changement re-solde tout le journal depuis les bougies
 # gardées (KILL et témoins restent comparables). 1 (PR #41) : minutes jusqu'à la fin de la bougie de 5 min de
 # l'appel, puis 5 min. 2 (8 octobre, avant tout solde, second avis de GPT et Gemini) : toute la séance en bougies
@@ -131,7 +137,12 @@ LATE_GAP = 30 * 60     # solde : trade ouvert à la clôture sans bougie dans la
 # 3 (8 octobre, troisième avis de GPT et Gemini) : les minutes qui décident (déclenchement de l'achat, stop, minute
 # ambiguë) rejouées transaction par transaction comme IBKR les voit (`tick_bars`), au pire bid ou ask de l'ordre au
 # marché qui part ; celles restées sans transactions jouées dans tous les ordres possibles, le pire décide.
-SETTLE_METHOD = 3
+# 4 (9 octobre, quatrième avis de GPT) : ordre actif une minute pleine après l'envoi du message (`envoye_a`), pas après
+# le début de l'analyse ; objectif déjà dépassé quand l'achat se remplit exécuté sur-le-champ seulement si le bid
+# l'atteint, sinon posé (les deux joués si une seule des deux cotations l'atteint) ; après une suspension prouvée
+# (bougies à 5 min l'une de l'autre et transaction de réouverture), les cotations de la pause ne servent plus au
+# prix ; pas de bougie dans les 2 dernières minutes = incomplet.
+SETTLE_METHOD = 4
 STEP = 60              # bougies du solde : 1 min
 LATENCY = 60           # appel lu et ordre saisi chez IBKR : l'ordre est actif à la 1re minute pleine après 60 s
 BARS_DIR = os.getenv("JARVIS_KILLMODE_BARS_PATH", "data/killmode_bars")  # bougies d'1 min de chaque solde
@@ -148,6 +159,10 @@ QUOTE_LOOKBACK = 3600  # cotation en vigueur au début d'une minute : la derniè
 # groupée éligible en UTP (tape C).
 NOT_LAST = frozenset("ICRNUVHMQGTPWZ479")
 NOT_LAST_CTA = frozenset("B")
+# Transaction de réouverture (CTA « Market Center Reopening Trade », UTP « Re-Opening Prints ») ou d'ouverture :
+# après des bougies à PAUSE_MIN l'une de l'autre, la preuve d'une suspension (sans elle, l'action était seulement
+# calme).
+REOPENING = frozenset("5O")
 # Champ u d'Alpaca : une transaction annulée (« canceled ») ou erronée (« incorrect ») a bien été diffusée, et IBKR
 # l'a vue avant l'annulation, qui arrive après : elle compte. Sa correction est insérée après coup, à un prix qu'IBKR
 # n'a pas vu à cet instant : elle ne compte pas.
@@ -414,7 +429,8 @@ def chart_pillar(d: ST.Day | None, now: datetime, price: float | None) -> dict:
             "range_high": cand["entry"] - d.tick(cand["entry"]), "range_low": cand["stop"] + d.tick(cand["stop"])}
     if now.timestamp() >= cand["entry_until"]:
         return {"status": "expire", "ok": False, "plan": plan,
-                "raisons": ["ordre valable jusqu'à 11 h New York (17 h Paris) : setup terminé pour aujourd'hui"]}
+                "raisons": [f"ordre valable jusqu'à 11 h New York ({_paris(cand['entry_until'], now)} à Paris) : "
+                            "setup terminé pour aujourd'hui"]}
     k = next((j for j in range(cand["i"] + 1, len(d.t)) if d.h[j] >= cand["entry"]), None)
     plan["declenche_a"] = d.t[k] if k is not None else None
     done = lab_trade_done(d, cand)
@@ -700,11 +716,12 @@ def call_motif(cat: dict | None, now: datetime) -> str | None:
     return "fond" if any(motif(n["title"]) == "fond" for n in pos) else "mouvement"
 
 
-def record(a: dict, now: datetime | None = None) -> dict | None:
+def record(a: dict, now: datetime | None = None, sent: float | None = None) -> dict | None:
     """Note un 🔪 KILL ou un témoin catalyseur (une fois par action, séance et groupe) ; None si déjà noté ou
-    hors des deux groupes. Le groupe est figé à l'écriture : un témoin reste un témoin si l'action devient KILL
-    plus tard dans la séance (l'écarter après coup choisirait les témoins sur une info postérieure) ; la
-    comparaison des groupes prend le premier appel de chaque action et séance (first_calls)."""
+    hors des deux groupes ; `sent` : instant d'envoi du message (secondes), d'où part l'ordre (`activation`). Le
+    groupe est figé à l'écriture : un témoin reste un témoin si l'action devient KILL plus tard dans la séance
+    (l'écarter après coup choisirait les témoins sur une info postérieure) ; la comparaison des groupes prend le
+    premier appel de chaque action et séance (first_calls)."""
     g = group(a)
     if g is None:
         return None
@@ -731,6 +748,8 @@ def record(a: dict, now: datetime | None = None) -> dict | None:
             "actus": [{"titre": n["title"], "publiee": n["published_at"], "ton": n["tone"],
                        "motif": motif(n["title"]) if n["tone"] == "positive" else None} for n in fresh[:8]],
             "resultats": cat.get("last_earnings"), "actu": pos[0]["title"] if pos else None, "resultat": None}
+    if sent is not None:
+        call["envoye_a"] = math.ceil(sent)
     book.append(call)
     _write(CALLS_PATH, book)
     return call
@@ -766,8 +785,9 @@ def sip_view(call: dict, bars: list[dict]) -> dict | None:
 
 
 def _incomplete(call: dict, after: list[dict], res: dict, step: int = STEP) -> bool:
-    """Trade encore ouvert à la clôture sans bougie dans la dernière demi-heure (suspension, données coupées) :
-    soldé à un prix d'avant, peut-être faux."""
+    """Trade encore ouvert à la clôture sans bougie dans ses LATE_GAP + 1 dernières minutes (suspension qui dure
+    jusqu'à la clôture, données coupées) : soldé à un prix d'avant, peut-être faux. Un diagnostic : le solde ne
+    change pas."""
     if not res["triggered"] or res["exit_reason"] != "cloture":
         return False
     last = max((b["t"] for b in after if b["t"] + step <= call["close_ts"]), default=None)
@@ -775,9 +795,43 @@ def _incomplete(call: dict, after: list[dict], res: dict, step: int = STEP) -> b
 
 
 def activation(call: dict, step: int = STEP) -> int:
-    """Début de la première bougie pleine LATENCY secondes après l'appel : l'ordre posé chez IBKR (message lu,
-    ordre saisi), le même délai pour chaque KILL et chaque témoin. Ce qui se passe avant n'est jamais vu."""
-    return -(-(call["at"] + LATENCY) // step) * step
+    """Début de la première bougie pleine LATENCY secondes après l'envoi du message (`envoye_a`, à la seconde
+    supérieure ; `at`, le début de l'analyse, pour les appels notés avant la méthode 4) : l'ordre posé chez IBKR
+    (message lu, ordre saisi), le même délai pour chaque KILL et chaque témoin. Ce qui se passe avant n'est jamais
+    vu."""
+    return -(-(call.get("envoye_a", call["at"]) + LATENCY) // step) * step
+
+
+def holes(call: dict, bars: list[dict], act: int, res: dict, step: int = STEP) -> list[list[int]]:
+    """Trous entre deux bougies qui commencent à PAUSE_MIN ou plus l'une de l'autre (au moins 4 minutes pleines sans
+    transaction : une pause LULD de 5 min en laisse au moins autant), pendant que l'ordre ou la position vit (de
+    l'activation à la sortie, ou à l'expiration de l'ordre) : suspension, ou aucune transaction. [début, fin] de
+    chacun (sans bougie après, jusqu'à cette fin) ; rien ne s'y exécute dans le solde, comme chez IBKR (le
+    déclenchement attend une transaction). Un diagnostic : le solde ne change pas."""
+    end = res["closed_at"] if res["triggered"] else min(call["until"], call["close_ts"])
+    ts = [b["t"] for b in bars]
+    out = [[a + step, b] for a, b in zip(ts, ts[1:]) if b - a >= PAUSE_MIN and max(a + step, act) < min(b, end)]
+    if ts and end - (ts[-1] + step) >= PAUSE_MIN - step and max(ts[-1] + step, act) < end:
+        out.append([ts[-1] + step, end])  # plus aucune transaction jusqu'à la fin
+    return out
+
+
+def early_children(res: dict) -> bool:
+    """Une sortie déclenchée par une transaction entre celle qui déclenche l'achat et la cotation suivante : les
+    ordres liés (TP, SL) ne sont actifs qu'une fois l'achat rempli (IBKR), au plus tôt à cette cotation. Une
+    transaction au même horodatage que celle de l'achat, après elle, compte ; la sortie sur la transaction même de
+    l'achat (objectif exécutable sur-le-champ) non. Sans cotation suivante lue, jusqu'à la fin de la minute de
+    l'achat. Compté, pas corrigé : un écart de cet ordre se joue dans les deux sens."""
+    ft = res.get("fill_tick") or {}
+    if ft.get("ns") is None:
+        return False
+    minute = 60 * 10**9
+
+    def before_quote(ns: int) -> bool:
+        return ns <= ft["q_ns"] if ft.get("q_ns") is not None else ns < (ft["ns"] // minute + 1) * minute
+
+    return any(e.get("ns") is not None and (ft["ns"], ft.get("seq", 0)) < (e["ns"], e.get("seq", 0))
+               and before_quote(e["ns"]) for e in res["exits"])
 
 
 def _exits(res: dict) -> list[dict]:
@@ -788,20 +842,28 @@ def _quote_ok(q: list | None) -> bool:
     return bool(q) and q[1] > 0 and q[2] > 0 and q[2] >= q[1]
 
 
-def tick_bars(m: int, data: dict) -> list[dict]:
+def tick_bars(m: int, data: dict, reopened: bool = False) -> list[dict]:
     """La minute `m` transaction par transaction, comme IBKR la voit (stop simulé, méthode « Last », le défaut pour
     les actions US) : ne déclenchent que les transactions qui font un dernier cours (conditions ; telles que
     diffusées, annulées après coup comprises, corrections écartées), quand le NBBO en vigueur est valide et les
     contient à 0,5 % près. Chacune devient une bougie
     o = h = l = c ; `bid` et `ask` sont le pire de la cotation en vigueur et de la suivante : l'ordre au marché part
     après la transaction qui le déclenche. Sans cotation lue, la transaction compte et son prix sert. Une minute
-    sans transaction éligible disparaît : rien ne s'y déclenche."""
+    sans transaction éligible disparaît : rien ne s'y déclenche. `reopened` : première minute après un trou de
+    PAUSE_MIN ; si elle a une transaction de réouverture (REOPENING), c'était une suspension, et les cotations
+    d'avant sa première transaction sont celles de la pause, sans exécution possible : elles ne donnent pas le prix
+    (le déclenchement les lit encore, comme IBKR). Sans elle (une action calme, ou une réouverture non marquée), le
+    NBBO était exécutable et compte. Chaque bougie garde aussi `bid_hi` et `ask_lo` (le meilleur des deux), `q_ns`
+    (l'instant de la cotation suivante : l'achat au marché se remplit au plus tôt là), `ask_size` et `seq` (son rang
+    dans la minute)."""
     quotes = data.get("q") or []
     ahead: list = [None] * (len(quotes) + 1)  # première cotation valide à partir de chaque rang
     for k in range(len(quotes) - 1, -1, -1):
         ahead[k] = quotes[k] if _quote_ok(quotes[k]) else ahead[k + 1]
+    trades = data.get("t") or []
+    halt = trades[0][0] if reopened and any(any(x in REOPENING for x in t[3]) for t in trades) else None
     cur, k, out = data.get("q0"), 0, []
-    for ns, p, size, cond, tape, upd in data.get("t") or []:
+    for ns, p, size, cond, tape, upd in trades:
         while k < len(quotes) and quotes[k][0] <= ns:
             cur, k = quotes[k], k + 1
         if upd in AFTER_THE_FACT or any(x in NOT_LAST for x in cond) or (tape in ("A", "B") and any(x in NOT_LAST_CTA
@@ -809,19 +871,25 @@ def tick_bars(m: int, data: dict) -> list[dict]:
             continue
         if cur is not None and (not _quote_ok(cur) or not cur[1] - IBKR_LEEWAY * p <= p <= cur[2] + IBKR_LEEWAY * p):
             continue  # IBKR : pas de NBBO valide, ou dernier prix trop loin du NBBO
-        seen = [q for q in (cur, ahead[k]) if q]
-        out.append({"t": m, "o": p, "h": p, "l": p, "c": p, "v": size, "ns": ns,
-                    "bid": min(q[1] for q in seen) if seen else None,
-                    "ask": max(q[2] for q in seen) if seen else None})
+        seen = [q for q in (cur, ahead[k]) if q and not (halt is not None and q[0] < halt)]
+        ask = max(seen, key=lambda q: (q[2], -(q[4] if len(q) > 4 else 0))) if seen else None
+        out.append({"t": m, "o": p, "h": p, "l": p, "c": p, "v": size, "ns": ns, "seq": len(out),
+                    "bid": min(q[1] for q in seen) if seen else None, "ask": ask[2] if ask else None,
+                    "bid_hi": max(q[1] for q in seen) if seen else None,
+                    "ask_lo": min(q[2] for q in seen) if seen else None,
+                    "q_ns": ahead[k][0] if ahead[k] else None,
+                    "ask_size": ask[4] if ask and len(ask) > 4 else None})
     return out
 
 
 def refine(bars: list[dict], ticks: dict) -> list[dict]:
-    """Les bougies d'1 min, chaque minute dont les transactions sont lues remplacée par `tick_bars`."""
+    """Les bougies d'1 min de la séance, chaque minute dont les transactions sont lues remplacée par `tick_bars`
+    (marquée `reopened` quand la bougie d'avant commence PAUSE_MIN ou plus avant elle)."""
     out: list[dict] = []
-    for b in bars:
+    for i, b in enumerate(bars):
         data = ticks.get(str(b["t"]))
-        out.extend(tick_bars(b["t"], data) if data is not None else [b])
+        reopened = i > 0 and b["t"] - bars[i - 1]["t"] >= PAUSE_MIN
+        out.extend(tick_bars(b["t"], data, reopened) if data is not None else [b])
     return out
 
 
@@ -900,7 +968,7 @@ def settle(call: dict, bars: list[dict], step: int = STEP, ticks: dict | None = 
           "last_price": call["price"] or call["entry"], "cost": SIM.costs("stock", call["entry"]),
           "entry_order": "stop"}
     after = [b for b in bars if b["t"] >= act]
-    fine = refine(after, ticks) if ticks else after
+    fine = [b for b in refine(bars, ticks) if b["t"] >= act] if ticks else after
 
     def score(r: dict) -> float:
         v = _at_size(call, {"declenche": r["triggered"], "eurusd": eurusd, "plan_ibkr": plan_ibkr} | priced(r))
@@ -929,7 +997,8 @@ def settle(call: dict, bars: list[dict], step: int = STEP, ticks: dict | None = 
            "ordres_tronques": cut or cut2, "minutes_lues": sorted(t for t in {b["t"] for b in after} if str(t) in ticks),
            "a_lire": sorted(m for m in need if str(m) not in ticks),
            "entree_r": None, "sous_stop_r": None, "donnees_incompletes": _incomplete(call, after, res, step),
-           "sip": sip_view(call, five)}
+           "trous": holes(call, bars, act, res, step), "taille_ask": (res.get("fill_tick") or {}).get("ask_size"),
+           "enfants_avant_remplissage": early_children(res), "sip": sip_view(call, five)}
     if lab["triggered"] and lab["r_net"] is not None:
         out["r_ibkr"] = round(lab["r_net"] - (SS.ibkr_commission_r(call["entry"], call["stop"]) or 0.0), 4)
     if res["triggered"] and res["r_net"] is not None:
@@ -995,8 +1064,10 @@ def _trade_rows(rows: list[dict]) -> list[list]:
 
 
 def _quote_rows(rows: list[dict]) -> list[list]:
-    return sorted(([alpaca.ns(q["t"]), float(q.get("bp") or 0), float(q.get("ap") or 0)] for q in rows),
-                  key=lambda x: x[0])
+    """[ns, bid, ask, taille du bid, taille de l'ask] dans l'ordre du temps (tailles en actions depuis le 3 novembre
+    2025 ; les fichiers d'avant la méthode 4 n'ont que les trois premiers)."""
+    return sorted(([alpaca.ns(q["t"]), float(q.get("bp") or 0), float(q.get("ap") or 0), float(q.get("bs") or 0),
+                    float(q.get("as") or 0)] for q in rows), key=lambda x: x[0])
 
 
 async def minute_ticks(call: dict, m: int) -> dict:
@@ -1154,9 +1225,12 @@ def _at_size(call: dict, res: dict | None, exits_key: str = "sorties", stress: b
     en actions entières, gain et frais bracket par bracket (une entrée et une sortie chacun, chaque ordre avec son
     minimum, plan IBKR noté au solde ; ce qui reste à la clôture part en un seul ordre). Glissement du labo avec un
     plancher d'un demi-pas par côté, sauf sur un prix mesuré (méthode 3 : bid ou ask réels, `mesure`) ; `stress` :
-    3 c à l'entrée et à chaque sortie au marché (1 % du prix sous 1 $), même mesurées, objectifs au prix de l'ordre.
-    Sur le risque prévu : un mauvais remplissage n'améliore jamais le chiffre. None si l'ordre n'est pas parti ou
-    si le solde n'a pas le détail."""
+    3 c en plus d'un prix mesuré à l'entrée et à chaque sortie au marché (1 % du prix sous 1 $), et au moins 3 c au
+    lieu du glissement sur un prix non mesuré (9 octobre : au-dessus de 100 $, le glissement du labo dépasse 3 c,
+    et le stress était plus doux que le chiffre qu'il éprouve) ; objectifs comme sans stress (avant : sans
+    glissement). Sur le risque
+    prévu : un mauvais remplissage n'améliore jamais le chiffre. None si l'ordre n'est pas parti ou si le solde n'a
+    pas le détail."""
     if not res or not res.get("declenche") or not res.get(exits_key) or res.get("remplissage") is None:
         return None
     entry, stop = call["entry"], call["stop"]
@@ -1165,14 +1239,18 @@ def _at_size(call: dict, res: dict | None, exits_key: str = "sorties", stress: b
     plan = IBKR_PLANS.get(res.get("plan_ibkr") or IBKR_PLAN, IBKR_PLANS["fixe"])
     fill = res["remplissage"]
     s = (STRESS_CENTS if entry >= 1 else entry * STRESS_SUB_DOLLAR) if stress else None
+
+    def slip(price: float, measured: bool, market: bool = True) -> float:
+        base = 0.0 if measured else _half_tick_slip(price)
+        return base if not stress or not market else s if measured else max(base, s)
+
     legs = _legs(q, len(call["targets"]), res[exits_key])
     pnl = 0.0
-    slip_in = 0.0 if res.get("remplissage_mesure") else _half_tick_slip(fill)
+    slip_in = slip(fill, bool(res.get("remplissage_mesure")))
     for n, e in legs:
         price = e["prix"]
-        out = ((0.0 if e["raison"].startswith("tp") else s) if stress
-               else 0.0 if e.get("mesure") else _half_tick_slip(price))
-        pnl += (n * (price - out - fill - (s if stress else slip_in)) - order_commission(n, fill, plan)
+        out = slip(price, bool(e.get("mesure")), not e["raison"].startswith("tp"))
+        pnl += (n * (price - out - fill - slip_in) - order_commission(n, fill, plan)
                 - (0.0 if e["raison"] == "cloture" else order_commission(n, price, plan)))
     closing = [(n, e["prix"]) for n, e in legs if e["raison"] == "cloture"]
     if closing:  # TP et SL annulés, le reste vendu en un seul ordre : un seul minimum
@@ -1198,8 +1276,9 @@ def two_ticks_r(call: dict, res: dict | None) -> float | None:
 
 
 def stress_20e(call: dict, res: dict | None) -> float | None:
-    """Le stress de Gemini à la taille de Simão (3 c par côté au lieu du glissement, mêmes brackets et minimums IBKR
-    que r_20e) : la condition « avec 3 c » de la lecture finale. Une hypothèse, pas une mesure."""
+    """Le stress de Gemini à la taille de Simão (au moins 3 c par côté au marché, mêmes brackets et minimums IBKR
+    que r_20e, jamais plus doux que r_20e) : la condition « avec 3 c » de la lecture finale. Une hypothèse, pas une
+    mesure."""
     return _at_size(call, res, stress=True)
 
 
@@ -1289,6 +1368,12 @@ def _week(day: str) -> tuple:
     return date.fromisoformat(day).isocalendar()[:2]
 
 
+def _call_rows(settled: list[dict], key: str) -> list[tuple]:
+    """(jour, R) de chaque appel soldé : 0 R pour un ordre expiré, un trade sans chiffre écarté."""
+    return [(c["day"], value(c, key) if c["resultat"]["declenche"] else 0.0) for c in settled
+            if not c["resultat"]["declenche"] or value(c, key) is not None]
+
+
 def stats(book: list[dict], groupe: str = "kill", key: str = "r_20e") -> dict:
     """Bilan d'un groupe du journal : espérance par trade déclenché (frais réels de Simão par défaut ; `key` r_ibkr
     pour les frais du labo, r_3c pour le stress de Gemini) et par appel (0 R quand l'ordre a expiré), IC 95 % en
@@ -1301,8 +1386,7 @@ def stats(book: list[dict], groupe: str = "kill", key: str = "r_20e") -> dict:
     trig = [c for c in fired if value(c, key) is not None]
     per = mean_t([(c["day"], value(c, key)) for c in trig])
     weekly = mean_t([(_week(c["day"]), value(c, key)) for c in trig])
-    by_call = mean_t([(c["day"], value(c, key) if c["resultat"]["declenche"] else 0.0) for c in settled
-                      if not c["resultat"]["declenche"] or value(c, key) is not None])
+    by_call = mean_t(_call_rows(settled, key))
     return {"appels": len(rows), "soldes": len(settled), "en_attente": len(solvable) - len(settled),
             "insoldables": len(rows) - len(solvable), "declenches": len(trig), "expires": len(settled) - len(fired),
             "taux": len(fired) / len(settled) if settled else None, "esperance_r": per["m"], "ic95": per["ci"],
@@ -1319,17 +1403,32 @@ def call_gap(book: list[dict], scan_only: bool = False, key: str = "r_20e") -> d
     selon son premier appel ; `scan_only` : les appels du scan seulement (même source, même retard, actions que
     Simão n'a pas choisies). Descriptif, il ne décide rien : il faudrait des centaines de séances pour voir 0,3 R.
     C'est la valeur prédictive du filtre catalyseur à règle de prix égale, pas l'effet causal d'une actu ; elle se
-    mesure au labo."""
+    mesure au labo. IC 95 % en grappes par jour communes aux deux groupes (quatrième avis de GPT, écart apparié) :
+    un jour de marché pèse sur les KILL et les témoins à la fois, les traiter comme indépendants faussait l'IC ;
+    t au plus petit nombre de jours des deux groupes moins 1 (avec G − 1, G = tous les jours, l'IC ne couvrait que
+    70 % au lieu de 95 % avec des KILL sur 2 jours et des témoins sur 30)."""
     first = [c for c in first_calls(book) if not scan_only or (c.get("source") or "").startswith("alpaca")]
     k, w = stats(first, "kill", key), stats(first, "temoin_propre", key)
+    n = (k["soldes"], w["soldes"])
     if k["par_appel_r"] is None or w["par_appel_r"] is None:
-        return {"m": None, "ci": None, "n": (k["soldes"], w["soldes"])}
-    m = k["par_appel_r"] - w["par_appel_r"]
-    if not k["se_appel"] or not w["se_appel"]:
-        return {"m": round(m, 4), "ci": None, "n": (k["soldes"], w["soldes"])}
-    se = math.hypot(k["se_appel"], w["se_appel"])
+        return {"m": None, "ci": None, "n": n}
+    rk, rw = (_call_rows([c for c in in_group(first, g) if not c.get("insoldable") and c.get("resultat")], key)
+              for g in ("kill", "temoin_propre"))
+    mk, mw = sum(r for _, r in rk) / len(rk), sum(r for _, r in rw) / len(rw)
+    m = mk - mw
+    if k["se_appel"] is None or w["se_appel"] is None:  # un seul jour d'un côté (0 : un groupe tout expiré, il compte)
+        return {"m": round(m, 4), "ci": None, "n": n}
+    u: dict = defaultdict(float)  # part de chaque jour dans l'écart, centrée
+    for d, r in rk:
+        u[d] += (r - mk) / len(rk)
+    for d, r in rw:
+        u[d] -= (r - mw) / len(rw)
+    g = min(k["jours_appel"], w["jours_appel"])  # comme les degrés de liberté du t
+    se = math.sqrt(sum(x * x for x in u.values()) * g / (g - 1))
+    if not se:
+        return {"m": round(m, 4), "ci": None, "n": n}
     q = t_quantile(0.975, min(k["jours_appel"], w["jours_appel"]) - 1)
-    return {"m": round(m, 4), "ci": [round(m - q * se, 4), round(m + q * se, 4)], "n": (k["soldes"], w["soldes"])}
+    return {"m": round(m, 4), "ci": [round(m - q * se, 4), round(m + q * se, 4)], "n": n}
 
 
 def lab_item() -> dict | None:
@@ -1417,9 +1516,9 @@ def reading(book: list[dict], lab: dict | None) -> list[str]:
       sinon « pas d'alerte », un audit et jamais une validation (un verdict positif à 30 portait le risque de
       faux positif de 2,5 % à 4,5 %) ;
     - au 100e, la lecture finale, toujours faite : borne haute sous 0 → éteindre ; borne basse au-dessus de 0
-      en grappes par jour, par semaine ET avec 3 c de glissement par côté → avantage démontré ; positif sans les
-      trois → « pas une validation » ; sinon ce que l'intervalle n'exclut pas et le plus petit écart visible. Si
-      l'alerte du 30e a été écartée, le pari se mesure sur les KILL 31 à 100, joués après l'alerte ;
+      en grappes par jour, par semaine ET avec au moins 3 c de glissement par côté → avantage démontré ; positif
+      sans les trois → « pas une validation » ; sinon ce que l'intervalle n'exclut pas et le plus petit écart
+      visible. Si l'alerte du 30e a été écartée, le pari se mesure sur les KILL 31 à 100, joués après l'alerte ;
     - la borne de dégât (IC 99,9 %) à chaque bilan dès HARM_MIN KILL déclenchés.
     Les lots sont figés (les premiers KILL dans l'ordre des appels) ; IC en t à G − 1 degrés de liberté. Un appel
     dont la règle refaite sur les bougies SIP ne concorde pas reste dans la lecture : c'est ce que Simão a reçu."""
@@ -1439,11 +1538,12 @@ def reading(book: list[dict], lab: dict | None) -> list[str]:
             weeks, stress = s100["ic95_semaines"], stats(final, "kill", "r_3c")["ic95"]
             if weeks and weeks[0] > 0 and stress and stress[0] > 0:
                 out.append(f"📈 **Lecture finale : espérance positive même en bas de l'intervalle** ({span}), qui "
-                           f"tient semaine par semaine ({s100['semaines']} semaines) et avec 3 c de glissement par "
-                           "côté : avantage démontré.")
+                           f"tient semaine par semaine ({s100['semaines']} semaines) et avec au moins 3 c de "
+                           "glissement par côté : avantage démontré.")
             else:
                 why = [f"concentré sur {_n(s100['semaines'], 'semaine')}" if not (weeks and weeks[0] > 0) else None,
-                       "ne tient pas avec 3 c de glissement par côté" if not (stress and stress[0] > 0) else None]
+                       "ne tient pas avec au moins 3 c de glissement par côté"
+                       if not (stress and stress[0] > 0) else None]
                 out.append(f"Lecture finale positive ({span}) mais pas une validation : "
                            f"{' ; '.join(w for w in why if w)}.")
         else:
@@ -1528,6 +1628,9 @@ def execution_line(rows: list[dict], now: datetime | None = None) -> str | None:
             and any(e.get("mesure") and e["raison"].startswith("stop") for e in r["sorties"])]
     missing = sum(len(c["resultat"].get("a_lire") or []) for c in trig if retryable(c, now))
     lost = sum(len(c["resultat"].get("a_lire") or []) for c in trig if not retryable(c, now))
+    early = sum(1 for r in res if r.get("enfants_avant_remplissage"))
+    big = sum(1 for c in trig if c["resultat"].get("taille_ask")
+              and shares(c["entry"] - c["stop"], c["resultat"].get("eurusd")) > c["resultat"]["taille_ask"])
     return (f"-# Prix mesurés sur les transactions et le NBBO SIP (règle « Last » d'IBKR, pire bid ou ask de l'ordre "
             f"au marché) : achat sur {len(ins)}/{len(trig)} KILL"
             + (f", {SS._r(sum(ins) / len(ins))} R au-dessus de l'ordre en moyenne" if ins else "")
@@ -1537,7 +1640,33 @@ def execution_line(rows: list[dict], now: datetime | None = None) -> str | None:
                if missing else "")
             + (f" · {_n(lost, 'minute')} jamais lue{'s' if lost > 1 else ''} (plus retentée{'s' if lost > 1 else ''} "
                f"après {UNSETTLED_DAYS} jours, jouée{'s' if lost > 1 else ''} dans tous les ordres)" if lost else "")
+            + (f" · {early} KILL sorti{'s' if early > 1 else ''} avant la cotation qui remplit l'achat (TP et SL "
+               "liés peut-être pas encore actifs, non corrigé)" if early else "")
+            + (f" · {big} achat{'s' if big > 1 else ''} plus gros que l'ask affiché (carnet remonté, non compté)"
+               if big else "")
             + ".")
+
+
+def status_line(groups: list[tuple[str, list[dict]]], now: datetime | None = None) -> str | None:
+    """Les résultats indéterminés de chaque groupe, jamais comptés 0 R ni tus (quatrième avis de GPT) : insoldables,
+    en attente du solde, soldés sur des données incomplètes, minutes encore à lire, trous (`holes` : suspension, ou
+    aucune transaction) pendant l'ordre ou la position."""
+    now = now or datetime.now(timezone.utc)
+    parts = []
+    for label, rows in groups:
+        res = [c["resultat"] for c in rows if c.get("resultat")]
+        bits = [(sum(1 for c in rows if c.get("insoldable")), "insoldable"),
+                (sum(1 for c in rows if not c.get("resultat") and not c.get("insoldable")), "en attente"),
+                (sum(1 for r in res if r.get("donnees_incompletes")), "soldé sur des données incomplètes"),
+                (sum(1 for r in res if r.get("a_lire")), "avec des minutes non lues"),
+                (sum(1 for r in res if r.get("trous")),
+                 f"avec {(PAUSE_MIN - STEP) // 60} min ou plus sans transaction (suspension ou calme)")]
+        shown = [f"{n} {word}" for n, word in bits if n]
+        if rows:
+            parts.append(f"{label} : " + (", ".join(shown) if shown else "rien d'indéterminé"))
+    if not any("rien d'indéterminé" not in p for p in parts):
+        return None
+    return "-# Indéterminés · " + " · ".join(parts) + "."
 
 
 def errors_line(rows: list[dict]) -> str | None:
@@ -1551,12 +1680,13 @@ def errors_line(rows: list[dict]) -> str | None:
 
 
 def stress_line(book: list[dict]) -> str | None:
-    """Les stress de Gemini en un chiffre chacun : 3 c par côté en plus des prix (une hypothèse, pas une mesure) et
+    """Les stress de Gemini en un chiffre chacun : au moins 3 c par côté (une hypothèse, pas une mesure) et
     des objectifs exigés à 2 pas au-delà ; ils ne décident rien seuls."""
     st, two = stats(book, "kill", "r_3c"), stats(book, "kill", "r_2t")
     if not st["declenches"]:
         return None
-    return (f"-# Avec 3 c de glissement par côté (hypothèse de Gemini, non mesurée), mêmes brackets et minimums IBKR : "
+    return (f"-# Avec au moins 3 c de glissement par côté (le glissement du labo s'il est plus grand ; hypothèse de "
+            f"Gemini, non mesurée), mêmes brackets et minimums IBKR : "
             f"{SS._r(st['esperance_r'])} R par trade sur {_n(st['declenches'], 'KILL')}"
             + (f" · objectifs exigés à 2 pas au-delà : {SS._r(two['esperance_r'])} R" if two["declenches"] else "")
             + ".")
@@ -1600,10 +1730,16 @@ def _paris(ts: int, now: datetime) -> str:
     return T.time_fr(datetime.fromtimestamp(ts, timezone.utc), now)
 
 
+def ny_time(ts: float) -> str:
+    """L'heure de New York en clair : « 15 h 59 », « 11 h »."""
+    t = datetime.fromtimestamp(ts, NEW_YORK)
+    return f"{t.hour} h {t.minute:02d}" if t.minute else f"{t.hour} h"
+
+
 def stop_cost(entry: float, stop: float) -> dict:
     """Frais d'un trade stoppé, en R : à la taille de Simão (RISK_EUR, un bracket par objectif, une entrée et un
     stop chacun, minimum par ordre, glissement d'au moins un demi-pas), au labo, et au stress de 3 c de Gemini
-    (mêmes brackets et minimums)."""
+    (mêmes brackets et minimums, jamais plus doux que le chiffre réel, comme `stress_20e`)."""
     risk = entry - stop
     q = shares(risk)
     plan = IBKR_PLANS.get(IBKR_PLAN, IBKR_PLANS["fixe"])
@@ -1611,7 +1747,8 @@ def stop_cost(entry: float, stop: float) -> dict:
     fees = sum(order_commission(n, entry, plan) + order_commission(n, stop, plan) for n in parts) / (q * risk)
     s3 = STRESS_CENTS if entry >= 1 else entry * STRESS_SUB_DOLLAR
     return {"actions": q, "brackets": parts, "reel": (_half_tick_slip(entry) + _half_tick_slip(stop)) / risk + fees,
-            "labo": SS.expected_cost_r("stock", entry, stop, None) or 0.0, "stress": 2 * s3 / risk + fees}
+            "labo": SS.expected_cost_r("stock", entry, stop, None) or 0.0,
+            "stress": (max(_half_tick_slip(entry), s3) + max(_half_tick_slip(stop), s3)) / risk + fees}
 
 
 def bracket_orders(entry: float, stop: float, targets: list[float]) -> list[tuple[int, float]]:
@@ -1646,18 +1783,21 @@ def text(a: dict, lab: str | None = None) -> str:
         q = sum(n for n, _ in orders)
         legs = " · ".join(f"{_n(n, 'action')} → TP{plan['targets'].index(p) + 1} {_fr(p)}" for n, p in orders)
         lines.append(f"📋 Chez IBKR, à {RISK_EUR:g} € de risque : **{_n(q, 'action')} en {_n(len(orders), 'bracket')}** "
-                     f"(stop d'achat {_fr(plan['entry'])}, SL {_fr(plan['stop'])} et TP liés, ordres du jour) : "
+                     f"(stop d'achat {_fr(plan['entry'])} en GTD jusqu'à "
+                     f"{datetime.fromtimestamp(plan['until'], NEW_YORK):%H:%M:%S} heure de New York, SL "
+                     f"{_fr(plan['stop'])} et TP liés en ordres du jour) : "
                      f"**{legs}**. Sur les SL des brackets qui visent au-delà de TP1, un stop ajustable IBKR "
                      f"(« Adjustable Stop ») : déclencheur {_fr(plan['targets'][0])}, nouveau stop "
-                     f"{_fr(plan['entry'])} ; il remonte seul à l'entrée à l'instant du TP1, comme le journal le "
-                     f"compte. Ce qui reste, vends-le en un ordre avant la clôture ({_paris(plan['close_ts'], now)}, "
-                     f"{datetime.fromtimestamp(plan['close_ts'], NEW_YORK).hour} h New York). "
+                     f"{_fr(plan['entry'])} ; il remonte seul à l'entrée quand le prix atteint TP1 (le journal le "
+                     f"remonte quand TP1 se remplit : le même instant, à un pas près). Vers "
+                     f"{ny_time(plan['close_ts'] - 60)} New York ({_paris(plan['close_ts'] - 60, now)} à Paris), "
+                     "annule les TP et SL restants puis vends le reste au marché en un ordre. "
                      "C'est la gestion que le journal mesure.")
         cost = stop_cost(plan["entry"], plan["stop"])
         lines.append(f"-# Un trade stoppé coûte ≈ {_fr(cost['reel'])} R de frais à {RISK_EUR:g} € de risque "
                      f"({_n(len(cost['brackets']), 'bracket')} IBKR {IBKR_PLAN}, minimum par ordre compris) ; labo "
-                     f"≈ {_fr(cost['labo'])} R ; avec 3 c de glissement par côté (hypothèse de Gemini, non "
-                     f"mesurée) ≈ {_fr(cost['stress'])} R.")
+                     f"≈ {_fr(cost['labo'])} R ; avec au moins 3 c de glissement par côté (hypothèse de Gemini, "
+                     f"non mesurée) ≈ {_fr(cost['stress'])} R.")
         if plan.get("declenche_a") and a["price"] is not None and a["price"] >= plan["entry"]:
             lines.append(f"-# Entrée déjà touchée à {_paris(plan['declenche_a'], now)} : encore à moins de "
                          f"{str(CHASE_R).replace('.', ',')} R, l'ordre part au prix du moment.")
@@ -1887,10 +2027,17 @@ def bilan_text(book: list[dict], trades: list[dict] | None = None, now: datetime
         lines.append(f"-# Aux frais réels : {RISK_EUR:g} € de risque, un bracket IBKR par objectif en actions entières "
                      "(minimum par ordre, plan " + IBKR_PLAN + "), glissement du labo d'au moins un demi-pas sauf prix "
                      "mesuré ; soldé en bougies d'1 min, minutes qui décident relues transaction par transaction, "
-                     "ordre actif une minute pleine après l'appel, minute ambiguë dans le pire de tous les ordres. "
+                     "ordre actif une minute pleine après l'envoi de l'appel"
+                     + (" (le début de l'analyse pour les appels notés avant la méthode 4)"
+                        if any("envoye_a" not in c for c in cur) else "")
+                     + ", minute ambiguë dans le pire de tous les ordres compatibles avec les bougies (hypothèses "
+                     "d'exécution du journal). "
                      f"IC 95 % en t, indicatif avant {READ_AT} KILL.")
     for line in (errors_line(cur), _call_gap_line(cur), stress_line(cur), execution_line(kills, now),
-                 ambiguous_line(kills), risk_line(kills), sip_line(kills), fills_line(kills, trades)):
+                 ambiguous_line(kills), risk_line(kills),
+                 status_line([("KILL", kills), ("témoin propre", clean_),
+                              ("autres témoins", in_group(cur, "temoin_autre"))], now),
+                 sip_line(kills), fills_line(kills, trades)):
         if line:
             lines.append(line)
     if kills and clean_:
@@ -1938,6 +2085,11 @@ async def command(args: list[str], now: datetime | None = None) -> str:
     """`!kill …` : interrupteur, analyse, scan, bilan. L'analyse et le scan exigent Killmode allumé ; le bilan,
     l'état et l'aide marchent aussi éteint."""
     now = now or datetime.now(timezone.utc)
+    t0 = time.monotonic()
+
+    def sent() -> float:  # le message part quand l'analyse ou le scan est fini
+        return now.timestamp() + time.monotonic() - t0
+
     sub = args[0].lower() if args else "aide"
     if sub in ("aide", "help"):
         return HELP
@@ -1960,10 +2112,11 @@ async def command(args: list[str], now: datetime | None = None) -> str:
         return "Killmode est éteint. `!kill on` pour l'allumer (toi seul peux le faire)."
     if sub == "scan":
         r = await scan(now)
+        done = sent()
         for a in r["setups"] + r["dropped"]:  # les écartées peuvent être des témoins catalyseur
-            record(a, now)
+            record(a, now, done)
         log_scan(r)
         return scan_text(r, lab_line(lab_item()) if r["setups"] else None)
     a = await analyze(args[0], now)
-    record(a, now)
+    record(a, now, sent())
     return text(a, lab_line(lab_item()) if a["verdict"] in ("kill", "pret") else None)

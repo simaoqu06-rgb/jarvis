@@ -89,10 +89,20 @@ def test_un_kill_pris_remonte_le_stop_des_tp1():
     """`!prends … kill` : la gestion du KILL, celle que mesure son journal (stop à l'entrée dès TP1)."""
     tr = trade(killmode=True)
     msgs = S.apply_bars(tr, bars([101.0, 102.5], spread=0.5, start=T0, step=60), NOW)
-    assert "TP1 touché" in msgs[0] and "Remonte les SL des brackets restants à l'entrée" in msgs[0]
+    assert "TP1 touché" in msgs[0]
+    assert "Vérifie que le stop ajustable des brackets restants est passé à l'entrée" in msgs[0]
     assert tr["stop_current"] == 100.0
     msgs = S.apply_bars(tr, bars([99.0], spread=0.5, start=T0 + 120, step=60), NOW)
     assert "stop suivi" in msgs[0] and tr["status"] == "closed"
+
+
+def test_un_kill_pris_vend_avant_une_cloture_courte():
+    """Séance courte (vendredi 27 novembre 2026, clôture à 13 h New York) : la vente du reste se fait vers 12 h 59."""
+    start = int(datetime(2026, 11, 27, 16, 0, tzinfo=timezone.utc).timestamp())  # 11 h New York
+    tr = trade(killmode=True, symbol="ACME", market="stock", created_at="2026-11-27T15:00:00+00:00")
+    msgs = S.apply_bars(tr, bars([101.0, 102.5], spread=0.5, start=start, step=60),
+                        datetime(2026, 11, 27, 16, 5, tzinfo=timezone.utc))
+    assert "Le reste se vend au marché vers 12 h 59 New York." in msgs[0]
 
 
 def test_stop_direct():
