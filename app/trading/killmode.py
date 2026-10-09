@@ -44,10 +44,10 @@ ordre, glissement d'au moins un demi-pas).
 Règle de lecture, écrite avant le premier appel et revue le 8 octobre avant tout KILL soldé (avis de GPT et
 Gemini, council) : au 30e KILL déclenché, un audit (borne haute de l'IC 95 % sous 0 → JARVIS recommande
 d'éteindre, sinon « pas d'alerte », jamais une validation) ; au 100e, la lecture finale (avantage démontré
-seulement si l'IC tient par jour, par semaine et avec au moins 3 c de glissement par côté) ; une borne de dégât (IC
-99,9 %) dès 10 KILL. Simão décide toujours. Le journal ne voit qu'une catastrophe ou un gros écart ; la valeur
-prédictive du filtre catalyseur à règle de prix égale (écart au témoin, pas l'effet causal d'une actu) se mesure
-au labo.
+seulement si l'IC tient par jour, par semaine et avec au moins 3 c de glissement par côté, 1 % du prix sous 1 $) ;
+une borne de dégât (IC 99,9 %) dès 10 KILL. Simão décide toujours. Le journal ne voit qu'une catastrophe ou un
+gros écart ; la valeur prédictive du filtre catalyseur à règle de prix égale (écart au témoin, pas l'effet causal
+d'une actu) se mesure au labo.
 """
 import asyncio
 import gzip
@@ -808,7 +808,8 @@ def holes(call: dict, bars: list[dict], act: int, res: dict, step: int = STEP) -
     l'activation à la sortie, ou à l'expiration de l'ordre) : suspension, ou aucune transaction. [début, fin] de
     chacun (sans bougie après, jusqu'à cette fin) ; rien ne s'y exécute dans le solde, comme chez IBKR (le
     déclenchement attend une transaction). Un diagnostic : le solde ne change pas."""
-    end = res["closed_at"] if res["triggered"] else min(call["until"], call["close_ts"])
+    end = (min(call["until"], call["close_ts"]) if not res["triggered"]
+           else call["close_ts"] if res["exit_reason"] == "cloture" else res["closed_at"])
     ts = [b["t"] for b in bars]
     out = [[a + step, b] for a, b in zip(ts, ts[1:]) if b - a >= PAUSE_MIN and max(a + step, act) < min(b, end)]
     if ts and end - (ts[-1] + step) >= PAUSE_MIN - step and max(ts[-1] + step, act) < end:
@@ -830,8 +831,9 @@ def early_children(res: dict) -> bool:
     def before_quote(ns: int) -> bool:
         return ns <= ft["q_ns"] if ft.get("q_ns") is not None else ns < (ft["ns"] // minute + 1) * minute
 
-    return any(e.get("ns") is not None and (ft["ns"], ft.get("seq", 0)) < (e["ns"], e.get("seq", 0))
-               and before_quote(e["ns"]) for e in res["exits"])
+    return any(e.get("ns") is not None and e.get("reason") not in ("cloture", "horizon")  # pas un ordre lié
+               and (ft["ns"], ft.get("seq", 0)) < (e["ns"], e.get("seq", 0)) and before_quote(e["ns"])
+               for e in res["exits"])
 
 
 def _exits(res: dict) -> list[dict]:
@@ -920,7 +922,8 @@ def orderings(run, score) -> tuple[dict, dict, list[dict], bool]:
 def priced(res: dict) -> dict:
     """Remplissage et sorties d'un chemin aux prix exécutables mesurés quand une transaction les déclenche : achat
     au pire ask (jamais sous la transaction), stop au pire bid (jamais au-dessus) ; un objectif posé alors que le
-    prix l'avait dépassé part au bid (jamais sous son prix). `mesure` : le bilan n'y ajoute pas de glissement."""
+    prix l'avait dépassé, ou que le bid atteignait, part au bid (jamais sous son prix). `mesure` : le bilan n'y
+    ajoute pas de glissement."""
     fill, ft = res["fill_price"], res.get("fill_tick") or {}
     out = {"remplissage": fill, "remplissage_mesure": False, "sorties": []}
     if fill is not None and ft.get("ask") is not None:
@@ -932,7 +935,7 @@ def priced(res: dict) -> dict:
         if bid is not None and e["reason"].startswith("stop"):
             x |= {"prix": min(e["price"], bid), "mesure": True}
         elif (bid is not None and e["reason"].startswith("tp") and ft.get("ns") is not None
-              and e.get("ns") == ft["ns"] and e["price"] == fill):
+              and (e.get("ns"), e.get("seq", 0)) == (ft["ns"], ft.get("seq", 0))):  # sur la transaction de l'achat
             x |= {"prix": max(targets[int(e["reason"][2:]) - 1], min(e["price"], bid)), "mesure": True}
         out["sorties"].append(x)
     return out
@@ -1276,8 +1279,9 @@ def two_ticks_r(call: dict, res: dict | None) -> float | None:
 
 
 def stress_20e(call: dict, res: dict | None) -> float | None:
-    """Le stress de Gemini à la taille de Simão (au moins 3 c par côté au marché, mêmes brackets et minimums IBKR
-    que r_20e, jamais plus doux que r_20e) : la condition « avec 3 c » de la lecture finale. Une hypothèse, pas une
+    """Le stress de Gemini à la taille de Simão (au moins 3 c par côté au marché, 1 % du prix sous 1 $, mêmes
+    brackets et minimums IBKR que r_20e, jamais plus doux que r_20e) : la condition « avec au moins 3 c » de la
+    lecture finale. Une hypothèse, pas une
     mesure."""
     return _at_size(call, res, stress=True)
 
@@ -1539,10 +1543,10 @@ def reading(book: list[dict], lab: dict | None) -> list[str]:
             if weeks and weeks[0] > 0 and stress and stress[0] > 0:
                 out.append(f"📈 **Lecture finale : espérance positive même en bas de l'intervalle** ({span}), qui "
                            f"tient semaine par semaine ({s100['semaines']} semaines) et avec au moins 3 c de "
-                           "glissement par côté : avantage démontré.")
+                           "glissement par côté (1 % du prix sous 1 $) : avantage démontré.")
             else:
                 why = [f"concentré sur {_n(s100['semaines'], 'semaine')}" if not (weeks and weeks[0] > 0) else None,
-                       "ne tient pas avec au moins 3 c de glissement par côté"
+                       "ne tient pas avec au moins 3 c de glissement par côté (1 % du prix sous 1 $)"
                        if not (stress and stress[0] > 0) else None]
                 out.append(f"Lecture finale positive ({span}) mais pas une validation : "
                            f"{' ; '.join(w for w in why if w)}.")
@@ -1655,13 +1659,13 @@ def status_line(groups: list[tuple[str, list[dict]]], now: datetime | None = Non
     parts = []
     for label, rows in groups:
         res = [c["resultat"] for c in rows if c.get("resultat")]
-        bits = [(sum(1 for c in rows if c.get("insoldable")), "insoldable"),
+        bits = [(sum(1 for c in rows if c.get("insoldable")), "insoldable{s}"),
                 (sum(1 for c in rows if not c.get("resultat") and not c.get("insoldable")), "en attente"),
-                (sum(1 for r in res if r.get("donnees_incompletes")), "soldé sur des données incomplètes"),
+                (sum(1 for r in res if r.get("donnees_incompletes")), "soldé{s} sur des données incomplètes"),
                 (sum(1 for r in res if r.get("a_lire")), "avec des minutes non lues"),
                 (sum(1 for r in res if r.get("trous")),
                  f"avec {(PAUSE_MIN - STEP) // 60} min ou plus sans transaction (suspension ou calme)")]
-        shown = [f"{n} {word}" for n, word in bits if n]
+        shown = [f"{n} {word.format(s='s' if n > 1 else '')}" for n, word in bits if n]
         if rows:
             parts.append(f"{label} : " + (", ".join(shown) if shown else "rien d'indéterminé"))
     if not any("rien d'indéterminé" not in p for p in parts):
@@ -1680,13 +1684,14 @@ def errors_line(rows: list[dict]) -> str | None:
 
 
 def stress_line(book: list[dict]) -> str | None:
-    """Les stress de Gemini en un chiffre chacun : au moins 3 c par côté (une hypothèse, pas une mesure) et
+    """Les stress de Gemini en un chiffre chacun : au moins 3 c par côté, 1 % du prix sous 1 $ (une hypothèse, pas
+    une mesure) et
     des objectifs exigés à 2 pas au-delà ; ils ne décident rien seuls."""
     st, two = stats(book, "kill", "r_3c"), stats(book, "kill", "r_2t")
     if not st["declenches"]:
         return None
-    return (f"-# Avec au moins 3 c de glissement par côté (le glissement du labo s'il est plus grand ; hypothèse de "
-            f"Gemini, non mesurée), mêmes brackets et minimums IBKR : "
+    return (f"-# Avec au moins 3 c de glissement par côté (1 % du prix sous 1 $, le glissement du labo s'il est plus "
+            f"grand ; hypothèse de Gemini, non mesurée), mêmes brackets et minimums IBKR : "
             f"{SS._r(st['esperance_r'])} R par trade sur {_n(st['declenches'], 'KILL')}"
             + (f" · objectifs exigés à 2 pas au-delà : {SS._r(two['esperance_r'])} R" if two["declenches"] else "")
             + ".")
@@ -1796,8 +1801,9 @@ def text(a: dict, lab: str | None = None) -> str:
         cost = stop_cost(plan["entry"], plan["stop"])
         lines.append(f"-# Un trade stoppé coûte ≈ {_fr(cost['reel'])} R de frais à {RISK_EUR:g} € de risque "
                      f"({_n(len(cost['brackets']), 'bracket')} IBKR {IBKR_PLAN}, minimum par ordre compris) ; labo "
-                     f"≈ {_fr(cost['labo'])} R ; avec au moins 3 c de glissement par côté (hypothèse de Gemini, "
-                     f"non mesurée) ≈ {_fr(cost['stress'])} R.")
+                     f"≈ {_fr(cost['labo'])} R ; avec au moins "
+                     f"{'3 c' if plan['entry'] >= 1 else '1 % du prix'} de glissement par côté (hypothèse de "
+                     f"Gemini, non mesurée) ≈ {_fr(cost['stress'])} R.")
         if plan.get("declenche_a") and a["price"] is not None and a["price"] >= plan["entry"]:
             lines.append(f"-# Entrée déjà touchée à {_paris(plan['declenche_a'], now)} : encore à moins de "
                          f"{str(CHASE_R).replace('.', ',')} R, l'ordre part au prix du moment.")

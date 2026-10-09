@@ -415,7 +415,9 @@ réalité, d'où le journal des appels en direct pour juger le mode complet.
     ne l'atteint, il reste posé et s'exécute quand le prix le dépasse ensuite d'un pas (avant : il partait sur
     cette transaction même, jamais sous son prix, et une transaction pile à l'objectif ne l'exécutait pas) ; si une
     seule des deux cotations l'atteint, ou si aucune cotation n'est lue, les ordres liés deviennent actifs sous
-    l'une ou l'autre : les deux chemins sont joués (minute « objectif_pose ») et le pire décide ;
+    l'une ou l'autre : les deux chemins sont joués (minute « objectif_pose ») et le pire décide. Exécuté sur cette
+    transaction, il est au prix mesuré (le bid, jamais sous son prix ni au-dessus de la transaction), et le stop
+    remonté à l'entrée attend une transaction suivante ;
   - après deux bougies qui commencent à 5 min ou plus l'une de l'autre (une pause LULD de 5 min laisse au moins
     4 minutes pleines sans transaction), si la minute de la reprise a une transaction de réouverture (condition
     5, ou O), c'était une suspension : les cotations d'avant la première transaction de cette minute sont celles
@@ -425,10 +427,11 @@ réalité, d'où le journal des appels en direct pour juger le mode complet.
     exécutable et le prix reste le pire des deux cotations ;
   - un trade ouvert à la clôture sans bougie dans ses deux dernières minutes est « données incomplètes »
     (avant : la dernière demi-heure ; une pause LULD des dix dernières minutes ne rouvre pas) ;
-  - « avec 3 c » devient « avec au moins 3 c » et n'est jamais plus doux que le chiffre qu'il éprouve : sur un
-    prix non mesuré au marché, le glissement du labo s'il dépasse 3 c (au-dessus de 100 $), 3 c en plus d'un prix
-    mesuré ; les objectifs gardent le glissement du chiffre sans stress (avant : au prix de l'ordre), ce qui change
-    r_3c de tout trade sorti sur un objectif. Le coût affiché dans le message d'un KILL suit la même règle ;
+  - « avec 3 c » devient « avec au moins 3 c » (1 % du prix sous 1 $, inchangé) et n'est jamais plus doux que
+    le chiffre qu'il éprouve : sur un prix non mesuré au marché, le glissement du labo s'il dépasse 3 c
+    (au-dessus de 100 $), 3 c en plus d'un prix mesuré ; les objectifs gardent le glissement du chiffre sans
+    stress (avant : au prix de l'ordre), ce qui change r_3c de tout trade sorti sur un objectif. Le coût affiché
+    dans le message d'un KILL suit la même règle ;
   - l'écart KILL − témoin propre a un IC en grappes par jour communes aux deux groupes (un jour de marché pèse
     sur les deux), correction et t au plus petit nombre de jours des deux groupes (avant : deux groupes
     indépendants) ; un groupe dont tous les ordres ont expiré (0 R partout) ne supprime plus l'IC ;

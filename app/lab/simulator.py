@@ -138,6 +138,7 @@ def simulate(plan: dict, bars: list[dict], *, market: str, decided_at: int, entr
     cotations ; l'ask pour une vente) ; sinon il reste posé et s'exécute quand le prix le dépasse ensuite d'un pas.
     Quand une seule des deux cotations l'atteint (`bid_hi`, la meilleure), ou sans cotation lue, les deux sont
     possibles : la minute est ambiguë (« objectif_pose »), posé par défaut, exécuté si sa minute est dans `flip`.
+    Le stop (à l'entrée après un objectif exécuté sur-le-champ) attend une transaction suivante.
     """
     if entry_order not in ENTRY_ORDERS or exit_mode not in EXIT_MODES or resolution not in RESOLUTIONS:
         raise ValueError(f"ordre {entry_order}, sortie {exit_mode} ou résolution {resolution} inconnus")
@@ -269,6 +270,7 @@ def simulate(plan: dict, bars: list[dict], *, market: str, decided_at: int, entr
     for i in range(fill_i, len(window)):
         b = window[i]
         last = b
+        on_fill = single and i == fill_i  # la transaction de l'achat : les ordres liés ne sont pas encore actifs
         be = not v1 and ("be", b["t"]) in flip  # objectifs, puis retour à l'entrée dans la bougie
         fav = not v1 and ((resolution == "favorable") != (b["t"] in flip) or be)  # ordre choisi dans cette bougie
         at_open = i > fill_i or mode == "ouverture"
@@ -305,7 +307,7 @@ def simulate(plan: dict, bars: list[dict], *, market: str, decided_at: int, entr
                     stop_label = "stop_be"
         crosses = targets_ok and hit < len(targets) and crossed(b, targets[hit])
         adverse_before = targets_first = False  # ordre choisi par « favorable » dans une bougie ambiguë
-        if adverse(b, stop_now):
+        if adverse(b, stop_now) and not on_fill:
             case = None
             if i == fill_i and stop_fill and (b["c"] - stop_now) * sign > 0:
                 case = "entree_et_stop"  # le plus bas a pu précéder l'exécution
@@ -344,12 +346,12 @@ def simulate(plan: dict, bars: list[dict], *, market: str, decided_at: int, entr
             leave(price, b, f"tp{hit}", part if hit < len(targets) else remaining)
             if exit_mode == "v1":
                 stop_now = entry  # break-even dès le TP1 (choix de Simão)
-                if not v1 and not fav and hit < len(targets) and adverse(b, stop_now):
+                if not v1 and not fav and hit < len(targets) and adverse(b, stop_now) and not on_fill:
                     break  # retour à l'entrée dans la même bougie : au pire, un seul objectif avant
         if targets and hit == len(targets):
             reason = f"tp{hit}"
             break
-        back = hit_now and exit_mode == "v1" and adverse(b, stop_now)
+        back = hit_now and exit_mode == "v1" and adverse(b, stop_now) and not on_fill
         if back and not targets_first:
             note(b, "objectif_puis_entree")
         certain = (b["c"] - stop_now) * sign <= 0  # clôture à l'entrée ou au-delà : le retour suit l'objectif

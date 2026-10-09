@@ -455,6 +455,9 @@ async def test_affichage_honnete(paths, monkeypatch):
     assert "note v1 6,5/10 GO, non prédictive au labo" in txt and "🧪 Labo, ligne" in txt
     assert "Un trade stoppé coûte ≈" in txt and "minimum par ordre compris" in txt
     assert "au moins 3 c de glissement par côté (hypothèse de Gemini, non mesurée)" in txt
+    plan = a["graphique"]["plan"] | {"entry": 0.85, "stop": 0.80, "risk": 0.05, "targets": [0.9, 0.95, 1.0]}
+    cheap = K.text(a | {"graphique": a["graphique"] | {"plan": plan}, "price": 0.84})
+    assert "au moins 1 % du prix de glissement par côté" in cheap and "3 c" not in cheap  # sous 1 $
     a["verdict"] = "non"
     assert "🧪 Labo, ligne" not in K.text(a, "🧪 Labo, ligne")
 
@@ -1193,6 +1196,7 @@ def test_trous_et_sorties_avant_la_cotation():
     # Sans cotation suivante lue : jusqu'à la fin de la minute de l'achat.
     assert K.early_children({"fill_tick": {"ns": 10, "q_ns": None}, "exits": [{"ns": 15}]})
     assert not K.early_children({"fill_tick": {"ns": 10, "q_ns": None}, "exits": [{"ns": 60 * 10**9}]})
+    assert not K.early_children({"fill_tick": fill, "exits": [{"ns": 15, "seq": 2, "reason": "cloture"}]})
     # Ordre jamais actif (envoyé dans la dernière minute avant 11 h) : aucun trou ne compte.
     late = _call(OPEN + 89 * 60) | {"envoye_a": OPEN + 90 * 60 - 10}
     res = K.settle(late, rows[:88] + rows[93:])
@@ -1202,6 +1206,9 @@ def test_trous_et_sorties_avant_la_cotation():
     assert K.settle(_call(at), quiet[:40])["trous"] == [[OPEN + 40 * 60, OPEN + 90 * 60]]
     assert K.settle(_call(at), quiet[:86])["trous"] == [[OPEN + 86 * 60, OPEN + 90 * 60]]
     assert K.settle(_call(at), quiet[:87])["trous"] == []
+    # Position gardée jusqu'à la clôture, plus aucune bougie après 15 h (suspendue jusqu'au bout).
+    res = K.settle(_call(at), rows[:330])
+    assert res["sortie"] == "cloture" and res["trous"] == [[OPEN + 330 * 60, _call(at)["close_ts"]]]
 
 
 def test_indetermines_par_groupe(paths):
@@ -1218,6 +1225,10 @@ def test_indetermines_par_groupe(paths):
                     "des minutes non lues, 1 avec 4 min ou plus sans transaction (suspension ou calme) · témoin "
                     "propre : rien d'indéterminé.")
     assert K.status_line([("KILL", book([1.0])), ("témoin propre", w)], NOW) is None
+    two = book([1.0, -1.0])
+    for c in two:
+        c["insoldable"] = True
+    assert "KILL : 2 insoldables" in K.status_line([("KILL", two)], NOW)
 
 
 def test_stress_jamais_plus_doux_que_le_chiffre():
@@ -1253,3 +1264,35 @@ def test_ecart_apparie_par_jour(gross):
         c["symbol"] = "W" + c["symbol"]
     g = K.call_gap(book([1.0, -1.0]) + w)
     assert g["ci"] == pytest.approx([-10.6979, 10.6979], abs=1e-4)  # avec G = 6 : ±8,29
+
+
+def _fill_at(first, q0, tail_low=106.9):
+    """Plan serré (entrée 106,51, stop 106,11, objectifs 106,91 / 107,31 / 107,71) : l'achat part sur une
+    transaction à `first`, cotation en vigueur `q0` puis 106,92 / 106,94 (bid au TP1), puis le prix monte."""
+    at, m = OPEN + 30 * 60, OPEN + 31 * 60
+    call = _call(at, price=106.3) | {"entry": 106.51, "stop": 106.11, "targets": [106.91, 107.31, 107.71]}
+    data = _ticks(m, [(10, first, "@", "C", ""), (500, 106.96, "@", "C", "")], quotes=[(20, 106.92, 106.94)],
+                  q0=q0)
+    rows = ([(106.3, 106.4, 106.2, 106.3)] * 31 + [(first, 106.96, first, 106.96), (106.96, 107.9, tail_low, 107.8)]
+            + [(107.8,) * 4] * 300)
+    res = K.settle(call, minutes(rows), ticks={str(m): data}, eurusd=1.15, plan_ibkr="fixe")
+    return res, call | {"groupe": "kill", "resultat": res | {"eurusd": 1.15, "plan_ibkr": "fixe"}}
+
+
+def test_stop_jamais_sur_la_transaction_de_l_achat():
+    """Contre-vérification : transaction de l'achat pile à l'entrée, TP1 exécuté sur-le-champ (bids au TP1). Le stop
+    remonté à l'entrée n'est actif qu'après : il attend une transaction suivante, il ne sort pas sur celle-là."""
+    res, c = _fill_at(106.51, (106.91, 106.95))
+    assert [e["raison"] for e in res["sorties"]] == ["tp1", "tp2", "tp3"] and not res["ambigus"]
+    assert K.value(c) == K.value(c, "r_fav") > 0
+
+
+def test_objectif_sur_la_transaction_de_l_achat_au_bid():
+    """Un objectif exécuté sur la transaction de l'achat est un prix mesuré (le bid, jamais sous son prix ni
+    au-dessus de la transaction), que la transaction soit à son prix ou en dessous (atteint seulement par le bid) :
+    avant, en dessous, le bilan y ajoutait le glissement du labo."""
+    at_tp, c_tp = _fill_at(106.91, (106.92, 106.95))
+    below, c_below = _fill_at(106.90, (106.92, 106.95))
+    for res in (at_tp, below):
+        assert res["sorties"][0] == {"prix": 106.91, "part": pytest.approx(1 / 3), "raison": "tp1", "mesure": True}
+    assert K.value(c_tp) == K.value(c_below)
