@@ -17,8 +17,10 @@ Mesures (sur les trades déclenchés, en R nets de coûts) :
 
 Intervalle de confiance : les trades d'un même jour ne sont pas indépendants (même marché, mêmes
 nouvelles) ; l'erreur type est donc « en grappes par jour » (sommes journalières), plus large et plus
-honnête que l'erreur type naïve. Garde-fou : une tranche de moins de MIN_TRADES trades déclenchés est
-marquée « echantillon_faible » et n'est jamais signalée comme dégradée.
+honnête que l'erreur type naïve. Garde-fous : une tranche de moins de MIN_TRADES trades déclenchés est
+marquée « echantillon_faible » et n'est jamais signalée comme dégradée ; une tranche de moins de
+DEGRADE_MIN_DAYS jours ne l'est pas non plus (avec 3 jours, l'erreur type en grappes repose sur 3 sommes
+journalières : le direct crypto à 3 jours sortait z −9,3 alors que l'écart vaut z ≈ −2 à l'échelle des jours).
 
 Découpages, par marché : setup, note, heure du plan (heure de New York pour les actions, UTC pour la
 crypto), jour de la semaine, version de méthode, origine (rejeu / direct), régime de marché (table
@@ -36,6 +38,7 @@ from app.lab import seal as SEAL
 MIN_TRADES = 30
 Z95 = 1.959964
 DEGRADE_Z = 3.2          # écart au reste du marché en erreurs types (≈ Bonferroni à 5 % sur ~80 tranches)
+DEGRADE_MIN_DAYS = 20    # jours distincts (grappes) avant de juger une tranche : en dessous, l'erreur type ne tient pas
 RECENT_DAYS = 20
 MOVE_PCT = 8.0           # potentiel +10 : plus haut de séance ≥ ouverture + 8 %
 DIMENSIONS = ("setup", "note", "heure", "jour_semaine", "version", "origine", "regime", "periode")
@@ -398,7 +401,7 @@ def summarize(rows, recent: dict[str, str] | None = None, min_n: int = MIN_TRADE
             if len(values) < 2:
                 continue
             for value, acc in values.items():
-                if acc.trig < min_n:
+                if acc.trig < min_n or len(acc.days) < DEGRADE_MIN_DAYS:
                     continue
                 c = contrast(acc, macc)
                 if not c or c["reste_n"] < min_n or c["z"] is None or c["z"] > -DEGRADE_Z:
