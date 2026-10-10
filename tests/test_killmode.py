@@ -867,6 +867,24 @@ def test_rouvre_un_go_confirme_reste_avec_jarvis():
     assert t["status"] == "open" and t["policy"] == "go_confirme" and not T.against_jarvis(t)
 
 
+def test_rouvre_garde_la_note_et_la_taille_de_l_entree():
+    """!rouvre : la note recalculée au niveau du stop ne fait pas passer un trade GO « contre JARVIS », et la quantité
+    tenue (donc les frais) reste celle de l'entrée."""
+    book = T.Book(None)
+    size = {"risk_amount_eur": 20.0, "eurusd": 1.15, "quantity": 46, "risk_amount": 23.0}
+    plan = {"symbol": "ACME", "market": "stock", "side": "long", "entry": 10.0, "stop": 9.5, "targets": [],
+            "created_at": NOW.isoformat(), "score": {"go": True}, "sizing": size, "grade": {"grade": "D"}}
+    old = book.add(plan)
+    book.close(old["id"], 9.5)
+    old["events"][-1]["kind"] = "stop"
+    new_plan = plan | {"stop": 9.2, "score": {"go": False}, "sizing": None, "grade": {"grade": "F"},
+                       "sizing_regle": {"quantity": 76}}
+    T.reopen(book, "ACME", new_plan)
+    t = book.trades[0]
+    assert t["status"] == "open" and not T.against_jarvis(t) and t["score"] == {"go": True}
+    assert t["sizing"] == size and "sizing_regle" not in t and t["grade"] == {"grade": "D"}
+
+
 def test_pire_et_meilleur_ordre(paths, monkeypatch):
     """Une minute où le stop et TP1 sont touchés : le pire ordre (stop) décide, le meilleur est affiché."""
     at = OPEN + 30 * 60

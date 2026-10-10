@@ -2030,12 +2030,14 @@ def fills_line(rows: list[dict], trades: list[dict]) -> str | None:
     if not pairs:
         return None
     slip = [(t["entry"] - c["entry"]) / (c["entry"] - c["stop"]) for c, t in pairs]
-    done = [(T.realized_r(t), value(c)) for c, t in pairs if T.realized_r(t) is not None and value(c) is not None]
+    # Frais estimés des deux côtés (realized_r_net, comme le journal) : sinon le réel paraissait meilleur de ses frais.
+    done = [(T.realized_r_net(t), value(c)) for c, t in pairs
+            if T.realized_r_net(t) is not None and value(c) is not None]
     out = (f"-# Tes exécutions : {_n(len(pairs), 'KILL pris')}, entrée {SS._r(sum(slip) / len(slip))} R en moyenne "
            "par rapport à l'ordre")
     if done:
-        out += (f" · {_n(len(done), 'terminé')} : {SS._r(sum(r for r, _ in done) / len(done))} R réalisés (sans "
-                f"frais) contre {SS._r(sum(j for _, j in done) / len(done))} R au journal")
+        out += (f" · {_n(len(done), 'terminé')} : {SS._r(sum(r for r, _ in done) / len(done))} R réalisés (frais "
+                f"estimés compris) contre {SS._r(sum(j for _, j in done) / len(done))} R au journal")
     return out + "."
 
 

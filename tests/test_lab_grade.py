@@ -471,6 +471,9 @@ def test_plan_grade_f_taille_a_la_regle_hors_avis(monkeypatch):
     assert rule["hors_grade"] and rule["quantity"] == 46 and isinstance(rule["quantity"], int)
     assert T.sizing_lines(p) == ["💰 JARVIS ne propose pas de taille (grade F- : 0 %). Ta règle de 20 € : 46 actions "
                                  "pour 460 $ (exception, hors avis de JARVIS)"]
+    stopped = p | {"grade": {"grade": "A", "risque_grade": 3.0, "risque_propose": 0.0,
+                             "raison": "arrêt de la journée à −3 R atteint"}}
+    assert T.sizing_lines(stopped)[0].startswith("💰 JARVIS ne propose pas de taille (0 % : arrêt de la journée")
     text = T.plan_text(p | {"symbol": "AAA", "side": "long", "stop_pct": -5.0, "stop_source": "creux",
                             "targets": [], "checklist": {"verdict": "Feu vert", "score": 3, "max_score": 5,
                                                          "items": []}, "method": "m"})

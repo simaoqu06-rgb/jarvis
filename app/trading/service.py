@@ -543,7 +543,14 @@ def sizing_lines(p: dict) -> list[str]:
         return [f"💰 Risque {s['risk_pct']:g} % = {s['risk_amount']:g} · taille {s['quantity']:g} "
                 f"({_num(s['notional'])}) · levier {s['leverage']:g}×"]
     if rule:
-        return [f"💰 JARVIS ne propose pas de taille (grade {(p.get('grade') or {}).get('grade', 'non noté')} : 0 %). "
+        g = p.get("grade") or {}
+        # La lettre seule quand c'est elle qui dit 0 % ; sinon la vraie raison (arrêt du jour, budget, grade périmé,
+        # illisible, fenêtre discontinue), qu'un « grade A : 0 % » cacherait.
+        by_letter = (not (g.get("risque_grade") or 0) > 0 and not g.get("perime")
+                     and not str(g.get("raison", "")).startswith(("grade illisible", "fenêtre discontinue")))
+        why = (f"grade {g.get('grade', 'non noté')} : 0 %" if by_letter or not g.get("raison")
+               else f"0 % : {g['raison']}")
+        return [f"💰 JARVIS ne propose pas de taille ({why}). "
                 f"Ta règle de {_amount(rule['risk_amount_eur'])} € : {_quantity(p, rule)} (exception, hors avis de "
                 "JARVIS)"]
     return []
@@ -643,6 +650,13 @@ def reopen(book: Book, symbol: str, plan: dict) -> dict | None:
         return None
     # Même position : un KILL pris garde sa gestion et sa taille (`!prends … kill`), un GO confirmé son camp (!desaccords).
     plan |= {k: old[k] for k in ("killmode", "policy") if old.get(k)}
+    # La note, le grade et la taille de l'entrée font foi (même trade, même quantité tenue) : la note recalculée au
+    # niveau du stop ne fait pas passer un trade « contre JARVIS », et la taille garde les frais du trade réel.
+    for k in ("score", "grade", "sizing", "sizing_regle"):
+        if k in old:
+            plan[k] = old[k]
+        else:
+            plan.pop(k, None)
     if plan.get("killmode"):
         from app.trading import killmode as K  # import tardif : killmode importe ce module
 
@@ -754,8 +768,9 @@ def apply_bars(trade: dict, bars: list[dict], now: datetime) -> list[str]:
                                           else "")
                 why = f"à cette heure, {share * 100:.0f} % {who} l'avaient atteint"
                 if still is not None:
-                    why += (f" ; parmi ceux encore en vie (ni objectif ni stop), {still * 100:.0f} % l'ont touché "
-                            "ensuite")
+                    # still_after_p75 porte sur tous les départs, même quand `share` ne compte que ceux du TP précédent
+                    why += (f" ; parmi tous les cas passés encore en vie à cette heure (ni objectif ni stop), "
+                            f"{still * 100:.0f} % l'ont touché ensuite")
             messages.append(f"⏳ **{trade['symbol']}** : {nxt['name']} ({_num(nxt['price'])}) pas encore touché ; "
                             f"{why}. Dernier prix {_num(trade['last_price'])}.")
     return messages

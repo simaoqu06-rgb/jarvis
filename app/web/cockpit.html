@@ -477,7 +477,7 @@ function lateText(t, i) {
   if (share == null) return `3 sur 4 des cas passés qui l'ont touché l'avaient fait à ${when(x.eta_latest)}`;
   const who = given != null ? `des cas passés qui avaient touché ${esc(t.targets[i - 1].name)}` : "des cas passés";
   return `à ${when(x.eta_latest)}, ${p0(share)} ${who} l'avaient atteint`
-    + (x.still_after_p75 != null ? ` ; parmi ceux encore en vie, ${p0(x.still_after_p75)} l'ont touché ensuite` : "");
+    + (x.still_after_p75 != null ? ` ; parmi tous les cas encore en vie à cette heure, ${p0(x.still_after_p75)} l'ont touché ensuite` : "");
 }
 
 function tick() {
