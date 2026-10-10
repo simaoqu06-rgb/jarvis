@@ -154,7 +154,7 @@ def test_grade_sur_les_r_a_20_euros(db):
 
 def test_signature_du_calcul(db):
     synthetic_trades(db, n_days=2, per_day=2)
-    assert GR.signature(db)[-1] == GR.GRADE_CALC == 2  # version du calcul : changer de calcul force un recalcul
+    assert GR.signature(db)[3] == GR.GRADE_CALC == 2  # version du calcul : changer de calcul force un recalcul
 
 
 def test_fenetre_reelle_et_trou(db):

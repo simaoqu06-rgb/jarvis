@@ -27,11 +27,11 @@ async def test_rejeu_reprend_apres_une_coupure_sans_doublon(db, monkeypatch):
     real = G.stock_day
     calls = []
 
-    def flaky(db_, day, s, universe, errors=None, strat_out=None):
+    def flaky(db_, day, s, universe, errors=None, strat_out=None, absent=None):
         calls.append(day)
         if len(calls) == 2:
             raise RuntimeError("coupure")
-        return real(db_, day, s, universe, errors, strat_out)
+        return real(db_, day, s, universe, errors, strat_out, absent)
 
     monkeypatch.setattr(G, "stock_day", flaky)
     assert await R.replay(START, END, "stock", db, collect=False, now=NOW) == 1  # arrêt au jour en échec
@@ -136,7 +136,8 @@ def test_etat_base_absente_puis_remplie(tmp_path, monkeypatch):
     r = client.get("/api/lab/status").json()
     assert r["exists"] and r["trades"] == {"stock": {"replay": 9}}
     assert r["replay"]["stock"] == {"start": START.isoformat(), "end": END.isoformat(), "last_day": END.isoformat(),
-                                    "days_done": 3, "days_total": 3, "pct": 100.0}
+                                    "days_done": 3, "days_total": 3, "pct": 100.0, "jours_sautes": 0,
+                                    "jours_partiels": 0, "absents": 0}
     assert r["method_version"] == "v1" and r["db_size_mb"] > 0 and "100 %" in r["text"]
 
 
@@ -197,7 +198,8 @@ async def test_symbole_en_erreur_compte_sans_bloquer_le_jour(db, monkeypatch):
     monkeypatch.setattr(G, "stock_trade", broken)
     assert await R.replay(START, START, "stock", db, collect=False, now=NOW) == 1
     assert db.count_trades() == 2
-    assert db.get("replay:stock", f"day:{START}") == {"trades": 2, "errors": 1, "error_symbols": ["BBB"]}
+    assert db.get("replay:stock", f"day:{START}") == {"trades": 2, "errors": 1, "error_symbols": ["BBB"],
+                                                      "absent": 0, "absent_motifs": {}, "absent_symbols": []}
 
 
 async def test_jour_en_echec_saute_apres_trois_essais(db, monkeypatch):

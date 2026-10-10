@@ -165,7 +165,7 @@ async def test_rejeu_lit_spy_de_la_seance_et_la_collecte(tmp_path, monkeypatch):
 
     calls = []
 
-    async def record(db_, market, symbols, a, b, now=None, transport=None):
+    async def record(db_, market, symbols, a, b, now=None, transport=None, failed_out=None):
         calls.append((list(symbols), a, b))
         return 0
 

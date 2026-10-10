@@ -601,6 +601,26 @@ def diagnostic_v1(conn: sqlite3.Connection) -> dict:
     return out
 
 
+def partial(conn: sqlite3.Connection) -> dict:
+    """I2 : marchés en rattrapage d'une nouvelle déclaration, jours restants et lignes d'une autre déclaration (ou
+    d'avant le suivi, NULL) : tant que le rattrapage n'a pas refait tous les jours, elles sortent du tableau."""
+    from app.lab import rattrapage as RAT  # import tardif : tire runner et generator
+
+    out = {}
+    for market in ("stock", "crypto"):
+        left = sum(RAT.remaining(conn, market).values())
+        if not left:
+            continue
+        decl = ST.CRYPTO_DECLARATION if market == "crypto" else ST.DECLARATION
+        try:
+            old = conn.execute("SELECT COUNT(*) FROM strat_trades WHERE market = ? AND declaration IS NOT ?",
+                               (market, decl)).fetchone()[0]
+        except sqlite3.OperationalError:  # base pas encore migrée (lecture seule) : rien ne dit la déclaration
+            continue
+        out[market] = {"declaration": decl, "jours_rattrapage": left, "lignes_exclues": old}
+    return out
+
+
 def report(conn: sqlite3.Connection) -> dict:
     # import tardif : kill_complet et plus10 importent ce module
     from app.lab import kill_complet as KC
@@ -614,6 +634,14 @@ def report(conn: sqlite3.Connection) -> dict:
            "scelle": SEAL.describe(), "strategies": {}, "sorties_gemini": None, "killmode": None,
            "confirmation_go": None, "killmode_complet": None, "potentiel_plus10": None, "diagnostic_v1": {}}
     try:  # base pas encore migrée par le worker (lecture seule) : tableau vide plutôt qu'une erreur
+        # I2 : pendant un rattrapage, le tableau ne lit que les lignes de la déclaration en vigueur ; une vue
+        # temporaire du même nom masque strat_trades pour cette connexion (lecture seule comprise), le temps du rapport.
+        out["partiel"] = partial(conn) or None
+        if out["partiel"]:
+            keep = " OR ".join(f"(market = '{m}' AND declaration IS NOT {int(p['declaration'])})"
+                               for m, p in out["partiel"].items())
+            conn.execute("DROP VIEW IF EXISTS temp.strat_trades")
+            conn.execute(f"CREATE TEMP VIEW strat_trades AS SELECT * FROM main.strat_trades WHERE NOT ({keep})")
         out["strategies"] = _strategies(conn)
         out["sorties_gemini"] = out["strategies"].pop("_n6", None)
         out["killmode"] = out["strategies"].pop("_kill", None)
@@ -623,6 +651,8 @@ def report(conn: sqlite3.Connection) -> dict:
         out["diagnostic_v1"] = diagnostic_v1(conn)
     except sqlite3.Error as exc:
         out["erreur"] = f"base pas encore prête : {exc}"
+    finally:
+        conn.execute("DROP VIEW IF EXISTS temp.strat_trades")
     return out
 
 
@@ -641,7 +671,11 @@ def signature(conn: sqlite3.Connection) -> list:  # worker seulement (base migr�
     cost = KC.cost_fingerprint()
     sig += [cost, conn.execute("SELECT COUNT(*) FROM kill_complet WHERE cout = ?", (cost,)).fetchone()[0]]
     sig.append(conn.execute("SELECT COUNT(*) FROM progress WHERE job = 'plus10:n9'").fetchone()[0])  # n° 9
-    return sig + [conn.execute("SELECT COUNT(*) FROM earnings_days WHERE status = 'ok'").fetchone()[0]]
+    sig.append(conn.execute("SELECT COUNT(*) FROM earnings_days WHERE status = 'ok'").fetchone()[0])
+    # I3 : lignes réécrites sur place (strat_trades ; trades pour le diagnostic v1) et code des stats
+    from app.lab import empreinte as E
+
+    return sig + E.sig(conn, "trades", "strat")
 
 
 def cached(conn: sqlite3.Connection) -> dict | None:
@@ -722,6 +756,10 @@ def text(rep: dict | None) -> str:
              f"IBKR estimée · ✅ = IC au-dessus de 0, témoin battu à t ≥ seuil (loi de Student sur les jours, "
              f"{str(decl.get('z_candidate', 2)).replace('.', ',')} sur beaucoup de jours, plus haut sur peu) et "
              f"robuste (glissement ×2 et ×3, retard, stress de 3 c en actions, deux moitiés des jours)"]
+    for market, p in (rep.get("partiel") or {}).items():  # I2
+        lines.append(f"⏳ Tableau partiel ({MARKET_FR.get(market, market).lower()}) : {p['jours_rattrapage']} jours en "
+                     f"rattrapage, {p['lignes_exclues']} lignes de l'ancienne déclaration exclues (n° {p['declaration']} "
+                     "seule en attendant)")
     for market, items in (rep.get("strategies") or {}).items():
         lines.append(f"**{MARKET_FR.get(market, market)}**")
         for name, it in items.items():

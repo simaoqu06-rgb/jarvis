@@ -586,9 +586,10 @@ class Grader:
 
 def signature(db: LabDB) -> list:
     from app.lab import method as M
+    from app.lab import empreinte as E  # I3 : trades réécrits sur place, code des stats
 
     row = db.conn.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM trades").fetchone()
-    return [row[0], row[1], M.champion(db.conn)["version"], GRADE_CALC]
+    return [row[0], row[1], M.champion(db.conn)["version"], GRADE_CALC, *E.sig(db.conn, "trades")]
 
 
 def step(db: LabDB, now: datetime | None = None) -> dict:

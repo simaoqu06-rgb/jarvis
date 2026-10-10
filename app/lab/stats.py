@@ -26,6 +26,13 @@ journalières : le direct crypto à 3 jours sortait z −9,3 alors que l'écart 
 Découpages, par marché : setup, note, heure du plan (heure de New York pour les actions, UTC pour la
 crypto), jour de la semaine, version de méthode, origine (rejeu / direct), régime de marché (table
 regimes, sans regard vers l'avenir) et période (20 derniers jours du marché contre le reste).
+
+Période « récente » honnête (avis du 10 octobre, I5) : les 20 derniers jours PRÉSENTS dans la base enjambaient le
+trou entre la fin du rejeu et le début du direct (des mois) ; elle est coupée au dernier écart de plus de GAP_DAYS
+jours calendaires (le direct seul dès qu'il y a un trou), et chaque marché publie à côté de debut_recent le plus
+grand écart de ses 20 derniers jours (trou_max_jours) et les jours en direct de la période (jours_direct).
+Traçabilité (I2, I4) : trades par révision du code, alerte quand une même version en compte plusieurs
+(revisions_code), et part des trades dont la séance est couverte à moins de 50 % (couverture_donnees).
 """
 import json
 import math
@@ -42,6 +49,8 @@ DEGRADE_Z = 3.2          # écart au reste du marché en erreurs types (≈ Bonf
 DEGRADE_P = 1 - 0.05 / 80  # seuil appliqué : le même en t de Student à G − 1 degrés de liberté (≈ 3,8 à 20 jours)
 DEGRADE_MIN_DAYS = 20    # jours distincts (grappes) avant de juger une tranche : en dessous, l'erreur type ne tient pas
 RECENT_DAYS = 20
+GAP_DAYS = 10            # I5 : écart calendaire qui coupe la période récente (4 jours au plus entre deux séances)
+LOW_COVERAGE = 0.5       # I4 : séance couverte à moins de 50 % de ce que le symbole remplit d'habitude
 MOVE_PCT = 8.0           # potentiel +10 : plus haut de séance ≥ ouverture + 8 %
 DIMENSIONS = ("setup", "note", "heure", "jour_semaine", "version", "origine", "regime", "periode")
 DEGRADE_DIMENSIONS = ("setup", "note", "heure", "jour_semaine", "regime", "origine", "periode")
@@ -324,15 +333,43 @@ def where(filters: dict, alias: str = "t") -> tuple[str, list]:
     return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
 
 
-def _recent_cutoffs(conn: sqlite3.Connection, filters: dict) -> dict[str, str]:
+def span(days: list[tuple[str, int]]) -> dict | None:
+    """I5 : étendue réelle d'une fenêtre de jours (jour, 1 s'il a du direct) : du, au, jours, jours en direct et plus
+    grand écart calendaire entre deux jours voisins (le trou entre la fin du rejeu et le direct)."""
+    if not days:
+        return None
+    dates = sorted(date.fromisoformat(d) for d, _ in days)
+    return {"du": dates[0].isoformat(), "au": dates[-1].isoformat(), "jours": len(dates),
+            "jours_direct": sum(1 for _, live in days if live),
+            "trou_max_jours": max(((b - a).days for a, b in zip(dates, dates[1:])), default=0)}
+
+
+def recent_window(days: list[tuple[str, int]]) -> dict:
+    """Période récente d'un marché depuis ses RECENT_DAYS derniers jours (jour, 1 s'il a du direct), du plus récent
+    au plus ancien (fonction pure) : coupée au dernier écart de plus de GAP_DAYS jours calendaires ; « » (tout est
+    récent) sans trou ni RECENT_DAYS jours. Renvoie debut, trou_max_jours (plus grand écart entre ces jours) et
+    jours_direct (jours en direct de la période)."""
+    dates = [date.fromisoformat(d) for d, _ in days]
+    gaps = [(a - b).days for a, b in zip(dates, dates[1:])]
+    cut = next((i + 1 for i, g in enumerate(gaps) if g > GAP_DAYS), None)
+    kept = days[:cut] if cut is not None else days
+    start = kept[-1][0] if cut is not None or len(days) >= RECENT_DAYS else ""
+    return {"debut": start, "trou_max_jours": max(gaps, default=0),
+            "jours_direct": sum(1 for _, live in kept if live)}
+
+
+def _recent_cutoffs(conn: sqlite3.Connection, filters: dict, spans: dict | None = None) -> dict[str, str]:
     out = {}
     for market in ("stock", "crypto"):
         if filters.get("market") and filters["market"] != market:
             continue
         sql, params = where({**filters, "market": market})
-        row = conn.execute(f"SELECT DISTINCT day FROM trades t{sql} ORDER BY day DESC LIMIT 1 OFFSET ?",
-                           (*params, RECENT_DAYS - 1)).fetchone()
-        out[market] = row[0] if row else ""
+        days = conn.execute(f"SELECT day, MAX(origin = 'live') FROM trades t{sql} GROUP BY day ORDER BY day DESC "
+                            "LIMIT ?", (*params, RECENT_DAYS)).fetchall()
+        win = recent_window(days)
+        out[market] = win["debut"]
+        if spans is not None and days:
+            spans[market] = {"trou_max_jours": win["trou_max_jours"], "jours_direct": win["jours_direct"]}
     return out
 
 
@@ -421,12 +458,51 @@ def summarize(rows, recent: dict[str, str] | None = None, min_n: int = MIN_TRADE
 def compute(conn: sqlite3.Connection, min_n: int = MIN_TRADES, **filters) -> dict:
     """Statistiques complètes (filtres : market, origin, version, since, until)."""
     sql, params = where(filters)
-    recent = _recent_cutoffs(conn, filters)
+    spans: dict = {}
+    recent = _recent_cutoffs(conn, filters, spans)
     cur = conn.execute(QUERY + sql + " ORDER BY t.planned_at, t.id", params)
     out = summarize(cur, recent, min_n)
+    for market, span in spans.items():  # I5 : à côté de debut_recent
+        if market in out["marches"]:
+            out["marches"][market].update(span)
+    out["revisions_code"] = code_revisions(conn, **filters)
+    out["couverture_donnees"] = coverage(conn, **filters)
     out["capture_potentiel"] = capture(conn, **filters)
     out["filtres"] = {k: v for k, v in filters.items() if v}
     out["seuil_echantillon"] = min_n
+    return out
+
+
+def code_revisions(conn: sqlite3.Connection, **filters) -> dict | None:
+    """I2 : trades par révision du code qui les a calculés (empreinte.code_rev), par version ; NULL = calculés
+    avant le suivi (« inconnue »). Plus d'une révision sous une même version : alerte, ses lignes ne viennent
+    peut-être pas d'un même comportement. None sur une base pas encore migrée."""
+    sql, params = where(filters)
+    try:
+        rows = conn.execute(f"SELECT t.method_version, COALESCE(t.code_rev, 'inconnue'), COUNT(*) FROM trades t{sql} "
+                            "GROUP BY 1, 2 ORDER BY 1, MIN(t.id)", params).fetchall()
+    except sqlite3.Error:
+        return None
+    par: dict = {}
+    for version, rev, n in rows:
+        par.setdefault(version, {})[rev] = n
+    alerts = [f"plusieurs comportements sous la même version : {version} compte {len(revs)} révisions du code ("
+              + ", ".join(f"{rev} : {n} trades" for rev, n in revs.items()) + ")"
+              for version, revs in par.items() if len(revs) > 1]
+    return {"par_version": par, "alertes": alerts}
+
+
+def coverage(conn: sqlite3.Connection, **filters) -> dict:
+    """I4 : par marché, trades dont la séance simulée (actions) ou les 24 h (crypto) sont couvertes à moins de
+    LOW_COVERAGE de ce que le symbole remplit d'habitude (context.couverture, écrit depuis le 10 octobre 2026)."""
+    sql, params = where(filters)
+    out = {}
+    for market, known, low in conn.execute(
+            f"SELECT t.market, COUNT(json_extract(t.context, '$.couverture')), "
+            f"SUM(json_extract(t.context, '$.couverture') < ?) FROM trades t{sql} GROUP BY t.market",
+            (LOW_COVERAGE, *params)):
+        out[market] = {"mesures": known, "sous_50_pct": low or 0,
+                       "part": round((low or 0) / known, 4) if known else None}
     return out
 
 

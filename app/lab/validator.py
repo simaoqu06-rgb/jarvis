@@ -92,8 +92,9 @@ FLAT = {"market": "t.market", "symbol": "t.symbol", "composite": "t.composite", 
         "regime": "r.label", "regime_trend": "r.trend", "regime_vol_tercile": "r.vol_tercile"}
 OUTCOMES = {"triggered", "filled_at", "exit_reason", "r_net", "r_gross", "tp1_hit", "tp2_hit", "tp3_hit",
             "minutes_to_tp1", "minutes_to_tp2", "minutes_to_tp3", "mfe_r", "mae_r", "day_range_pct", "result"}
-# Champs du contexte connus seulement après la décision (au moment de l'exécution ou plus tard).
-LATE_CONTEXT = {"context.gap_open_pct"}
+# Champs du contexte connus seulement après la décision (au moment de l'exécution ou plus tard) ; couverture des
+# bougies de la séance simulée (avis du 10 octobre, I4) : une mesure de la donnée, pas un signal.
+LATE_CONTEXT = {"context.gap_open_pct", "context.barres_seance", "context.ouverture_presente", "context.couverture"}
 # Règle du propriétaire : jamais de filtre de liquidité ni de capitalisation. Le volume en dollars,
 # le rang et le motif d'entrée dans l'univers (classés au volume en dollars) en sont.
 SIZE_FIELDS = {"context.dollar_volume", "context.universe_rank", "context.universe_reason"}

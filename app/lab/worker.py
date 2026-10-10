@@ -51,6 +51,7 @@ from app.lab import catalysts as CAT
 from app.lab import collector as CO
 from app.lab import cout as COUT
 from app.lab import derivs as DER
+from app.lab import empreinte as E
 from app.lab import generator as G
 from app.lab import grade as GRADE
 from app.lab import heartbeat
@@ -197,9 +198,10 @@ def warn_missing_keys(now_mono: float | None = None) -> bool:
 
 
 def crypto_windows_due(day: date, now: datetime, done_until: int | None) -> bool:
-    """Un nouveau créneau crypto du jour a-t-il atteint son horizon depuis le dernier passage ?"""
+    """Un nouveau créneau crypto du jour a-t-il atteint son horizon depuis le dernier passage ? Un jour complet
+    encore à journaliser (son calcul complet a échoué) l'est toujours : nouvel essai, puis sauté au 3e (I4)."""
     due = [m for m in G.crypto_moments(day) if m + 86400 <= now.timestamp()]
-    return bool(due) and (done_until is None or due[-1] > done_until)
+    return bool(due) and (done_until is None or due[-1] > done_until or R.day_ready("crypto", day, now))
 
 
 def _history_start(market: str, day: date, stock_sessions: int, crypto_days: int) -> int:
@@ -329,17 +331,19 @@ async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, tra
 
 
 def trades_signature(db: LabDB) -> list:
+    """COUNT et MAX(id) des trades, compteur rev:trades (un trade réécrit sur place) et empreinte du code des stats."""
     row = db.conn.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM trades").fetchone()
-    return [row[0], row[1]]
+    return [row[0], row[1], *E.sig(db.conn, "trades")]
 
 
 def refresh_stats(db: LabDB, now: datetime, max_age: float, force: bool = False) -> dict | None:
     """Recalcule les statistiques de la version en cours si les trades ont changé et que le cache a
-    plus de `max_age` secondes (ou `force`). Renvoie les statistiques à jour, ou None si inchangées."""
+    plus de `max_age` secondes (ou `force`, ou un autre code : déploiement). Renvoie les statistiques à jour,
+    ou None si inchangées."""
     sig = trades_signature(db)
     last = db.get("stats", "signature")
     at = db.get("stats", "at", 0) or 0
-    if not force and (sig == last or now.timestamp() - at < max_age):
+    if not force and (sig == last or (now.timestamp() - at < max_age and not E.code_changed(last))):
         return None
     version = V.current_version(db.conn)
     data = STATS.compute(db.conn, version=version) if version else STATS.compute(db.conn)
@@ -352,11 +356,12 @@ def refresh_stats(db: LabDB, now: datetime, max_age: float, force: bool = False)
 
 def refresh_strategies(db: LabDB, now: datetime, max_age: float) -> int | None:
     """Labo v2 : tableau des stratégies et diagnostic v1 (strat_stats), recalculés quand les lignes ont
-    changé et que le cache a plus de `max_age` secondes. Renvoie le nombre de lignes, ou None."""
+    changé et que le cache a plus de `max_age` secondes (tout de suite après un déploiement). Renvoie le nombre
+    de lignes, ou None."""
     sig = SS.signature(db.conn)
     last = db.get("strats", "signature")
     at = db.get("strats", "at", 0) or 0
-    if sig == last or (SS.cached(db.conn) and now.timestamp() - at < max_age):
+    if sig == last or (SS.cached(db.conn) and now.timestamp() - at < max_age and not E.code_changed(last)):
         return None
     data = SS.report(db.conn)
     with db.transaction():

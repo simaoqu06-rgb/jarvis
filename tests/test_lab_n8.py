@@ -12,6 +12,7 @@ from app.core.http import SourceError
 from app.lab import archive as ARC
 from app.lab import collector as CO
 from app.lab import cout as COUT
+from app.lab import empreinte as E
 from app.lab import kill_complet as KC
 from app.lab import simulator as SIM
 from app.lab import sources as SRC
@@ -441,6 +442,7 @@ def test_worker_branche_les_etapes_de_la_n8():
     assert {p: b["kill_complet_seconds"] for p, b in W.LAB2_BUDGET.items()} == {"nuit": 600, "jour": 120, "seance": 0}
     assert W.KC is KC and W.COUT is COUT
     db = LabDB(":memory:")
-    assert SS.signature(db.conn)[3:] == [KC.cost_fingerprint(), 0, 0, 0]  # n° 9 : séances de plus10
+    assert SS.signature(db.conn)[3:7] == [KC.cost_fingerprint(), 0, 0, 0]  # n° 9 : séances de plus10
+    assert SS.signature(db.conn)[7:] == [0, 0, E.STATS_CODE]  # I3 : rev:trades, rev:strat, code des stats
     _kill_rows(db, ["2025-11-03"])
     assert SS.signature(db.conn)[4] == 4

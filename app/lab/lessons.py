@@ -424,11 +424,14 @@ def measure_all(db: LabDB, only_new: bool = False) -> int:
 def step(db: LabDB, now: datetime, max_age: float) -> dict:
     """Passage du worker : file, mesure des nouvelles, re-mesure complète quand les trades ont changé
     (au plus toutes les `max_age` secondes), fichier des leçons confirmées pour le direct."""
+    from app.lab import empreinte as E  # I3 : trades réécrits sur place, code des stats (déploiement : tout de suite)
+
     out = {"file": ingest(db), "nouvelles": measure_all(db, only_new=True)}
     sig = db.conn.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM trades").fetchone()
-    sig = [sig[0], sig[1]]
+    sig = [sig[0], sig[1], *E.sig(db.conn, "trades")]
     at = db.get("lessons", "at", 0) or 0
-    if sig != db.get("lessons", "signature") and now.timestamp() - at >= max_age:
+    last = db.get("lessons", "signature")
+    if sig != last and (now.timestamp() - at >= max_age or E.code_changed(last)):
         out["mesurees"] = measure_all(db)
         db.set("lessons", "signature", sig)
         db.set("lessons", "at", now.timestamp())
