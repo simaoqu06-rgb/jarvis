@@ -207,6 +207,19 @@ def test_rattrapage_a_moitie_fait_ne_montre_que_la_declaration_en_vigueur(tmp_pa
     assert "Tableau partiel" not in SS.text(rep)
 
 
+def test_tableau_partiel_accorde_au_singulier():
+    """Relecture : le dernier jour d'un rattrapage, et en actions le jour du direct entre l'arrivée de son journalier et
+    son rattrapage (le tableau est recalculé avant lui dans le passage), s'affichaient « 1 jours en rattrapage,
+    0 lignes de l'ancienne déclaration exclues »."""
+    rep = SS.report(LabDB(":memory:").conn)
+    rep["partiel"] = {"stock": {"declaration": 10, "jours_rattrapage": 1, "lignes_exclues": 0},
+                      "crypto": {"declaration": 10, "jours_rattrapage": 1, "lignes_exclues": 1}}
+    text = SS.text(rep)
+    assert ("Tableau partiel (actions) : 1 jour en rattrapage, aucune ligne d'une autre déclaration (n° 10 seule en "
+            "attendant)") in text
+    assert "Tableau partiel (crypto) : 1 jour en rattrapage, 1 ligne de l'ancienne déclaration exclue (n° 10" in text
+
+
 def test_autopsie_pendant_un_rattrapage_ne_lit_que_la_declaration_en_vigueur(tmp_path):
     """Relecture : le grade indicatif des GO confirmés (!grade, brief) et l'autopsie lisaient strat_trades sans le filtre
     du tableau : pendant le rattrapage de la n° 10 ils mêlaient les deux révisions du simulateur (la 1, biaisée en

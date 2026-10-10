@@ -963,9 +963,11 @@ def text(rep: dict | None) -> str:
     if decl.get("politique"):
         lines.append(f"Politique mesurée : {decl['politique']}")
     for market, p in (rep.get("partiel") or {}).items():  # I2
-        lines.append(f"⏳ Tableau partiel ({MARKET_FR.get(market, market).lower()}) : {p['jours_rattrapage']} jours en "
-                     f"rattrapage, {p['lignes_exclues']} lignes de l'ancienne déclaration exclues (n° {p['declaration']} "
-                     "seule en attendant)")
+        n, m = p["jours_rattrapage"], p["lignes_exclues"]
+        old = (f"{m} ligne{'s' if m > 1 else ''} de l'ancienne déclaration exclue{'s' if m > 1 else ''}" if m
+               else "aucune ligne d'une autre déclaration")
+        lines.append(f"⏳ Tableau partiel ({MARKET_FR.get(market, market).lower()}) : {n} jour{'s' if n > 1 else ''} en "
+                     f"rattrapage, {old} (n° {p['declaration']} seule en attendant)")
     for market, items in (rep.get("strategies") or {}).items():
         lines.append(f"**{MARKET_FR.get(market, market)}**")
         for name, it in items.items():
