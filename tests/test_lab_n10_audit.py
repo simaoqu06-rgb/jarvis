@@ -1,8 +1,13 @@
 """Lot 2, chantier C (deuxième tour d'avis de GPT et Gemini, 10 octobre 2026) : la n° 10 traçable et honnête.
-Tableau partiel structurel (C3), indicateur « n° 10 complète » (C4)."""
+Archive d'audit avant réécriture (C1), audit apparié ancien → nouveau (C2), tableau partiel structurel (C3),
+indicateur « n° 10 complète » (C4), coût tracé (C6)."""
 import json
-from datetime import date
+import re
+import sqlite3
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
+from app.lab import audit as AUD
 from app.lab import brief as BRIEF
 from app.lab import collector as CO
 from app.lab import kill_complet as KC
@@ -11,7 +16,8 @@ from app.lab import rattrapage as RAT
 from app.lab import status as STATUS
 from app.lab import strat_stats as SS
 from app.lab import strategies as ST
-from app.lab.db import LabDB
+from app.lab import worker as W
+from app.lab.db import STRAT_COLUMNS, STRAT_TRACE, LabDB
 
 
 def _strat(symbol, r=0.5, strategy="pullback", slot=0, **kw):
@@ -207,3 +213,302 @@ async def test_cout_rev_des_lignes_de_la_n9(monkeypatch):
     monkeypatch.setattr(P10, "day_rows", rows)
     assert await P10.step(db, datetime(2025, 3, 11, tzinfo=timezone.utc), 60) == 1
     assert db.conn.execute("SELECT symbol, cout_rev FROM plus10_trades").fetchall() == [("UPA", KC.cost_fingerprint())]
+
+
+# --- C1 : archive des anciennes lignes avant réécriture ----------------------------------------------------------
+
+DAYS = ("2025-03-10", "2025-03-11")
+SEALED_DAY = "2000-03-06"  # dans le bloc scellé des tests (conftest)
+
+
+def _archive(db) -> Path:
+    return AUD.archive_path(db.path, ST.DECLARATION)
+
+
+def _read(path: Path, sql: str, args=()) -> list:
+    conn = sqlite3.connect(path)
+    try:
+        return conn.execute(sql, args).fetchall()
+    finally:
+        conn.close()
+
+
+def _kill(db, day, symbol, cout, r=0.4):
+    db.conn.execute("INSERT INTO kill_complet (day, symbol, groupe, empreinte, triggered, r_net, cout) "
+                    "VALUES (?, ?, 'catalyseur', 'e', 1, ?, ?)", (day, symbol, r, cout))
+
+
+def _p10(db, day, symbol, mesure, r=0.2):
+    db.conn.execute("INSERT INTO plus10_trades (day, symbol, essai, liste, rang, triggered, r_net) "
+                    "VALUES (?, ?, 'plus10_open', 'S+10', 1, 1, ?)", (day, symbol, r))
+    db.set(P10.JOB, day, {"mesure": mesure, "lignes": 1} if mesure else {"lignes": 1})
+
+
+def _base(tmp_path):
+    """Base hors scellé : lignes de stratégies d'avant la n° 10 sur deux jours à refaire, une ligne scellée, Killmode
+    complet à deux coûts, n° 9 à deux mesures."""
+    db = LabDB(str(tmp_path / "lab.db"))
+    db.set("replay:stock", "start", DAYS[0])
+    db.set("replay:stock", "last_day", DAYS[-1])
+    _daily(db, *DAYS)
+    for day in DAYS:
+        _old(db, "stock", day, ["AAA", "BBB"], r=-0.7, entry=10.0, stop=9.0, temoin_r=0.1, temoin_triggered=1)
+    _old(db, "crypto", DAYS[0], ["BTC-USDT"], r=0.9, decl=9)
+    db.conn.execute("INSERT INTO strat_trades_sealed (origin, market, symbol, day, strategy, slot, triggered, r_net) "
+                    "VALUES ('replay', 'stock', 'SEAL', ?, 'pullback', 0, 1, 5.0)", (SEALED_DAY,))
+    _kill(db, DAYS[0], "AAA", None)
+    _kill(db, DAYS[1], "AAA", KC.cost_fingerprint())
+    _p10(db, DAYS[0], "AAA", 9)
+    _p10(db, DAYS[1], "BBB", P10.MESURE)
+    return db
+
+
+async def test_archive_faite_avant_le_premier_replace_strat(tmp_path, monkeypatch):
+    db = _base(tmp_path)
+    seen = []
+    replace = db.replace_strat
+
+    def spy(origin, market, day, rows, symbols=None):
+        path = _archive(db)
+        seen.append(_read(path, "SELECT COUNT(*) FROM strat_trades")[0][0] if path.exists() else None)
+        return replace(origin, market, day, rows, symbols)
+
+    async def rows(db_, origin, day, transport=None, missing=None):
+        return [_strat("AAA", r=0.3, entry=10.0, stop=9.0, temoin_r=0.2, temoin_triggered=1)]
+
+    db.replace_strat = spy
+    monkeypatch.setattr(RAT, "stock_rows", rows)
+    assert await RAT.step(db, "stock", 60) == 2
+    assert seen == [5, 5]                                               # 4 actions + 1 crypto, dès le 1er appel
+    assert db.conn.execute("SELECT COUNT(*) FROM strat_trades WHERE market = 'stock' AND declaration IS NOT ?",
+                           (ST.DECLARATION,)).fetchone()[0] == 0          # plus aucune ancienne ligne en base
+    path = _archive(db)
+    assert path == tmp_path / "archives" / f"labo2-avant-n{ST.DECLARATION}.db"
+    archived = _read(path, "SELECT market, symbol, day, r_net, declaration FROM strat_trades ORDER BY market, day, symbol")
+    assert archived == [("crypto", "BTC-USDT", DAYS[0], 0.9, 9),
+                        *[("stock", s, d, -0.7, None) for d in DAYS for s in ("AAA", "BBB")]]   # intacte, telle quelle
+    assert _read(path, "SELECT day, symbol, cout FROM kill_complet") == [(DAYS[0], "AAA", None)]  # autre coût seul
+    assert _read(path, "SELECT day, symbol FROM plus10_trades") == [(DAYS[0], "AAA")]          # autre mesure seule
+    assert [json.loads(v)["mesure"] for _, v in _read(path, "SELECT day, value FROM plus10_seances")] == [9]
+    info = _read(path, "SELECT cle, tables, remplace, declaration, lignes, note FROM archive_info ORDER BY cle")
+    assert [r[0] for r in info] == [f"kill_complet:{KC.cost_fingerprint()}", f"plus10:m{P10.MESURE}",
+                                    f"strats:crypto:d{ST.CRYPTO_DECLARATION}", f"strats:stock:d{ST.DECLARATION}"]
+    stock = info[-1]
+    assert json.loads(stock[2]) == ["inconnue (d'avant le suivi)"] and stock[3] == ST.DECLARATION
+    assert json.loads(stock[4]) == {"strat_trades": {"choisies": 4, "ajoutees": 4, "deja_la": 0}}
+    assert stock[5] == ("mesures d'avant la n° 10 : simulateur révision 1, témoin sur la journée, 5 tirages, "
+                        "prix ajustés")
+    # Rien du scellé : ni ses lignes, ni ses tables.
+    assert not any("sealed" in t for (t,) in _read(path, "SELECT name FROM sqlite_master WHERE type = 'table'"))
+    assert _read(path, "SELECT COUNT(*) FROM strat_trades WHERE day = ? OR symbol = 'SEAL'", (SEALED_DAY,)) == [(0,)]
+    # Second appel sans effet : rien d'ajouté, pas d'archivage de plus.
+    before = path.read_bytes()
+    assert AUD.step(db) == {} and await RAT.step(db, "stock", 60) == 0
+    assert path.read_bytes() == before
+
+
+async def test_archive_en_tete_du_passage_et_rien_de_reecrit_si_elle_echoue(tmp_path, monkeypatch):
+    """Ordre du passage : archive, puis grade, Labo 2, rejeu, rattrapage ; en échec, ni rattrapage ni Killmode complet
+    ni n° 9 (lab2 reçoit hold), le reste tourne."""
+    db = LabDB(str(tmp_path / "lab.db"))
+    calls = []
+
+    def archive(db_):
+        calls.append("archive")
+        if fail:
+            raise sqlite3.OperationalError("disk I/O error")
+        return {}
+
+    async def lab2(db_, now, collect=True, hold=False):
+        calls.append(f"lab2 hold={hold}")
+        return {}
+
+    async def replay(start, end, market, *a, **k):
+        calls.append(f"rejeu {market}")
+        return 0
+
+    async def rattrapage(db_, market, seconds, transport=None):
+        calls.append(f"rattrapage {market}")
+        return 0
+
+    monkeypatch.setattr(W.AUD, "step", archive)
+    monkeypatch.setattr(W.GRADE, "step", lambda db_, now: calls.append("grade"))
+    monkeypatch.setattr(W, "lab2", lab2)
+    monkeypatch.setattr(W.R, "replay", replay)
+    monkeypatch.setattr(W.RAT, "step", rattrapage)
+    monkeypatch.setattr(W.alpaca, "configured", lambda: True)
+    night = datetime(2026, 10, 11, 3, tzinfo=timezone.utc)           # dimanche : « nuit », séance US fermée
+    fail = False
+    report = await W.tick(db, night, collect=True)
+    assert calls[:2] == ["archive", "grade"] and report["archive_audit"] == {}
+    assert "lab2 hold=False" in calls and calls[-2:] == ["rattrapage stock", "rattrapage crypto"]
+    calls.clear()
+    fail = True
+    report = await W.tick(db, night + timedelta(minutes=10), collect=True)
+    assert calls[0] == "archive" and "lab2 hold=True" in calls and "rejeu crypto" in calls
+    assert not any(c.startswith("rattrapage") for c in calls) and "rattrapage" not in report
+    assert report["archive_audit"] == "échec : OperationalError"
+
+
+async def test_lab2_en_attente_saute_killmode_complet_et_n9(tmp_path, monkeypatch):
+    db = LabDB(str(tmp_path / "lab.db"))
+    ran = []
+    monkeypatch.setattr(W.KC, "step", lambda *a: ran.append("kc"))
+    monkeypatch.setattr(W.P10, "step", lambda *a: ran.append("p10"))
+    monkeypatch.setattr(W.DER, "collect", lambda *a: ran.append("derives"))
+    monkeypatch.setattr(W.CAT, "fetch_news", lambda *a: 0)
+    monkeypatch.setattr(W.ARC, "step", lambda *a: 0)
+    night = datetime(2026, 10, 11, 3, tzinfo=timezone.utc)
+    report = await W.lab2(db, night, collect=True, hold=True)
+    assert ran == ["derives"] and "killmode_complet" not in report and "audit" in report
+    report = await W.lab2(db, night, collect=True)
+    assert ran[1:] == ["kc", "p10", "derives"]
+
+
+def test_copie_manuelle_respectee(tmp_path):
+    """La commande de DEPLOY.md (CREATE TABLE … AS SELECT *, sans archive_info ni index, faite avant le déploiement
+    du lot 2, donc sans la colonne cout_rev) : tables gardées, rien d'effacé ni de modifié, seules les absentes
+    ajoutées."""
+    db = _base(tmp_path)
+    path = _archive(db)
+    path.parent.mkdir()
+    cols = [c for c in (*STRAT_COLUMNS, *(c for c, _ in STRAT_TRACE)) if c != "cout_rev"]
+    db.conn.execute("ATTACH DATABASE ? AS a", (str(path),))
+    db.conn.execute(f"CREATE TABLE a.strat_trades AS SELECT id, {', '.join(cols)} FROM main.strat_trades "
+                    "WHERE declaration IS NULL")
+    db.conn.execute("CREATE TABLE a.kill_complet AS SELECT * FROM main.kill_complet")
+    db.conn.execute("CREATE TABLE a.plus10_trades AS SELECT * FROM main.plus10_trades")
+    db.conn.execute("UPDATE a.strat_trades SET exit_reason = 'copie manuelle'")    # marque : jamais réécrite
+    db.conn.execute("DETACH DATABASE a")
+    db.replace_strat("replay", "stock", DAYS[0], [_strat("AAA", r=0.3)])          # réécrit avant le déploiement
+    _old(db, "stock", DAYS[1], ["CCC"], r=-0.5)                                    # absente de la copie
+    out = AUD.step(db)
+    assert out[f"strats:stock:d{ST.DECLARATION}"] == {"strat_trades": {"choisies": 3, "ajoutees": 1, "deja_la": 2}}
+    assert out[f"strats:crypto:d{ST.CRYPTO_DECLARATION}"]["strat_trades"]["ajoutees"] == 1
+    assert out[f"kill_complet:{KC.cost_fingerprint()}"] == {"kill_complet": {"choisies": 1, "ajoutees": 0,
+                                                                              "deja_la": 1}}
+    assert out[f"plus10:m{P10.MESURE}"]["plus10_trades"] == {"choisies": 1, "ajoutees": 0, "deja_la": 1}
+    rows = _read(path, "SELECT market, day, symbol, exit_reason FROM strat_trades ORDER BY market, day, symbol")
+    assert rows == [("crypto", DAYS[0], "BTC-USDT", None),
+                    ("stock", DAYS[0], "AAA", "copie manuelle"), ("stock", DAYS[0], "BBB", "copie manuelle"),
+                    ("stock", DAYS[1], "AAA", "copie manuelle"), ("stock", DAYS[1], "BBB", "copie manuelle"),
+                    ("stock", DAYS[1], "CCC", None)]      # le 10/03 réécrit en base reste dans l'archive
+    assert "cout_rev" not in {r[1] for r in _read(path, "PRAGMA table_info(strat_trades)")}  # schéma gardé
+    assert _read(path, "SELECT COUNT(*) FROM kill_complet") == [(2,)]                   # copie complète gardée
+    assert len(_read(path, "SELECT * FROM archive_info")) == 4
+
+
+def test_sans_ancienne_ligne_pas_de_fichier(tmp_path):
+    db = LabDB(str(tmp_path / "lab.db"))
+    db.replace_strat("replay", "stock", DAYS[0], [_strat("AAA")])
+    assert AUD.step(db) == {} and not (tmp_path / "archives").exists()
+    assert set(db.keys(AUD.JOB)) == {f"strats:stock:d{ST.DECLARATION}", f"strats:crypto:d{ST.CRYPTO_DECLARATION}",
+                                     f"kill_complet:{KC.cost_fingerprint()}", f"plus10:m{P10.MESURE}"}
+    assert AUD.step(LabDB(":memory:")) == {} and AUD.report(LabDB(":memory:").conn) is None
+
+
+def test_archive_jamais_lue_pour_decider(tmp_path):
+    """Balayage du code : le fichier et ses tables ne sont nommés que dans audit.py ; seuls le worker, le rattrapage, la
+    route et `!strategies` importent le module ; le tableau est le même avec ou sans archive."""
+    root = Path(__file__).resolve().parents[1] / "app"
+    named, importers = set(), set()
+    for f in root.rglob("*.py"):
+        src = f.read_text(encoding="utf-8")
+        rel = f.relative_to(root.parent).as_posix()
+        if any(x in src for x in (AUD.PREFIX, "archive_info", "plus10_seances", AUD.CACHE_KEY)):
+            named.add(rel)
+        if re.search(r"from app\.lab import audit\b|app\.lab\.audit|import audit\b", src):
+            importers.add(rel)
+    assert named == {"app/lab/audit.py"}
+    assert importers == {"app/lab/worker.py", "app/lab/rattrapage.py", "app/main.py", "app/notify/bot.py"}
+    db = _base(tmp_path)
+    db.conn.execute("DELETE FROM progress WHERE job = ? AND key = ?", (P10.JOB, DAYS[1]))  # séance n° 9 sans listes
+    db.conn.execute("DELETE FROM plus10_trades WHERE day = ?", (DAYS[1],))
+    before = SS.report(db.conn)
+    AUD.step(db)
+    assert _archive(db).exists() and SS.report(db.conn) == before
+
+
+# --- C2 : audit apparié ancien → nouveau -------------------------------------------------------------------------
+
+def _audit_base(tmp_path):
+    """Trois jours, deux actions par jour : ancien pullback à −0,4 R (témoin +0,1), refait à +0,1 R (témoin −0,1) ;
+    une ligne refaite non déclenchée ; une ancienne ligne sans pendant."""
+    db = LabDB(str(tmp_path / "lab.db"))
+    days = ("2025-03-10", "2025-03-11", "2025-03-12")
+    for i, day in enumerate(days):
+        _old(db, "stock", day, ["AAA", "BBB"], r=-0.4 - 0.1 * i, entry=10.0, stop=9.0, temoin_r=0.1,
+             temoin_triggered=1)
+    _old(db, "stock", days[0], ["ZZZ"], r=1.0)
+    assert AUD.step(db)
+    for i, day in enumerate(days):
+        db.replace_strat("replay", "stock", day, [
+            _strat("AAA", r=0.1, entry=10.0, stop=9.5, temoin_r=-0.1, temoin_triggered=1),
+            _strat("BBB", r=0.1, entry=10.0, stop=9.5, temoin_r=-0.1, temoin_triggered=1,
+                   triggered=0 if i == 2 else 1)])
+    return db, days
+
+
+def test_audit_apparie_nouveau_moins_ancien(tmp_path):
+    db, days = _audit_base(tmp_path)
+    rep = AUD.report(db.conn)
+    assert rep["declaration"] == ST.LATEST_DECLARATION
+    assert list(rep["archives"]) == [f"labo2-avant-n{ST.DECLARATION}.db"]
+    mk = rep["marches"]["stock"]
+    assert mk["archivees"] == 7 and mk["appariees"] == 6                  # ZZZ sans pendant
+    s = mk["strategies"]["pullback"]
+    assert (s["paires"], s["declenchees_avant"], s["declenchees_apres"], s["declenchees_les_deux"]) == (6, 6, 5, 5)
+    assert s["sortie"] == ST.ref_exit("pullback") == "r_net"
+    # Commission IBKR : 0,01 R avant (risque 1 $), 0,02 R après (risque 0,5 $) ; nouveau − ancien sur les 5 paires.
+    olds = [-0.4, -0.4, -0.5, -0.5, -0.6]
+    expected = sum((0.1 - 0.02) - (r - 0.01) for r in olds) / 5
+    assert abs(s["esperance"]["esperance_r"] - expected) < 1e-4 and s["esperance"]["n"] == 5
+    assert abs(s["r_net"]["esperance_r"] - sum(0.1 - r for r in olds) / 5) < 1e-4
+    assert abs(s["temoin"]["esperance_r"] + 0.2) < 1e-4
+    assert abs(s["ecart"]["esperance_r"] - sum((0.1 + 0.1) - (r - 0.1) for r in olds) / 5) < 1e-4
+    assert s["ecart"]["grappes"] == 3 and s["ecart"]["ic95"] is not None   # grappes par jour
+    assert mk["ensemble"]["ecart"]["n"] == 5
+    info = rep["archives"][f"labo2-avant-n{ST.DECLARATION}.db"]["archivages"]
+    assert {i["cle"] for i in info} == {f"strats:stock:d{ST.DECLARATION}"}
+    # Rien n'est écrit dans la base par l'audit : l'archive est détachée.
+    assert [r[1] for r in db.conn.execute("PRAGMA database_list")] == ["main"]
+
+
+def test_audit_en_cache_et_texte(tmp_path):
+    db, days = _audit_base(tmp_path)
+    now = datetime(2026, 10, 11, 3, tzinfo=timezone.utc)
+    assert AUD.refresh(db, now, 3600) == 6
+    rep = AUD.cached(db.conn)
+    assert rep["marches"]["stock"]["appariees"] == 6
+    assert AUD.refresh(db, now, 3600) is None                            # même signature
+    db.replace_strat("replay", "stock", days[0], [_strat("AAA", r=0.2)])
+    assert AUD.refresh(db, now + timedelta(seconds=60), 3600) is None    # lignes changées, cache trop jeune
+    assert AUD.refresh(db, now + timedelta(seconds=3601), 3600) == 5
+    text = AUD.text(rep)
+    assert text.startswith(f"🔎 **Audit de la n° {ST.LATEST_DECLARATION} (ancien → nouveau, mêmes trades)** : pour "
+                           "audit, jamais pour décider")
+    assert "Actions : 6 lignes appariées sur 7 archivées" in text and "espérance +0,57 R [" in text
+    assert "(5 trades)" in text and "témoin -0,20 R" in text
+    assert AUD.text(None) is None
+
+
+def test_audit_route_et_strategies(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from app import main
+    from app.notify import bot
+
+    path = tmp_path / "lab.db"
+    monkeypatch.setenv("JARVIS_LAB_DB", str(path))
+    monkeypatch.setenv("JARVIS_LAB_API_KEY", "cle")
+    db = LabDB(str(path))
+    client = TestClient(main.app)
+    assert client.get("/api/lab/strategies/audit", headers={"X-Lab-Key": "cle"}).status_code == 404
+    assert "Audit de la n°" not in bot.strategies_text()
+    db.close()
+    db, _ = _audit_base(tmp_path)
+    r = client.get("/api/lab/strategies/audit", headers={"X-Lab-Key": "cle"})   # calcul direct, en lecture seule
+    assert r.status_code == 200 and r.json()["marches"]["stock"]["appariees"] == 6
+    assert "Audit de la n°" not in bot.strategies_text()                       # pas de cache : rien dans Discord
+    AUD.refresh(db, datetime(2026, 10, 11, 3, tzinfo=timezone.utc), 3600)
+    assert "Audit de la n° 10 (ancien → nouveau, mêmes trades)" in bot.strategies_text()

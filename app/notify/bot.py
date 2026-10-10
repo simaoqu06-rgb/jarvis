@@ -47,6 +47,7 @@ from datetime import datetime, timezone
 
 from app import config
 from app.lab import db as lab_db
+from app.lab import audit as lab_audit
 from app.lab import autopsie as lab_autopsie
 from app.lab import grade as lab_grade
 from app.lab import lessons as lab_lessons
@@ -279,7 +280,8 @@ def strategies_text() -> str:
     if conn is None:
         return "🧪 Base du labo absente : le service jarvis-lab n'a pas encore démarré."
     try:
-        return lab_strategies.text(lab_strategies.cached(conn))
+        audit = lab_audit.text(lab_audit.cached(conn))  # lot 2 (C2) : pour audit, jamais pour décider
+        return lab_strategies.text(lab_strategies.cached(conn)) + (f"\n\n{audit}" if audit else "")
     finally:
         conn.close()
 

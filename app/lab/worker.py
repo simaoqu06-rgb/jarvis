@@ -37,6 +37,11 @@ Toutes les ~10 min :
    confirmés, recalculés quand les trades changent, au plus toutes les stats_age secondes.
 14. « filtres » (filtres.py) : ce que coûte chaque filtre du scanner de 15 h 10 sur les trades v1 d'actions,
    recalculé quand les trades ou les réglages changent, au plus toutes les stats_age secondes, hors séance US.
+15. Lot 2 (C1, audit.py) : en tête de chaque passage, avant le grade, le Labo 2, le rejeu et le rattrapage, les lignes
+   qu'une nouvelle déclaration va réécrire (stratégies, Killmode complet, n° 9) sont copiées une fois dans le
+   fichier d'archive de data/archives/ ; en échec, rien ne les réécrit dans ce passage (rattrapage, étapes
+   killmode_complet et potentiel_plus10 sautées ; le direct et le rejeu n'écrivent que des jours neufs). L'étape
+   « audit » met en cache l'audit apparié ancien → nouveau (pour audit, jamais pour décider).
 Le battement (lab.heartbeat) porte l'étape en cours, affichée par /api/lab/status et !labo.
 Le rejeu couvre JARVIS_LAB_REPLAY_DAYS séances (504 ≈ 2 ans) avant le premier lancement du worker ;
 le direct prend le relais à partir de ce jour-là. JARVIS_LAB_ENABLED=off met le worker en veille.
@@ -49,6 +54,7 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from app.lab import archive as ARC
+from app.lab import audit as AUD
 from app.lab import catalysts as CAT
 from app.lab import collector as CO
 from app.lab import cout as COUT
@@ -267,6 +273,15 @@ async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, tra
     live_start = date.fromisoformat(live_start)
     R.method(db)
     report: dict = {"live": {}, "replay": {}, "paused": {}}
+    # Lot 2 (C1) : archive d'audit avant toute réécriture ; en échec, ce passage ne réécrit rien (hold).
+    heartbeat.beat("archive d'audit")
+    hold = False
+    try:
+        report["archive_audit"] = AUD.step(db)
+    except Exception as exc:
+        hold = True
+        report["archive_audit"] = f"échec : {type(exc).__name__}"
+        log.warning("Labo : archive d'audit en échec, rien n'est réécrit ce passage : %s: %s", type(exc).__name__, exc)
     # Grade en tête de passage (lecture de la base, sans réseau, < 1 s) : il ne doit pas attendre derrière
     # une collecte longue du rejeu (journalier de tout l'univers crypto au premier passage…).
     heartbeat.beat("grade")
@@ -307,7 +322,7 @@ async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, tra
     # Résumé du soir attendu : le Labo 2 (qui le construit) passe avant le rejeu, sinon 2 × 15 min de
     # rejeu le repoussaient après la routine de 22 h 52, voire après minuit (résumé perdu).
     if summary_first(now, db.get("summary", "last_day")):
-        report["labo2"] = await lab2(db, current(), collect)
+        report["labo2"] = await lab2(db, current(), collect, hold)
     for market in market_order(db, markets):
         heartbeat.beat(f"rejeu {market}")
         try:
@@ -318,8 +333,8 @@ async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, tra
             log.warning("Labo : rejeu %s en échec : %s: %s", market, type(exc).__name__, exc)
         heartbeat.beat()
     if "labo2" not in report:
-        report["labo2"] = await lab2(db, current(), collect)
-    if collect and RATTRAPAGE_SECONDS[period(current())]:
+        report["labo2"] = await lab2(db, current(), collect, hold)
+    if collect and not hold and RATTRAPAGE_SECONDS[period(current())]:
         report["rattrapage"] = {}
         for market in markets:
             seconds = rattrapage_seconds(current(), db.get("summary", "last_day"))
@@ -384,8 +399,9 @@ def refresh_strategies(db: LabDB, now: datetime, max_age: float) -> int | None:
     return sig[0]
 
 
-async def lab2(db: LabDB, now: datetime, collect: bool = True) -> dict:
-    """Étapes du Labo 2, chacune isolée, dans le budget de la période."""
+async def lab2(db: LabDB, now: datetime, collect: bool = True, hold: bool = False) -> dict:
+    """Étapes du Labo 2, chacune isolée, dans le budget de la période. `hold` (archive d'audit en échec) : Killmode
+    complet et la n° 9, qui réécrivent leurs lignes, attendent le passage suivant."""
     budget = LAB2_BUDGET[period(now)]
     report: dict = {}
     fresh: dict = {}
@@ -412,9 +428,10 @@ async def lab2(db: LabDB, now: datetime, collect: bool = True) -> dict:
     await step("archive", lambda: ARC.step(db, now, budget["archive_seconds"], collect,
                                                 budget["archive_days"]))
     await step("cout", lambda: COUT.step(db))
-    if collect:
+    if collect and not hold:
         await step("killmode_complet", lambda: KC.step(db, budget["kill_complet_seconds"]))
         await step("potentiel_plus10", lambda: P10.step(db, now, budget["plus10_seconds"]))
+    if collect:
         await step("derives", lambda: DER.collect(db, now, budget["derivs_calls"]))
     if collect and not CO.CAL.session_open(now):
         await step("actus", lambda: CAT.fetch_news(db, now, budget["news_calls"]))
@@ -424,6 +441,7 @@ async def lab2(db: LabDB, now: datetime, collect: bool = True) -> dict:
     await step("lecons", lambda: L.step(db, now, budget["stats_age"]))
     await step("grade", lambda: GRADE.step(db, now))
     await step("strategies", lambda: refresh_strategies(db, now, budget["stats_age"]))
+    await step("audit", lambda: AUD.refresh(db, now, budget["stats_age"]))  # lot 2 (C2) : jamais lu pour décider
     await step("autopsie", lambda: AUT.step(db, now, budget["stats_age"]))
     if not CO.CAL.session_open(now):  # un journalier relu par action : pas pendant la séance US
         await step("filtres", lambda: FIL.step(db, now, budget["stats_age"]))
