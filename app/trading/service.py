@@ -641,6 +641,13 @@ def reopen(book: Book, symbol: str, plan: dict) -> dict | None:
                 and t["events"] and t["events"][-1]["kind"] == "stop"), None)
     if old is None:
         return None
+    # Même position : un KILL pris garde sa gestion et sa taille (`!prends … kill`), un GO confirmé son camp (!desaccords).
+    plan |= {k: old[k] for k in ("killmode", "policy") if old.get(k)}
+    if plan.get("killmode"):
+        from app.trading import killmode as K  # import tardif : killmode importe ce module
+
+        plan["sizing"] = K.taken_sizing(plan)
+        plan.pop("sizing_regle", None)
     book.trades.remove(old)
     book.add(plan, f"rouvert : stop {_num(old['stop_current'])} non exécuté chez le courtier")
     return old

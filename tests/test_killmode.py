@@ -841,6 +841,31 @@ async def test_prends_un_kill_garde_sa_taille_de_20_euros(paths, monkeypatch):
     s = scheduler.book.trades[1]["sizing"]
     assert s["quantity"] == 1 and s["hors_budget"] and s["risk_amount_eur"] == 43.48  # le vrai risque d'une action
 
+    # Relecture d'intégration : `!rouvre` (stop touché mais pas exécuté chez le courtier) garde le KILL, sa gestion
+    # (stop à l'entrée dès TP1, vente à la clôture) et sa taille hors grade, au lieu de la règle du grade.
+    scheduler.book.close(t["id"], 104.49)
+    t["events"][-1]["kind"] = "stop"
+    txt = await bot.handle("!rouvre ACME 106.6 stop 104")
+    t = next(x for x in scheduler.book.trades if x["symbol"] == "ACME")
+    assert "rouvert" in txt and t["status"] == "open" and t["killmode"] and "sizing_regle" not in t
+    assert t["sizing"]["hors_grade"] and t["sizing"]["risk_amount_eur"] == 20.0 and t["sizing"]["quantity"] == 8
+    assert "taille du KILL, hors grade" in txt
+
+
+def test_rouvre_un_go_confirme_reste_avec_jarvis():
+    """Relecture d'intégration : un GO confirmé rouvert dont la note recalculée est NO GO reste « avec JARVIS »."""
+    book = T.Book(None)
+    plan = {"symbol": "ACME", "market": "stock", "side": "long", "entry": 10.0, "stop": 9.5, "targets": [],
+            "created_at": NOW.isoformat(), "score": {"go": True}, "policy": "go_confirme"}
+    old = book.add(plan)
+    book.close(old["id"], 9.5)
+    old["events"][-1]["kind"] = "stop"
+    new_plan = {k: v for k, v in plan.items() if k != "policy"} | {"stop": 9.2, "score": {"go": False}}
+    assert T.against_jarvis(new_plan)  # le plan recalculé seul serait compté contre JARVIS
+    T.reopen(book, "ACME", new_plan)
+    t = book.trades[0]
+    assert t["status"] == "open" and t["policy"] == "go_confirme" and not T.against_jarvis(t)
+
 
 def test_pire_et_meilleur_ordre(paths, monkeypatch):
     """Une minute où le stop et TP1 sont touchés : le pire ordre (stop) décide, le meilleur est affiché."""
