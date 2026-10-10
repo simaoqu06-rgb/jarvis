@@ -496,6 +496,20 @@ def test_desaccords_taille_a_ta_regle_quand_jarvis_propose_0():
     assert "**3. Ta taille quand JARVIS n'en propose pas ?** Pas de réponse :" in text and "il en faut 30 sur 20" in text
 
 
+def test_grade_trades_reels_comptent_ceux_a_ta_regle():
+    """Populations de `!grade` : les trades réels pris à ta règle de taille sont comptés à part, avec leur R net."""
+    from app.lab import grade as GRADE
+
+    book = S.Book(None)
+    closed_with(book, True, "tp", 0, **RULE)
+    closed_with(book, True, "stop", 1)
+    real = GRADE.reels(book.trades)
+    assert real["stock"]["termines"] == 2 and real["stock"]["regle"] == 1 and real["stock"]["regle_net_r"] > 0
+    text = GRADE.populations_text([], real)
+    assert "· dont 1 à ta règle de taille (+" in text and "détail dans `!desaccords`" in text
+    assert "à ta règle" not in GRADE.populations_text([], {"stock": real["stock"] | {"regle": 0}})
+
+
 def test_desaccords_taille_a_ta_regle_verdicts():
     book = S.Book(None)
     for i in range(30):

@@ -997,18 +997,21 @@ def text(data: dict | None, hist: list[dict] | None = None, now: datetime | None
 def reels(trades: list[dict]) -> dict:
     """Troisième population (avis de GPT, 10 oct.) : trades réellement pris et suivis par JARVIS (`!prends`),
     terminés, hors Killmode (mesuré par son propre journal), en R réalisé avant frais et net des frais estimés
-    (service.realized_r_net ; gagnants comptés nets). Indicatif : aucun effet."""
+    (service.realized_r_net ; gagnants comptés nets). Indicatif : aucun effet. `regle` : ceux pris à ta taille quand
+    JARVIS n'en proposait pas autant (service.at_rule, le pari « 20 € quand JARVIS propose 0 % »), et leur R net moyen."""
     from app.trading import service as T
 
     out = {}
     for market in MARKETS:
         mine = [t for t in trades if t.get("market", "stock") == market and not t.get("killmode")]
-        done = [(T.realized_r(t), T.realized_r_net(t)) for t in mine if T.realized_r(t) is not None]
-        rs, nets = [r for r, _ in done], [n for _, n in done]
+        done = [(T.realized_r(t), T.realized_r_net(t), T.at_rule(t)) for t in mine if T.realized_r(t) is not None]
+        rs, nets = [r for r, _, _ in done], [n for _, n, _ in done]
+        rule = [n for _, n, at in done if at]
         out[market] = {"termines": len(rs), "esperance_r": round(sum(rs) / len(rs), 3) if rs else None,
                        "total_r": round(sum(rs), 2), "gagnants": sum(n > 0 for n in nets),
                        "esperance_net_r": round(sum(nets) / len(nets), 3) if nets else None,
-                       "total_net_r": round(sum(nets), 2)}
+                       "total_net_r": round(sum(nets), 2), "regle": len(rule),
+                       "regle_net_r": round(sum(rule) / len(rule), 3) if rule else None}
     return out
 
 
@@ -1031,6 +1034,8 @@ def populations_text(indicatif: list[str], real: dict | None) -> str:
         lines.append(f"-# {MARKET_FR[market].capitalize()} : {g['termines']} terminés, {g['gagnants']} gagnants, "
                      f"{g['esperance_net_r']:+.2f} R en moyenne ({g['esperance_r']:+.2f} brut), "
                      f"{g['total_net_r']:+.2f} R au total ({g['total_r']:+.2f} brut)"
+                     + (f" · dont {g['regle']} à ta règle de taille ({g['regle_net_r']:+.2f} R nets), "
+                        "détail dans `!desaccords`" if g.get("regle") else "")
                      + (" · trop peu pour conclure" if g["termines"] < 30 else ""))
     return "\n".join(lines)
 
