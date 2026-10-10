@@ -166,6 +166,23 @@ def test_tranche_degradee_signalee_et_petite_tranche_jamais(db):
     assert all(d["n"] >= S.MIN_TRADES and d["z"] <= -S.DEGRADE_Z for d in st["degradations"])
 
 
+def test_tranche_de_trois_jours_jamais_degradee(db):
+    """Direct crypto du 9 octobre : 3 jours très corrélés (849 trades) jugés comme 849 trades
+    indépendants donnaient z −9,3. Il faut DEGRADE_MIN_DAYS jours avant de signaler une tranche."""
+    synthetic_trades(db, n_days=80, per_day=50, seed=8, market="crypto", base=-0.2)
+    synthetic_trades(db, n_days=3, per_day=300, seed=9, market="crypto", base=-0.75, noise=0.8,
+                     origin="live", first=date(2024, 6, 1))
+    assert not [d for d in S.compute(db.conn)["degradations"] if d["dimension"] == "origine"]
+
+
+def test_tranche_assez_longue_toujours_signalee(db):
+    synthetic_trades(db, n_days=80, per_day=50, seed=8, market="crypto", base=-0.2)
+    synthetic_trades(db, n_days=S.DEGRADE_MIN_DAYS, per_day=50, seed=9, market="crypto", base=-0.75, noise=0.8,
+                     origin="live", first=date(2024, 6, 1))
+    found = [d for d in S.compute(db.conn)["degradations"] if d["dimension"] == "origine"]
+    assert [d["valeur"] for d in found] == ["live"]
+
+
 def test_bruit_pur_sans_degradation(db):
     synthetic_trades(db, n_days=80, per_day=20, seed=6)
     assert S.compute(db.conn)["degradations"] == []
