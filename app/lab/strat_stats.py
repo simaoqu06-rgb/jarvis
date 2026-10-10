@@ -112,10 +112,11 @@ ROBUST = ("r_glisse_x2", "r_glisse_x3", "r_retard", "r_manque")
 ROBUST_STOCK = (*ROBUST, "r_3c")
 WITH_COMMISSION = ("r_3c", "r_20e")  # colonnes qui comptent déjà la commission IBKR
 # n° 10 : la politique que mesure le tableau, en une ligne (X1, point 4).
-POLICY = ("entrée au signal (ordre stop ou limite ; v1 limitée au dernier cours connu, GO au marché à l'ouverture "
-          "ou à la confirmation) · stop à l'entrée après TP1 (stratégies et v1) ou stop fixe (GO, r_sans_be) ; ta "
-          "règle, stop à l'entrée après TP2, en colonne r_be_tp2 · sortie au temps : clôture de la séance (actions), "
-          "24 h (crypto) · taille : en R du risque prévu, et à 20 € de risque chez IBKR (« à 20 € »)")
+POLICY = ("entrée au signal (ordre stop ou limite ; v1 limitée au dernier cours connu ; GO brut au marché à "
+          "l'ouverture, GO confirmé par ordre stop au déclencheur jusqu'à 11 h 30 New York) · stop à l'entrée après "
+          "TP1 (stratégies et v1) ou stop fixe (GO, r_sans_be) ; ta règle, stop à l'entrée après TP2, en colonne "
+          "r_be_tp2 · sortie au temps : clôture de la séance (actions), 24 h (crypto) · taille : en R du risque prévu, "
+          "et à 20 € de risque chez IBKR (« à 20 € »)")
 OPEN_BUCKETS = ((-1e9, 0.0, "ouverture ≤ entrée"), (0.0, 0.01, "ouverture +0 à +1 %"),
                 (0.01, 0.03, "ouverture +1 à +3 %"), (0.03, 1e9, "ouverture > +3 %"))  # n° 10, bornes hautes comprises
 # n° 6, mesure de Killmode : tranches figées avant tout résultat (bornes basses comprises, hautes exclues).

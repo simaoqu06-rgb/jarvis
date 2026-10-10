@@ -505,6 +505,8 @@ def test_entree_de_v1_limite_ou_ouverture():
     text = SS.text(SS.report(db.conn))
     assert "Entrée de v1 (n° 10, mesure)" in text and "1 ouverts au-dessus du TP1 à part" in text
     assert "Politique mesurée : entrée au signal" in text and "stop à l'entrée après TP2" in text
+    # Relecture : le GO confirmé n'est pas acheté au marché à la confirmation (strategies.go_rows, doc n° 7).
+    assert "GO confirmé par ordre stop au déclencheur jusqu'à 11 h 30 New York" in text and "à la confirmation" not in text
     assert SS.entree_v1_appariee(LabDB(":memory:").conn) is None
 
 
