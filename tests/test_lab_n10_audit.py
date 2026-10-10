@@ -18,6 +18,7 @@ from app.lab import strat_stats as SS
 from app.lab import strategies as ST
 from app.lab import worker as W
 from app.lab.db import STRAT_COLUMNS, STRAT_TRACE, LabDB
+from app.trading import killmode as K
 
 
 def _strat(symbol, r=0.5, strategy="pullback", slot=0, **kw):
@@ -512,3 +513,56 @@ def test_audit_route_et_strategies(tmp_path, monkeypatch):
     assert "Audit de la n°" not in bot.strategies_text()                       # pas de cache : rien dans Discord
     AUD.refresh(db, datetime(2026, 10, 11, 3, tzinfo=timezone.utc), 3600)
     assert "Audit de la n° 10 (ancien → nouveau, mêmes trades)" in bot.strategies_text()
+
+
+# --- C5 : Killmode, comparaison journal / labo ---------------------------------------------------------------------
+
+def test_solde_rejoue_le_cote_labo_en_revision_du_labo(monkeypatch):
+    """Le côté labo (r_ibkr) en révision du simulateur des lignes (n° 10) ; les rejeux à la minute du solde de Simão
+    (résolution « prudente », `kw` partagé) restent en révision 1 ; méthode 5 : tout le journal est re-soldé."""
+    from tests.test_killmode import OPEN, RANGE, RUN, _call, spread
+
+    seen = []
+    real = K.SIM.simulate
+
+    def spy(*a, **k):
+        seen.append((k.get("resolution", "v1"), k.get("sim_rev", 1)))
+        return real(*a, **k)
+
+    monkeypatch.setattr(K.SIM, "simulate", spy)
+    call = _call(OPEN + 30 * 60)
+    bars = spread(RANGE + RUN + [(114.7, 115.0, 114.5, 114.8)] * 60)
+    res = K.settle(call, bars)
+    assert K.SETTLE_METHOD == 5 and res["methode"] == 5
+    assert [x for x in seen if x[0] == "v1"] == [("v1", ST.SIM_REV)]
+    assert {rev for resolution, rev in seen if resolution == "prudente"} == {1}
+    five = [b for b in K.CO.aggregate(bars, K.CO.BASE_TF, "stock") if b["t"] >= OPEN + 30 * 60]
+    plan = {"side": "long", "entry": call["entry"], "stop": call["stop"],
+            "targets": [{"price": p} for p in call["targets"]]}
+    lab = real(plan, five, market="stock", decided_at=OPEN + 30 * 60, entry_until=call["until"],
+               exit_at=call["close_ts"], last_price=call["price"], cost=K.SIM.costs("stock", call["entry"]),
+               entry_order="stop", sim_rev=ST.SIM_REV)
+    assert res["r_ibkr"] == round(lab["r_net"] - SS.ibkr_commission_r(call["entry"], call["stop"]), 4)
+
+
+def test_ligne_du_labo_dit_le_tableau_partiel(monkeypatch):
+    from app.lab import db as lab_db
+
+    class Conn:
+        def close(self):
+            pass
+
+    it = {"declenches": 40, "jours": 30, "esperance_ibkr_r": 0.2, "ic95_ibkr": [0.05, 0.35], "temoin": {"ecart_r": 0.3}}
+    rep = {"strategies": {"stock": {"killmode": it}},
+           "partiel": {"stock": {"declaration": 10, "jours_rattrapage": 300, "lignes_exclues": 9000}}}
+    monkeypatch.setattr(lab_db, "open_readonly", lambda: Conn())
+    monkeypatch.setattr(K.SS, "cached", lambda conn: rep)
+    line = K.lab_line(K.lab_item())
+    assert line.startswith(f"🧪 Labo, {K.LAB_SCOPE} (tableau partiel, rattrapage en cours) : +0,20 R par trade")
+    rep["strategies"]["stock"]["killmode"] = {}
+    assert "(tableau partiel, rattrapage en cours) : pas encore de trade rejoué." in K.lab_line(K.lab_item())
+    rep["strategies"]["stock"]["killmode"] = it | {"jours_suivants": it | {"declenches": 12}}
+    assert "(tableau partiel, rattrapage en cours)" in K.lab_line(K.lab_item())
+    for partial in (None, {"crypto": {"declaration": 10, "jours_rattrapage": 3, "lignes_exclues": 0}}):
+        rep["partiel"] = partial                                         # rien en actions : la ligne d'avant
+        assert "partiel" not in K.lab_line(K.lab_item())
