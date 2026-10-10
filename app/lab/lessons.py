@@ -506,10 +506,14 @@ def _pct(x) -> str:
     return f"{x:.0%}" if x is not None else "n/d"
 
 
-def relative(sens: str, esperance: float | None, esperance_20e: float | None = None) -> str | None:
+def relative(sens: str, esperance: float | None, esperance_20e: float | None = None,
+             ecart: float | None = None) -> str | None:
     """Leçon favorable dont les trades concernés ne gagnent pas en absolu : un effet relatif, pas un signal
     d'achat (« relative : moins mauvais que la moyenne, perd encore 0,15 R ») ; None sinon. `esperance_20e` :
-    la même à la mise de Simão (actions) ; la plus basse des deux décide (« … perd encore 0,12 R à 20 € »)."""
+    la même à la mise de Simão (actions) ; la plus basse des deux décide (« … perd encore 0,12 R à 20 € »).
+    `ecart` (concernés - ensemble) ≤ 0 : les concernés ne font même pas mieux que l'ensemble (une « à confirmer »,
+    ou une confirmée retombée sous l'hystérésis) : « pas mieux que la moyenne, perd encore … » ; inconnu : comme
+    positif (fichier du direct d'avant l'écart : une confirmée l'a été sur un écart positif)."""
     if sens != "favorable":
         return None
     at20 = esperance_20e is not None and (esperance is None or esperance_20e < esperance)
@@ -518,7 +522,17 @@ def relative(sens: str, esperance: float | None, esperance_20e: float | None = N
         return None
     unit = " à 20 €" if at20 else ""
     lost = f"perd encore {abs(worst):.2f} R{unit}".replace(".", ",") if worst < 0 else f"ne gagne rien{unit}"
+    if ecart is not None and ecart <= 0:
+        return f"pas mieux que la moyenne, {lost}"
     return f"relative : moins mauvais que la moyenne, {lost}"
+
+
+def _gap(m: dict) -> float | None:
+    """Écart des concernés à l'ensemble ; sur un seul jour (pas de z, écart None), celui des deux espérances."""
+    if m.get("ecart_r") is not None:
+        return m["ecart_r"]
+    e, base = m.get("esperance_r"), m.get("esperance_ensemble_r")
+    return e - base if e is not None and base is not None else None
 
 
 def historical(jours_direct) -> bool:
@@ -540,7 +554,7 @@ def proof(lesson: dict) -> str:
         return "pas encore mesurée"
     if not m.get("n"):
         return "aucun trade concerné depuis la leçon pour l'instant"
-    rel = relative(lesson["sens"], m.get("esperance_r"), m.get("esperance_20e_r")) \
+    rel = relative(lesson["sens"], m.get("esperance_r"), m.get("esperance_20e_r"), _gap(m)) \
         if lesson.get("etat") in ACTIVE else None
     if m.get("jours_rejeu") is None:  # mesure d'avant le compte par origine
         who = f"{m['n']} trades jamais vus par la leçon"
@@ -623,8 +637,8 @@ def write_live(db: LabDB) -> bool:
     return True
 
 
-# Mesures recopiées dans le fichier du direct : étiquettes « relative » (à 20 €) et « (historique) » des plans.
-LIVE_METRICS = ("esperance_r", "esperance_20e_r", "jours_direct")
+# Mesures recopiées dans le fichier du direct : étiquettes « relative » (à 20 €, écart) et « (historique) » des plans.
+LIVE_METRICS = ("esperance_r", "esperance_20e_r", "ecart_r", "jours_direct")
 _cache: dict = {"key": None, "data": []}
 _warned: set[str] = set()
 _index: dict = {"day": None, "bars": None}
@@ -697,7 +711,7 @@ def adjustment(matched: list[dict]) -> dict | None:
 
     def text(x: dict) -> str:
         tags = ["historique"] if historical(x.get("jours_direct")) else []  # confirmée surtout sur le rejeu
-        rel = relative(x["sens"], x.get("esperance_r"), x.get("esperance_20e_r"))
+        rel = relative(x["sens"], x.get("esperance_r"), x.get("esperance_20e_r"), x.get("ecart_r"))
         tags += [rel] if rel else []
         return (f"{'+' if x['sens'] == 'favorable' else '−'}{ADJ_PER:g} #{x['id']} {x['texte']}"
                 + (f" ({' ; '.join(tags)})" if tags else ""))
