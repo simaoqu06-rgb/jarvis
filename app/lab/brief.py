@@ -139,6 +139,7 @@ def _strategies(conn) -> dict | None:
     if not rep:
         return None
     out = {"declaration": {k: (rep.get("declaration") or {}).get(k) for k in ("numero", "essais", "z_candidate")},
+           "partiel": rep.get("partiel"),  # I2 : rattrapage d'une nouvelle déclaration en cours (tableau partiel)
            "marches": {}}
     for market, strats in (rep.get("strategies") or {}).items():
         out["marches"][market] = {

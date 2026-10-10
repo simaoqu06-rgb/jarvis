@@ -524,6 +524,10 @@ def test_brief_et_lignes_plus10_et_killmode(monkeypatch):
     got = BRIEF._strategies(None)["marches"]["stock"]["pullback"]
     assert (got["candidate"], got["candidate_compte"], got["rentable_20e"], got["mise_20e_r"]) == (True, False, False,
                                                                                                     -0.05)
+    # Relecture : le council du soir sait que le tableau est partiel pendant le rattrapage (I2).
+    part = {"stock": {"declaration": 10, "jours_rattrapage": 120, "lignes_exclues": 5000}}
+    monkeypatch.setattr(SS, "cached", lambda conn: {"strategies": {}, "partiel": part})
+    assert BRIEF._strategies(None)["partiel"] == part
     line = K.lab_line(item | {"esperance_ibkr_r": 0.2})
     assert "☑️ avantage au labo, perd à 20 €" in line and "✅" not in line
     assert "✅ candidate au labo" in K.lab_line(item | {"esperance_ibkr_r": 0.2, "candidate_compte": True})

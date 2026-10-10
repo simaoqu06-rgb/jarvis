@@ -80,6 +80,7 @@ import json
 import math
 import sqlite3
 from collections import defaultdict
+from contextlib import contextmanager
 from datetime import date, datetime
 from statistics import NormalDist
 
@@ -719,6 +720,21 @@ def partial(conn: sqlite3.Connection) -> dict:
     return out
 
 
+@contextmanager
+def declaration_view(conn: sqlite3.Connection, part: dict | None):
+    """I2 : pendant un rattrapage (`part` = partial), une vue temporaire du même nom masque strat_trades pour cette
+    connexion (lecture seule comprise) et ne garde que les lignes de la déclaration en vigueur ; retirée à la sortie.
+    Pour tout ce qui lit strat_trades le temps d'un rapport (tableau, autopsie)."""
+    try:
+        if part:
+            keep = " OR ".join(f"(market = '{m}' AND declaration IS NOT {int(p['declaration'])})" for m, p in part.items())
+            conn.execute("DROP VIEW IF EXISTS temp.strat_trades")
+            conn.execute(f"CREATE TEMP VIEW strat_trades AS SELECT * FROM main.strat_trades WHERE NOT ({keep})")
+        yield
+    finally:
+        conn.execute("DROP VIEW IF EXISTS temp.strat_trades")
+
+
 def _open_bucket(x: float) -> str:
     return next(label for lo, hi, label in OPEN_BUCKETS if lo < x <= hi)
 
@@ -799,26 +815,19 @@ def report(conn: sqlite3.Connection) -> dict:
            "confirmation_go": None, "killmode_complet": None, "potentiel_plus10": None, "diagnostic_v1": {},
            "entree_v1": None}
     try:  # base pas encore migrée par le worker (lecture seule) : tableau vide plutôt qu'une erreur
-        # I2 : pendant un rattrapage, le tableau ne lit que les lignes de la déclaration en vigueur ; une vue
-        # temporaire du même nom masque strat_trades pour cette connexion (lecture seule comprise), le temps du rapport.
+        # I2 : pendant un rattrapage, le tableau ne lit que les lignes de la déclaration en vigueur (declaration_view).
         out["partiel"] = partial(conn) or None
-        if out["partiel"]:
-            keep = " OR ".join(f"(market = '{m}' AND declaration IS NOT {int(p['declaration'])})"
-                               for m, p in out["partiel"].items())
-            conn.execute("DROP VIEW IF EXISTS temp.strat_trades")
-            conn.execute(f"CREATE TEMP VIEW strat_trades AS SELECT * FROM main.strat_trades WHERE NOT ({keep})")
-        out["strategies"] = _strategies(conn)
-        out["sorties_gemini"] = out["strategies"].pop("_n6", None)
-        out["killmode"] = out["strategies"].pop("_kill", None)
-        out["confirmation_go"] = out["strategies"].pop("_n7", None)
-        out["killmode_complet"] = KC.report(conn, trials)
-        out["potentiel_plus10"] = P10.report(conn, trials)
-        out["diagnostic_v1"] = diagnostic_v1(conn)
-        out["entree_v1"] = entree_v1_appariee(conn)  # n° 10 (L4)
+        with declaration_view(conn, out["partiel"]):
+            out["strategies"] = _strategies(conn)
+            out["sorties_gemini"] = out["strategies"].pop("_n6", None)
+            out["killmode"] = out["strategies"].pop("_kill", None)
+            out["confirmation_go"] = out["strategies"].pop("_n7", None)
+            out["killmode_complet"] = KC.report(conn, trials)
+            out["potentiel_plus10"] = P10.report(conn, trials)
+            out["diagnostic_v1"] = diagnostic_v1(conn)
+            out["entree_v1"] = entree_v1_appariee(conn)  # n° 10 (L4)
     except sqlite3.Error as exc:
         out["erreur"] = f"base pas encore prête : {exc}"
-    finally:
-        conn.execute("DROP VIEW IF EXISTS temp.strat_trades")
     return out
 
 

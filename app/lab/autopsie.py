@@ -260,11 +260,20 @@ def go_indicatif(conn: sqlite3.Connection) -> dict:
 
 
 def report(conn: sqlite3.Connection) -> dict:
+    from app.lab import strat_stats as SS  # import tardif : comme go_indicatif
     from app.lab import validator as V
 
     version = V.current_version(conn)
-    return {"version": version, "v1": v1_report(conn, version), "strategies": strat_report(conn),
-            "grade_indicatif": go_indicatif(conn),
+    # I2, n° 10 : pendant un rattrapage, les lignes du labo v2 sont celles de la déclaration en vigueur, comme le tableau
+    # (sinon le grade indicatif des GO confirmés mêlait les deux révisions du simulateur pendant des jours).
+    part = SS.partial(conn) or None
+    with SS.declaration_view(conn, part):
+        strategies, indicatif = strat_report(conn), go_indicatif(conn)
+    if part and "stock" in part:  # grade indicatif : actions seulement ; dit avec lui (!grade, API, brief)
+        for res in indicatif.values():
+            res["partiel"] = part["stock"]
+    return {"version": version, "v1": v1_report(conn, version), "strategies": strategies,
+            "grade_indicatif": indicatif, "partiel": part,
             "references": {"elan_1r": "50 % : repère théorique seulement (marche aléatoire, barrières fixes) ; biaisé vers le bas "
                                        "ici (bougies de 5 min, stop remonté à l'entrée) ; la référence valable serait "
                                        "un témoin apparié, pas encore mesuré",
@@ -339,7 +348,7 @@ def compact(data: dict | None, per_market: int = 6) -> dict | None:
             "strategies": {mk: {k: slim(v) for k, v in groups.items() if not v.get("echantillon_faible")}
                            for mk, groups in (data.get("strategies") or {}).items()},
             "grade_indicatif": data.get("grade_indicatif"), "limites": data.get("limites"),
-            "calcule_le": data.get("calcule_le")}
+            "partiel": data.get("partiel"), "calcule_le": data.get("calcule_le")}
 
 
 def indicatif_lines(gi: dict | None) -> list[str]:
@@ -356,7 +365,17 @@ def indicatif_lines(gi: dict | None) -> list[str]:
                if (win.get("trou_max_jours") or 0) > STATS.GAP_DAYS else "")
         lines.append(f"-# {res['nom']} : **{t['grade']}** indicatif · {t['esperance_r']:+.3f} R par trade "
                      f"(IC95 {ci[0]:+.3f} ; {ci[1]:+.3f}) sur {t['trades']} trades / {t['jours']} jours · {per_go}{gap}")
+    part = next((res["partiel"] for res in (gi or {}).values() if res.get("partiel")), None)
+    if part:
+        lines.append(f"-# ⏳ Grade indicatif : {_partial_text(part)}")
     return lines
+
+
+def _partial_text(part: dict) -> str:
+    """I2 : rattrapage d'une nouvelle déclaration en cours, seules ses lignes sont lues."""
+    n = part["jours_rattrapage"]
+    return (f"rattrapage de la déclaration n° {part['declaration']} en cours (encore {n} jour{'s' if n > 1 else ''}), "
+            "seuls les jours déjà refaits comptent")
 
 
 def text(data: dict | None, market: str | None = None) -> str:
@@ -366,6 +385,9 @@ def text(data: dict | None, market: str | None = None) -> str:
                 "après le déploiement).")
     markets = [market] if market else ["stock", "crypto"]
     lines = ["🩺 **Autopsie des trades du labo** (où ils échouent ; pistes à déclarer, jamais des règles)"]
+    for mk, part in (data.get("partiel") or {}).items():
+        if mk in markets:
+            lines.append(f"-# ⏳ Stratégies {MARKET_FR.get(mk, mk)} : {_partial_text(part)}")
     for mk in markets:
         groups = (data.get("v1") or {}).get(mk) or {}
         if not groups:

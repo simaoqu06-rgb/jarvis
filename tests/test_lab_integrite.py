@@ -207,6 +207,43 @@ def test_rattrapage_a_moitie_fait_ne_montre_que_la_declaration_en_vigueur(tmp_pa
     assert "Tableau partiel" not in SS.text(rep)
 
 
+def test_autopsie_pendant_un_rattrapage_ne_lit_que_la_declaration_en_vigueur(tmp_path):
+    """Relecture : le grade indicatif des GO confirmés (!grade, brief) et l'autopsie lisaient strat_trades sans le filtre
+    du tableau : pendant le rattrapage de la n° 10 ils mêlaient les deux révisions du simulateur (la 1, biaisée en
+    faveur de l'ordre stop des GO confirmés)."""
+    path = str(tmp_path / "lab.db")
+    db = LabDB(path)
+    job = ST.progress_job("stock")
+    db.set("replay:stock", "start", "2026-09-14")
+    db.set("replay:stock", "last_day", "2026-09-16")
+    db.put_bars("stock", "SPY", 1440, [{"t": CO.ny_midnight(date(2026, 9, 16)), "o": 1, "h": 1, "l": 1, "c": 1}])
+    db.set(job, "rattrapage:replay", "2026-09-14")
+    col = ST.ref_exit("go_confirme")
+    go = {"strategy": "go_confirme", "slot": 0, "triggered": 1, "r_net": 0.5, col: 0.5, "exit_reason": "stop",
+          "mfe_r": 0.6, "mae_r": -0.5, "tp1_hit": 0}
+    db.replace_strat("replay", "stock", "2026-09-14", [go | {"symbol": s} for s in ("AAA", "BBB")])
+    db.conn.executemany(f"INSERT INTO strat_trades (origin, market, symbol, day, strategy, slot, triggered, r_net, {col}, "
+                        "exit_reason, mfe_r, mae_r, tp1_hit, declaration) VALUES ('replay', 'stock', ?, ?, 'go_confirme', "
+                        "0, 1, -1.0, -1.0, 'stop', 0.1, -1.0, 0, ?)",
+                        [("AAA", "2026-09-15", ST.DECLARATION - 1), ("BBB", "2026-09-16", None)])
+    rep = AUT.report(db.conn)
+    gi = rep["grade_indicatif"]["go_confirme"]
+    assert gi["par_go"]["go"] == 2 and gi["par_go"]["esperance_r"] == 0.5          # les lignes à −1 R sont exclues
+    assert rep["strategies"]["stock"]["go_confirme"]["trades"] == 2
+    assert rep["partiel"]["stock"]["jours_rattrapage"] == 2 and gi["partiel"] == rep["partiel"]["stock"]
+    assert db.conn.execute("SELECT COUNT(*) FROM strat_trades").fetchone()[0] == 4    # vue temporaire retirée
+    note = "rattrapage de la déclaration n° 10 en cours (encore 2 jours), seuls les jours déjà refaits comptent"
+    assert f"Grade indicatif : {note}" in "\n".join(AUT.indicatif_lines(rep["grade_indicatif"]))
+    assert f"Stratégies actions : {note}" in AUT.text(rep) and AUT.compact(rep)["partiel"] == rep["partiel"]
+    ro = DB.open_readonly(path)                                 # serveur web (/api/lab/autopsie) : lecture seule
+    assert AUT.report(ro)["grade_indicatif"]["go_confirme"]["par_go"]["go"] == 2
+    ro.close()
+    db.set(job, "rattrapage:replay", "2026-09-16")
+    rep = AUT.report(db.conn)
+    assert rep["partiel"] is None and rep["grade_indicatif"]["go_confirme"]["par_go"]["go"] == 4
+    assert "rattrapage" not in "\n".join(AUT.indicatif_lines(rep["grade_indicatif"]))
+
+
 # --- I4 : données manquantes ----------------------------------------------------------------------------------
 
 SYMS = ["AAA", "BBB", "SPY"]
