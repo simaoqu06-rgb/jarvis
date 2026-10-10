@@ -517,6 +517,9 @@ def test_declaration_ecrite_avant_les_chiffres():
     section = doc.split("## Déclaration n° 10 (10 octobre 2026)")[1].split("## Bloc scellé")[0]
     assert ST.REGISTERED_ON == "2026-10-10" and len(ST.trials()) == 152 and "**Essais : 152" in section
     assert "Hypothèses pour la n° 11" in section and f"{ST.WITNESS_DRAWS} au lieu de 5" in section
+    # Relecture : ce que fait le rattrapage (échecs, résumé du soir, autopsie) et pourquoi Killmode complet est refait.
+    assert "puis calculé sans les symboles en échec" in section and "l'heure du résumé du soir" in section
+    assert "l'autopsie et le grade indicatif" in section and "comprend la révision du simulateur" in section
 
 
 def test_brief_et_lignes_plus10_et_killmode(monkeypatch):

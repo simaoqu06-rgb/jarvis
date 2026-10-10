@@ -958,12 +958,15 @@ regroupement d'actions.
 ### Coût
 
 Rattrapage complet des deux marchés (`progress_job` : `strats:stock:d10`, `strats:crypto:d10`), bougies relues à la
-source : plusieurs minutes par séance d'actions, hors séance seulement. Les séances de la n° 9 sont recalculées (marque
-`plus10.MESURE`, le tableau ne lit que les recalculées), et celles de Killmode complet aussi (l'empreinte de coût
-change avec les nouvelles variantes). Les jours du direct en actions attendent leur journalier (relu au passage de
-la séance suivante), puis le rattrapage, qui traite d'abord l'arriéré du rejeu. Jusqu'à la fin du rattrapage, le
-tableau ne montre que les lignes de la n° 10, avec la mention « Tableau partiel : N jours en rattrapage » : les
-lignes d'avant sont exclues, jamais mélangées.
+source : plusieurs minutes par séance d'actions, hors séance seulement, et sans déborder sur l'heure du résumé du soir.
+Un jour que la source refuse est retenté aux deux passages suivants, puis calculé sans les symboles en échec, ou
+sauté si plus de la moitié de l'univers manque (ses lignes d'avant sont alors effacées). Les séances de la n° 9 sont
+recalculées (marque `plus10.MESURE`, le tableau ne lit que les recalculées), et celles de Killmode complet aussi
+(l'empreinte de coût comprend la révision du simulateur et change aussi avec les nouvelles variantes). Les jours du
+direct en actions attendent leur journalier (relu au passage de la séance suivante), puis le rattrapage, qui traite
+d'abord l'arriéré du rejeu. Jusqu'à la fin du rattrapage, le tableau, l'autopsie et le grade indicatif des GO
+confirmés ne lisent que les lignes de la n° 10, avec la mention « Tableau partiel : N jours en rattrapage » (et
+« rattrapage … en cours » dans `!autopsie` et `!grade`) : les lignes d'avant sont exclues, jamais mélangées.
 
 ### Limites
 
