@@ -298,6 +298,16 @@ async def step(db: LabDB, max_seconds: float, transport=None) -> int | str:
 
 # --- Tableau (lecture seule) -----------------------------------------------------------------------
 
+def stale_days(conn: sqlite3.Connection) -> int:
+    """Lot 2 (C4) : séances dont des lignes sont à une autre méthode de coût (cost_fingerprint), à recalculer ; 0 sur une
+    base sans Killmode complet."""
+    try:
+        return conn.execute("SELECT COUNT(DISTINCT day) FROM kill_complet WHERE cout IS NOT ?",
+                            (cost_fingerprint(),)).fetchone()[0]
+    except sqlite3.Error:
+        return 0
+
+
 def report(conn: sqlite3.Connection, trials: int) -> dict | None:
     """Mesures de la déclaration n° 8 sur les lignes de l'empreinte déclarée et du coût en vigueur ; None avant la
     première séance."""

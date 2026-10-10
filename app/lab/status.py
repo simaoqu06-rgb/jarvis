@@ -7,6 +7,7 @@ confiance, fiches catalyseurs, règles en attente et testées.
 Avis du 10 octobre (I2, I4) : jours sautés (skipped:<D>, retirés des jours faits), jours calculés sans quelques
 symboles que la source n'a pas donnés (missing_symbols), valeurs de l'univers sans trade (absent), et trades par
 révision du code (trades.code_rev) pour voir quand une même version mélange plusieurs codes.
+Lot 2 (C4) : une ligne « n° 10 : complète » ou ce qui reste à re-mesurer (declaration_state), aussi dans le brief.
 """
 import json
 import sqlite3
@@ -103,6 +104,7 @@ def status(path: str | None = None) -> dict:
         except sqlite3.Error:
             pass
         out["labo_v2"] = labo_v2(conn)
+        out["n10"] = declaration_state(conn)
         from app.lab import archive as ARC  # import tardif, comme runner
 
         out["archive_actus"] = ARC.counts(conn)
@@ -136,6 +138,49 @@ def labo_v2(conn: sqlite3.Connection) -> dict:
     except sqlite3.Error:
         pass
     return out
+
+
+def declaration_state(conn: sqlite3.Connection) -> dict | None:
+    """Lot 2 (C4) : la déclaration en vigueur est-elle entièrement mesurée ? Jours à rattraper (tableau des stratégies,
+    strat_stats.partial : marché partiel tant qu'il reste des jours du rejeu ou des lignes d'avant), lignes d'avant
+    encore exclues, séances de la n° 9 et de Killmode complet à recalculer. « complete » : tout est à zéro, condition
+    écrite pour déclarer la suivante (docs/labo-strategies.md, « Avant la n° 11 »). None si la base n'est pas lisible."""
+    from app.lab import kill_complet as KC  # imports tardifs : tirent killmode, runner et generator
+    from app.lab import plus10 as P10
+    from app.lab import strat_stats as SS
+    from app.lab import strategies as ST
+
+    try:
+        part = SS.partial(conn)
+        out = {"numero": ST.LATEST_DECLARATION,
+               "jours": {m: (part.get(m) or {}).get("jours_rattrapage", 0) for m in ("stock", "crypto")},
+               "lignes_anciennes": {m: (part.get(m) or {}).get("lignes_exclues", 0) for m in ("stock", "crypto")},
+               "seances_n9": P10.a_recalculer(conn), "seances_kill_complet": KC.stale_days(conn)}
+    except sqlite3.Error:
+        return None
+    out["complete"] = not part and not out["seances_n9"] and not out["seances_kill_complet"]
+    return out
+
+
+def declaration_line(n: dict | None) -> str | None:
+    """« n° 10 : complète », ou ce qui reste à re-mesurer."""
+    if not n:
+        return None
+    head = f"n° {n['numero']}"
+    if n["complete"]:
+        return f"{head} : complète (stratégies, n° 9 et Killmode complet re-mesurés)"
+    days, old, parts = n["jours"], n["lignes_anciennes"], []
+    if days["stock"] or days["crypto"]:
+        parts.append(f"{days['stock']} j actions, {days['crypto']} j crypto à rattraper")
+    stray = sum(old[m] for m in old if not days[m])
+    if stray:
+        parts.append(f"{stray} ligne{'s' if stray > 1 else ''} d'avant sans jour à refaire (exclue{'s' if stray > 1 else ''})")
+    if n["seances_n9"]:
+        parts.append(f"{n['seances_n9']} séance{'s' if n['seances_n9'] > 1 else ''} n° 9 à recalculer")
+    if n["seances_kill_complet"]:
+        parts.append(f"{n['seances_kill_complet']} séance{'s' if n['seances_kill_complet'] > 1 else ''} Killmode "
+                     "complet à recalculer")
+    return f"⏳ {head} : " + ", ".join(parts)
 
 
 def headline(conn: sqlite3.Connection) -> dict:
@@ -219,6 +264,8 @@ def text(st: dict) -> str:
         lines.append(f"Labo v2 : {sum((v2.get('lignes') or {}).values())} lignes de stratégies (`!strategies`)"
                      + (f" · rattrapage : {left.get('stock', 0)} jours actions, {left.get('crypto', 0)} jours crypto"
                         if any(left.values()) else ""))
+    if st.get("n10"):  # lot 2 (C4)
+        lines.append(declaration_line(st["n10"]))
     if st.get("archive_actus"):
         from app.lab import archive as ARC
 

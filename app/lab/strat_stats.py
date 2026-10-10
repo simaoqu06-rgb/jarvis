@@ -703,22 +703,36 @@ def diagnostic_v1(conn: sqlite3.Connection) -> dict:
 
 def partial(conn: sqlite3.Connection) -> dict:
     """I2 : marchés en rattrapage d'une nouvelle déclaration, jours restants et lignes d'une autre déclaration (ou
-    d'avant le suivi, NULL) : tant que le rattrapage n'a pas refait tous les jours, elles sortent du tableau."""
+    d'avant le suivi, NULL) : tant qu'il en reste, elles sortent du tableau.
+
+    Lot 2 (C3) : l'exclusion ne dépend plus des jours restants. Avant, d'anciennes lignes au-delà du dernier journalier
+    (ou d'un jour que le rattrapage n'a pas pu refaire) revenaient dans le tableau dès que remaining() tombait à 0.
+    Un marché est « partiel » s'il reste des jours du REJEU à rattraper, ou d'anciennes lignes une fois la déclaration
+    en route (curseurs du rattrapage posés, ou lignes de la déclaration déjà écrites, ou jours encore dus). Un jour du
+    direct qui attend seulement son calcul (journalier de la séance suivante, puis rattrapage) n'est pas une révision
+    en cours : seul, il ne rend pas le tableau partiel ; il est compté dans les jours restants quand le marché l'est."""
     from app.lab import rattrapage as RAT  # import tardif : tire runner et generator
 
     out = {}
     for market in ("stock", "crypto"):
-        left = sum(RAT.remaining(conn, market).values())
-        if not left:
-            continue
         decl = ST.CRYPTO_DECLARATION if market == "crypto" else ST.DECLARATION
         try:
             old = conn.execute("SELECT COUNT(*) FROM strat_trades WHERE market = ? AND declaration IS NOT ?",
                                (market, decl)).fetchone()[0]
         except sqlite3.OperationalError:  # base pas encore migrée (lecture seule) : rien ne dit la déclaration
             continue
-        out[market] = {"declaration": decl, "jours_rattrapage": left, "lignes_exclues": old}
+        left = RAT.remaining(conn, market)
+        if not left["replay"] and not (old and (left["live"] or _started(conn, market, decl))):
+            continue
+        out[market] = {"declaration": decl, "jours_rattrapage": sum(left.values()), "lignes_exclues": old}
     return out
+
+
+def _started(conn: sqlite3.Connection, market: str, decl: int) -> bool:
+    """La déclaration du marché a commencé à écrire : curseurs du rattrapage ou frontière posés, ou lignes écrites."""
+    return bool(conn.execute("SELECT 1 FROM progress WHERE job = ? LIMIT 1", (ST.progress_job(market),)).fetchone()
+                or conn.execute("SELECT 1 FROM strat_trades WHERE market = ? AND declaration = ? LIMIT 1",
+                                (market, decl)).fetchone())
 
 
 @contextmanager
@@ -967,8 +981,10 @@ def text(rep: dict | None) -> str:
         n, m = p["jours_rattrapage"], p["lignes_exclues"]
         old = (f"{m} ligne{'s' if m > 1 else ''} de l'ancienne déclaration exclue{'s' if m > 1 else ''}" if m
                else "aucune ligne d'une autre déclaration")
-        lines.append(f"⏳ Tableau partiel ({MARKET_FR.get(market, market).lower()}) : {n} jour{'s' if n > 1 else ''} en "
-                     f"rattrapage, {old} (n° {p['declaration']} seule en attendant)")
+        days = (f"{n} jour{'s' if n > 1 else ''} en rattrapage" if n
+                else "aucun jour en rattrapage")  # C3 : d'anciennes lignes sans jour à refaire restent exclues
+        lines.append(f"⏳ Tableau partiel ({MARKET_FR.get(market, market).lower()}) : {days}, {old} "
+                     f"(n° {p['declaration']} seule en attendant)")
     for market, items in (rep.get("strategies") or {}).items():
         lines.append(f"**{MARKET_FR.get(market, market)}**")
         for name, it in items.items():
