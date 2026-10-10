@@ -692,6 +692,16 @@ témoin qu'au-delà d'environ 0,5 R, même à 100 KILL. L'archive (section préc
   l'empreinte de cette méthode de coût (`kill_complet.cost_fingerprint`, calculée sur des trades types) : si elle
   change, les séances déjà calculées sont recalculées et ne comptent pas en attendant (`!strategies` dit combien),
   pour que toutes les séances aient le même coût. Un changement de méthode après une première lecture se note ici.
+- **Amendement du 10 octobre 2026, avant toute séance calculée** (aucune ligne de Killmode complet n'existait :
+  l'archive attendait encore ses profils) : exécutions aux **prix réellement négociés**, comme la n° 9. Bougies de
+  5 min non ajustées (`adjustment=raw`), journalier remis à l'échelle de la clôture brute de la veille
+  (`kill_complet.traded_prices`). Un gapper dont le gap brut et le gap ajusté de l'archive divergent de plus de 25 %
+  (opération sur titre entre la veille et la séance) est écarté et compté à part. Raison : avec les bougies ajustées
+  des divisions connues aujourd'hui, le demi-pas, les 3 cents, les actions entières, la commission par action, le
+  minimum de 1 $ et la règle sous 1 $ étaient calculés sur des prix qu'aucun trader n'a vus, ce qui sous-estime les
+  coûts avant un regroupement d'actions (fréquent sur les petites valeurs qui gappent). La base des prix entre dans
+  l'empreinte de coût : une ligne calculée sur une autre base serait recalculée. Ni le critère, ni les groupes, ni
+  les seuils ne changent.
 - **Mesure secondaire (essai `killmode_complet_ecart_temoin`)** : écart KILL − témoin propre **apparié par jour** :
   une valeur par séance où les deux groupes ont au moins un trade déclenché (moyenne des KILL − moyenne des témoins
   propres, en `r_20e`). Le catalyseur « aide » si cet écart est positif avec t ≥ seuil sur ces séances et au moins

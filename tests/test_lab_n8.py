@@ -275,9 +275,12 @@ def kill_db(monkeypatch):
     session = bars_from(OPEN, RANGE + RUN + [FLAT_END] * (78 - len(RANGE) - len(RUN)))
     calls = []
 
-    async def fake_bars(symbols, tf, start, end, transport=None):
+    async def fake_bars(symbols, tf, start, end, transport=None, adjustment="split"):
         calls.append(list(symbols))
+        db.adjustments.append(adjustment)
         return {s: hist() + session for s in symbols}
+
+    db.adjustments = []
 
     monkeypatch.setattr(SRC, "alpaca_bars", fake_bars)
     db.alpaca_calls = calls
@@ -293,6 +296,7 @@ def test_empreinte_figee_par_la_declaration():
 async def test_killmode_complet_rejoue_le_catalyseur(kill_db):
     assert KC.ready_days(kill_db) == [DAY]
     assert await KC.step(kill_db, 60) == 1 and kill_db.alpaca_calls == [sorted(GAPPERS)]
+    assert kill_db.adjustments == ["raw"]                                   # prix réellement négociés
     rows = {r[0]: r[1:] for r in kill_db.conn.execute(
         "SELECT symbol, groupe, codes, motif, triggered, r_20e, r_3c, empreinte, actus FROM kill_complet")}
     assert {s: r[0] for s, r in rows.items()} == {"KILL": "kill", "PROP": "temoin_propre", "VETO": "temoin_autre",
@@ -301,10 +305,14 @@ async def test_killmode_complet_rejoue_le_catalyseur(kill_db):
     assert json.loads(rows["PROP"][1]) == ["pas_de_positive"] and "negatives" in json.loads(rows["VETO"][1])
     assert all(r[3] == 1 and r[4] is not None and r[5] is not None and r[6] == KC.CATALYST_CODE_N8
                for r in rows.values())
-    lab = ST.strategy_rows(ST.Day("stock", DAY, CO.regular_hours(hist())[-ST.STOCK_WARMUP_BARS:]
-                                  + bars_from(OPEN, RANGE + RUN + [FLAT_END] * 65), daily()), "KILL", names=["killmode"])
+    session = bars_from(OPEN, RANGE + RUN + [FLAT_END] * 65)
+    scaled, _ = KC.traded_prices(CO.regular_hours(hist()), session, daily(), 5.0)
+    assert scaled[-1]["c"] == pytest.approx(CO.regular_hours(hist())[-1]["c"])   # journalier à l'échelle du brut
+    lab = ST.strategy_rows(ST.Day("stock", DAY, CO.regular_hours(hist())[-ST.STOCK_WARMUP_BARS:] + session, scaled),
+                           "KILL", names=["killmode"])
     assert rows["KILL"][4] == lab[0]["r_20e"] and lab[0]["signal_at"] == int(DECIDE.timestamp())
-    assert kill_db.get(KC.JOB, DAY.isoformat()) == {"gappers": 5, "archives": 5, "signaux": 5}
+    assert kill_db.get(KC.JOB, DAY.isoformat()) == {"gappers": 5, "archives": 5, "signaux": 5, "operations": 0,
+                                                    "sans_historique": 0}
     assert KC.ready_days(kill_db) == [] and await KC.step(kill_db, 60) == 0
     rep = KC.report(kill_db.conn, 148)
     assert rep["groupes"]["kill"]["declenches"] == 1 and rep["groupes"]["donnees"]["signaux"] == 1
@@ -360,6 +368,24 @@ async def test_mesure_arretee_si_le_catalyseur_change(kill_db, monkeypatch):
     assert (await KC.step(kill_db, 60)).startswith("arrêté")
     rep = KC.report(kill_db.conn, 148)
     assert rep["figee"] is False and "mesure arrêtée" in KC.text(rep)
+
+
+async def test_operation_sur_titre_ecartee(kill_db):
+    # Gap ajusté de l'archive (+5 %) contre gap brut (~+4,5 %) : concordants. Un regroupement d'actions 1 pour 10
+    # entre la veille et la séance donne un gap ajusté sans rapport avec le gap brut : le gapper est écarté.
+    kill_db.conn.execute("UPDATE gap_news SET gap_pct = 950.0 WHERE symbol = 'PROP'")
+    assert await KC.step(kill_db, 60) == 1
+    assert "PROP" not in {s for (s,) in kill_db.conn.execute("SELECT symbol FROM kill_complet")}
+    assert kill_db.get(KC.JOB, DAY.isoformat())["operations"] == 1
+    rep = KC.report(kill_db.conn, 148)
+    assert rep["operations_sur_titre"] == 1 and "1 sur une opération sur titre" in KC.text(rep)
+    assert KC.traded_prices([], [], daily(), 5.0) == (None, "donnees")
+
+
+def test_base_des_prix_dans_l_empreinte(monkeypatch):
+    before = KC.cost_fingerprint()
+    monkeypatch.setattr(KC, "PRICES", "ajuste")
+    assert KC.cost_fingerprint() != before          # des lignes calculées sur une autre base seraient recalculées
 
 
 async def test_seances_recalculees_quand_le_cout_change(kill_db, monkeypatch):

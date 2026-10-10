@@ -6,7 +6,10 @@ résultats de D − 10 à D + 30, profil de chaque société), chaque gapper arc
 1. la règle de prix de Killmode, celle du labo (strategies.strategy_rows, stratégie killmode) sur les bougies
    de 5 min SIP d'Alpaca redemandées et gardées en mémoire seulement, comme le rattrapage : ordre posé à 9 h 45
    New York (fin du range de 15 min), sorties et coûts du labo, dont r_20e (mise de Simão) et r_3c (stress de
-   3 cents) ; un gapper sans signal de la règle n'est pas noté ;
+   3 cents) ; un gapper sans signal de la règle n'est pas noté. Amendement du 10 octobre 2026, avant toute
+   séance calculée : prix réellement négociés, comme la n° 9 (bougies non ajustées, journalier remis à l'échelle
+   de la clôture brute de la veille, traded_prices) ; une opération sur titre entre la veille et la séance
+   écarte le gapper (compté à part) ;
 2. le pilier catalyseur du direct, le même code : catalyst.check(symbole, 9 h 45) lit l'archive au lieu de
    Finnhub (ArchiveFinnhub, mêmes signatures), puis killmode.catalyst_codes. Le code est figé par son empreinte
    (CATALYST_CODE_N8, killmode.CATALYST_CODE le jour de la déclaration) : s'il change, la mesure s'arrête ;
@@ -19,8 +22,8 @@ Mesure principale (essai killmode_complet) : espérance de r_20e des KILL décle
 Mesure secondaire (essai killmode_complet_ecart_temoin) : écart KILL − témoin propre apparié par jour, une valeur
 par séance où les deux groupes ont un trade déclenché (moyenne des KILL − moyenne des témoins propres).
 Mesure sans essai : les KILL par motif (killmode.call_motif : résultats, fond, mouvement).
-r_20e et r_3c suivent killmode.real_r et stressed_r en vigueur : chaque ligne garde l'empreinte de cette méthode de
-coût (cost_fingerprint) ; quand elle change (PR #44 : gain compté en actions entières), les séances déjà calculées
+r_20e et r_3c suivent killmode.real_r et stressed_r en vigueur, aux prix négociés : chaque ligne garde l'empreinte de
+cette méthode de coût (cost_fingerprint) ; quand elle change (PR #44 : gain compté en actions entières), les séances déjà calculées
 sont recalculées et ne comptent pas en attendant, pour que toutes les séances aient le même coût.
 Le direct relit le catalyseur pendant toute la vie de l'ordre ; le labo le lit une fois, à 9 h 45.
 """
@@ -36,6 +39,7 @@ from app.core.http import SourceError
 from app.lab import archive as ARC
 from app.lab import collector as CO
 from app.lab import heartbeat
+from app.lab import plus10 as P10
 from app.lab import seal as SEAL
 from app.lab import sources as SRC
 from app.lab import strat_stats as SS
@@ -59,6 +63,8 @@ EARNINGS_KEYS = ("date", "hour", "eps_estimate", "eps_actual", "revenue_estimate
 NEWS_KEYS = ("title", "url", "published_at", "source", "summary")
 COLUMNS = ("day", "symbol", "groupe", "codes", "motif", "empreinte", "gap_pct", "atr_pct", "entry", "stop",
            "signal_at", "triggered", "exit_reason", "r_net", "r_20e", "r_3c", "actus", "cout")
+# Base des prix des exécutions (amendement du 10 octobre 2026) : changer de base recalcule toutes les séances.
+PRICES = "brut"
 # Trades types (sorties du simulateur, actions) qui fixent la méthode de coût : leurs r_20e et r_3c changent dès
 # que killmode.real_r ou stressed_r changent. Gros et petit nombre d'actions, sous 1 $, TP, stop, stop à
 # l'entrée, clôture.
@@ -77,8 +83,8 @@ def frozen() -> bool:
 
 
 def cost_fingerprint() -> str:
-    """Empreinte de la méthode de coût en vigueur (r_20e et r_3c des COST_PROBES)."""
-    values = [ST.cost_variants("stock", p) for p in COST_PROBES]
+    """Empreinte de la méthode de coût en vigueur : base des prix (PRICES) et r_20e et r_3c des COST_PROBES."""
+    values = [PRICES] + [ST.cost_variants("stock", p) for p in COST_PROBES]
     return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()[:10]
 
 
@@ -180,6 +186,19 @@ def calendar(db: LabDB, day: date) -> dict[str, dict | None]:
     return out
 
 
+def traded_prices(hist5: list[dict], session: list[dict], daily: list[dict],
+                  gap_pct: float) -> tuple[list[dict] | None, str | None]:
+    """Journalier ajusté remis à l'échelle des prix négociés (clôture brute de la veille / clôture ajustée), comme la
+    n° 9 (plus10.symbol_rows) ; (None, raison) sans historique brut (« donnees ») ou quand le gap brut et le gap
+    ajusté de l'archive divergent de plus de plus10.OP_RATIO (« operation_titre » entre la veille et la séance)."""
+    raw_prev = hist5[-1]["c"] if hist5 else None
+    if not raw_prev or raw_prev <= 0 or not daily or daily[-1]["c"] <= 0:
+        return None, "donnees"
+    if abs((session[0]["o"] / raw_prev) / (1 + gap_pct / 100) - 1) > P10.OP_RATIO:
+        return None, "operation_titre"
+    return P10.scale(daily, raw_prev / daily[-1]["c"]), None
+
+
 def price_rule(day: date, symbol: str, hist5: list[dict], session: list[dict], daily: list[dict]) -> dict | None:
     """Ligne de la stratégie killmode du labo pour ce gapper (comme strategies.stock_day), None sans signal."""
     bars = CO.regular_hours(hist5[-ST.STOCK_WARMUP_BARS * 2:])[-ST.STOCK_WARMUP_BARS:] + session
@@ -194,9 +213,9 @@ async def day_rows(db: LabDB, day: date, transport=None) -> tuple[list[dict], di
     """Lignes d'une séance prête et ses comptes (gappers listés, archivés, signaux de la règle de prix)."""
     key, cost = day.isoformat(), cost_fingerprint()
     listed = db.conn.execute("SELECT COUNT(*) FROM gap_news WHERE day = ?", (key,)).fetchone()[0]
-    gappers = db.conn.execute("SELECT symbol, news, news_from FROM gap_news WHERE day = ? AND status = 'ok' "
+    gappers = db.conn.execute("SELECT symbol, news, news_from, gap_pct FROM gap_news WHERE day = ? AND status = 'ok' "
                               "ORDER BY symbol", (key,)).fetchall()
-    stats = {"gappers": listed, "archives": len(gappers), "signaux": 0}
+    stats = {"gappers": listed, "archives": len(gappers), "signaux": 0, "operations": 0, "sans_historique": 0}
     bounds = CO.session_ts(day)
     if not bounds or not gappers:
         return [], stats
@@ -205,13 +224,15 @@ async def day_rows(db: LabDB, day: date, transport=None) -> tuple[list[dict], di
     now = datetime.fromtimestamp(ARC.cutoff_ts(day), timezone.utc)
     cal = calendar(db, day)
     full_from = (day - timedelta(days=ARC.NEWS_DAYS)).isoformat()
-    info = {s: (json.loads(news or "[]"), (news_from or key) <= full_from) for s, news, news_from in gappers}
+    info = {s: (json.loads(news or "[]"), (news_from or key) <= full_from) for s, news, news_from, _ in gappers}
+    gaps = {s: g for s, _, _, g in gappers}
     names = list(info)
     rows: list[dict] = []
     for i in range(0, len(names), STOCK_BATCH):
         batch = names[i:i + STOCK_BATCH]
         bars = await SRC.alpaca_bars(batch, CO.BASE_TF, datetime.fromtimestamp(first, timezone.utc),
-                                     datetime.fromtimestamp(bounds[1], timezone.utc), transport=transport)
+                                     datetime.fromtimestamp(bounds[1], timezone.utc), transport=transport,
+                                     adjustment="raw")
         heartbeat.beat()
         for symbol in batch:
             b5 = CO.regular_hours(bars.get(symbol) or [])
@@ -219,7 +240,12 @@ async def day_rows(db: LabDB, day: date, transport=None) -> tuple[list[dict], di
             if not session:
                 continue
             hist = [b for b in b5 if b["t"] < bounds[0]]
-            daily = db.get_bars("stock", symbol, 1440, cutoff - DAILY_LOOKBACK_DAYS * 86400, cutoff)
+            daily, anomaly = traded_prices(
+                hist, session, db.get_bars("stock", symbol, 1440, cutoff - DAILY_LOOKBACK_DAYS * 86400, cutoff),
+                gaps[symbol])
+            if anomaly:
+                stats["operations" if anomaly == "operation_titre" else "sans_historique"] += 1
+                continue
             try:
                 r = price_rule(day, symbol, hist, session, daily)
             except Exception as exc:  # noqa: BLE001 (comme le rattrapage : une action ne bloque pas la séance)
@@ -276,8 +302,9 @@ def report(conn: sqlite3.Connection, trials: int) -> dict | None:
     première séance."""
     cost = cost_fingerprint()
     try:
-        days = conn.execute("SELECT COUNT(*), MIN(key), MAX(key) FROM progress WHERE job = ? AND key NOT IN "
-                            "(SELECT day FROM kill_complet WHERE cout IS NOT ?)", (JOB, cost)).fetchone()
+        days = conn.execute("SELECT COUNT(*), MIN(key), MAX(key), COALESCE(SUM(json_extract(value, '$.operations')), 0) "
+                            "FROM progress WHERE job = ? AND key NOT IN (SELECT day FROM kill_complet WHERE cout IS NOT ?)",
+                            (JOB, cost)).fetchone()
         rows = conn.execute("SELECT day, groupe, motif, empreinte, triggered, r_20e, r_3c, r_net, cout "
                             "FROM kill_complet ORDER BY day").fetchall()
     except sqlite3.Error:
@@ -324,7 +351,7 @@ def report(conn: sqlite3.Connection, trials: int) -> dict | None:
     return {
         "empreinte": CATALYST_CODE_N8, "empreinte_du_code": K.CATALYST_CODE, "figee": frozen(),
         "seances": days[0], "du": days[1], "au": days[2], "autre_empreinte": other,
-        "cout": cost, "a_recalculer": stale,
+        "cout": cost, "a_recalculer": stale, "operations_sur_titre": days[3],
         "groupes": {g: {"signaux": a["signaux"], "declenches": a["declenches"], "r_20e": a["r_20e"].result(),
                         "r_3c": a["r_3c"].result(), "r_net": a["r_net"].result()} for g, a in groups.items()},
         "principal": main | {"seuil_t": seuil, "r_3c": stress, "moitie_1": halves[0], "moitie_2": halves[1],
@@ -354,9 +381,10 @@ def text(rep: dict | None) -> str | None:
               f"{SS._z(gap['seuil_t'])}" + (", ✅ le catalyseur aide" if gap.get("aide") else "") + ")"),
              (f"témoins avec veto {SS._r(g['temoin_autre']['r_20e']['esperance_r'])} R "
               f"({g['temoin_autre']['declenches']})")]
-    if g["donnees"]["signaux"] or g["fenetre_coupee"]["signaux"]:
+    if g["donnees"]["signaux"] or g["fenetre_coupee"]["signaux"] or rep.get("operations_sur_titre"):
         parts.append(f"écartés : {g['donnees']['signaux']} sans données complètes, "
-                     f"{g['fenetre_coupee']['signaux']} aux actus coupées")
+                     f"{g['fenetre_coupee']['signaux']} aux actus coupées, "
+                     f"{rep.get('operations_sur_titre') or 0} sur une opération sur titre")
     if rep.get("a_recalculer"):
         parts.append(f"{rep['a_recalculer']} signaux à recalculer (méthode de coût changée)")
     span = f" {rep['du']} → {rep['au']}" if rep["du"] else ""

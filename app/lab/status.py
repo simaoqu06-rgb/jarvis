@@ -27,7 +27,8 @@ LIMITATIONS = [
     "comptée dans le tableau des stratégies (couverture).",
     "Actions : bougies ajustées des splits connus aujourd'hui ; avant un regroupement d'actions, le prix "
     "paraît plus élevé, d'où un glissement, une commission en R et un pas de cotation sous-estimés sur les "
-    "petites valeurs (l'inverse avant une division).",
+    "petites valeurs (l'inverse avant une division). Le scanner +10 (n° 9) et Killmode complet (n° 8) "
+    "s'exécutent, eux, aux prix réellement négociés.",
     "Confirmation des GO (n° 7) : le plan au stop plancher du direct n'existe que pour les jours rejoués depuis "
     "la n° 7 (le rattrapage n'a pas l'historique de 15 min pour le refaire) ; les GO du labo ne passent ni par "
     "les filtres du scanner, ni par le catalyseur, ni par les leçons.",
