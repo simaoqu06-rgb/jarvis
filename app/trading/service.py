@@ -927,6 +927,14 @@ def against_jarvis(p: dict) -> bool:
             and p.get("policy") != "go_confirme")
 
 
+def at_rule(t: dict) -> bool:
+    """Trade pris à ta taille quand JARVIS n'en proposait pas autant : ta règle de 20 € sous un grade à 0 % (pas de
+    taille de JARVIS, `sizing_regle` à part) ou un risque demandé au-delà de ce qu'il propose (grade.hors_budget).
+    C'est le pari « 20 € quand JARVIS propose 0 % », mesuré par `!desaccords` à part de la note : un GO pris sous un
+    grade F est d'accord avec la note, pas avec la taille."""
+    return bool((t.get("sizing") is None and t.get("sizing_regle")) or (t.get("grade") or {}).get("hors_budget"))
+
+
 def disagreement_text(p: dict) -> str:
     """Le désaccord dit franchement, avant le plan, quand Simão prend un trade noté NO GO."""
     reasons = p["score"]["reasons"] or ["note composite trop basse"]
@@ -1052,13 +1060,20 @@ def _exit_day(t: dict) -> str:
 def disagreements(book: Book, slopes: dict | None = None) -> dict:
     """Trades pris avec et contre l'avis de JARVIS : nombre, réussite et gain moyen des trades terminés, en R nets
     de frais estimés (et bruts), avec erreur type et IC à 95 % en grappes par jour de sortie (stats.mean_ci).
-    `slopes` : pente de la note au labo par marché (note_slopes), qui conditionne « JARVIS a raison »."""
+    Deux désaccords séparés : la note (« avec » : GO, « contre » : NO GO pris) et la taille (« regle » : à ta règle
+    quand JARVIS proposait 0 % ou moins que ton risque, at_rule ; un trade peut être dans « avec » et « regle »,
+    `avec.regle` les compte). `slopes` : pente de la note au labo par marché (note_slopes), qui conditionne
+    « JARVIS a raison »."""
     from app.lab import stats as LS  # import tardif : le labo importe ce module
 
-    groups = {"avec": [], "contre": []}
+    groups = {"avec": [], "contre": [], "regle": []}
     for t in book.trades:
-        if t.get("score") and not t.get("killmode"):
+        if t.get("killmode"):
+            continue  # un KILL pris : mesuré par le journal de Killmode
+        if t.get("score"):
             groups["contre" if against_jarvis(t) else "avec"].append(t)
+        if at_rule(t):
+            groups["regle"].append(t)
     out: dict = {}
     for name, trades in groups.items():
         done = [(t, r, realized_r_net(t)) for t, r in ((t, realized_r(t)) for t in trades) if r is not None]
@@ -1075,6 +1090,8 @@ def disagreements(book: Book, slopes: dict | None = None) -> dict:
                      "avg_r_brut": round(sum(r for _, r, _ in done) / len(done), 4) if done else None,
                      "sum_r_brut": round(sum(r for _, r, _ in done), 2),
                      "marches": sorted({t.get("market", "stock") for t, _, _ in done})}
+        if name in ("avec", "contre"):
+            out[name]["regle"] = sum(at_rule(t) for t in trades)  # dont pris à ta taille, hors avis de JARVIS
     out["pente_note"] = dict(slopes or {})
     return out
 
@@ -1094,14 +1111,19 @@ def disagreements_text(st: dict) -> str:
     lines = ["**Désaccords : toi contre JARVIS** (R nets de frais estimés, bruts entre parenthèses ; sorties au prix "
              "suivi, ou au tien avec `!sortie`)",
              f"-# Politique mesurée : {suivi_politique()}."]
-    for name, label in (("avec", "Plans GO (JARVIS d'accord)"), ("contre", "Plans NO GO pris quand même")):
-        g = st[name]
+    groups = (("avec", "Plans GO (JARVIS d'accord sur la note)"), ("contre", "Plans NO GO pris quand même"),
+              ("regle", "Taille à ta règle, hors avis de JARVIS (il proposait 0 %, ou moins que ton risque demandé)"))
+    for name, label in groups:
+        g = st.get(name)
+        if g is None:  # tableau d'avant le groupe « regle »
+            continue
+        rule = (f" ; dont {g['regle']} à ta règle de taille" if g.get("regle") else "")
         if not g["closed"]:
-            lines.append(f"{label} : {g['total']} trade(s), aucun terminé.")
+            lines.append(f"{label} : {g['total']} trade(s), aucun terminé{rule}.")
             continue
         lines.append(f"{label} : {g['closed']} terminé(s) sur {g['days']} jour(s), {g['wins']} gagnant(s), "
                      f"{g['avg_r']:+.2f} R en moyenne ({g['avg_r_brut']:+.2f} brut), {g['sum_r']:+.2f} R au total"
-                     + (f" ({g['open']} en cours)" if g["open"] else ""))
+                     + (f" ({g['open']} en cours)" if g["open"] else "") + rule)
     a, c = st["avec"], st["contre"]
     slopes = st.get("pente_note") or {}
     markets = sorted(set(a.get("marches") or []) | set(c.get("marches") or []))
@@ -1157,6 +1179,22 @@ def disagreements_text(st: dict) -> str:
         else:
             lines.append(q2 + f"Pas de réponse : {mean} ({c['closed']} trades, {c['days']} jours"
                          + ("" if enough(c) else f" ; il en faut {LS.MIN_TRADES} sur {LS.DEGRADE_MIN_DAYS}") + ").")
+    r = st.get("regle")
+    q3 = "**3. Ta taille quand JARVIS n'en propose pas ?** "
+    if r is not None and not r["closed"]:
+        lines.append(q3 + "Pas de réponse : aucun trade à ta règle terminé" + (f" ({r['total']} en cours)."
+                                                                               if r["total"] else "."))
+    elif r is not None:
+        mean = f"{r['avg_r']:+.2f} R par trade, {_ci_text(r['ci'])}"
+        sure = enough(r) and r["ci"] is not None
+        if sure and r["ci"][0] > 0:
+            lines.append(q3 + f"➡️ **Tu as raison pour l'instant** : tes trades pris à ta règle rapportent ({mean}).")
+        elif sure and r["ci"][1] < 0:
+            lines.append(q3 + f"➡️ **JARVIS avait raison de ne proposer aucun risque** : tes trades pris à ta règle "
+                         f"perdent ({mean}).")
+        else:
+            lines.append(q3 + f"Pas de réponse : {mean} ({r['closed']} trades, {r['days']} jours"
+                         + ("" if enough(r) else f" ; il en faut {LS.MIN_TRADES} sur {LS.DEGRADE_MIN_DAYS}") + ").")
     lines.append("-# Les frais touchent les deux groupes presque autant : ils baissent les moyennes mais changent peu "
                  "l'écart.")
     return "\n".join(lines)

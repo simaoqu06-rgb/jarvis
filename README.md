@@ -140,7 +140,10 @@ chaque côté et un intervalle qui exclut 0 ; « JARVIS a raison » seulement si
 labo (pente > 0). Les sorties sont au prix suivi (stop franchi en gap : à l'ouverture ; objectif : franchi
 d'un pas) ou au tien avec `!sortie`. Ce R net sert aussi à l'arrêt de la journée à −3 R, aux trades réels
 de `!grade` et au journal du cockpit. Un GO confirmé pris avec `!prends NVDA 132.5 go` garde le stop et les
-objectifs du scanner et compte avec JARVIS. Le même principe s'applique aux Claude qui travaillent sur JARVIS
+objectifs du scanner et compte avec JARVIS. La taille est un désaccord à part : un trade pris à ta règle de 20 €
+quand JARVIS propose 0 % (ou à un risque demandé au-delà de ce qu'il propose) forme un troisième groupe, « taille
+à ta règle », jugé sur la même règle (30 trades sur 20 jours, IC qui exclut 0) ; un GO pris sous un grade F reste
+d'accord avec la note, pas avec la taille. Le même principe s'applique aux Claude qui travaillent sur JARVIS
 ([CLAUDE.md](CLAUDE.md)).
 
 ## Scanner avant l'ouverture US
@@ -453,7 +456,7 @@ trade terminé, comparé à une sortie au moment du conseil (ligne « Bilan des 
 | `!position NVDA 132.5` | même conseil pour une position prise hors de JARVIS (`short`, `stop 128` en plus) |
 | `!scan` | scanner tout de suite |
 | `!bilan` | bilan du forward-test |
-| `!desaccords` | trades pris contre l'avis de JARVIS (NO GO) comparés aux plans GO : qui avait raison |
+| `!desaccords` | trades pris contre l'avis de JARVIS (NO GO) comparés aux plans GO, et trades pris à ta règle de taille quand JARVIS propose 0 % : qui avait raison |
 | `!propositions` | réglages proposés qui attendent ta réponse |
 | `!oui 3` / `!non 3` | approuver ou refuser la proposition 3 (ou les boutons) |
 | `!regle` | réglages actuels |

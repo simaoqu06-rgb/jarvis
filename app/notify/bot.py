@@ -18,7 +18,7 @@ qu'aux comptes listés dans JARVIS_DISCORD_OWNER_ID et ignore tout le reste sans
   !scan                 scanner pré-ouverture tout de suite
   !confirmations        GO du scanner confirmés ou pas après l'ouverture, et ce que ça rapporte
   !bilan                bilan du forward-test sur le compte fictif
-  !desaccords           trades pris contre l'avis de JARVIS (plans NO GO) comparés aux autres
+  !desaccords           trades pris contre l'avis de JARVIS (plans NO GO, taille à ta règle sous 0 %) comparés aux autres
   !propositions         réglages que JARVIS propose et qui attendent ta réponse
   !oui 3 / !non 3       approuver ou refuser la proposition 3 (ou les boutons sous le message)
   !regle                réglages actuels
