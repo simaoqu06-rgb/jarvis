@@ -944,11 +944,14 @@ def against_jarvis(p: dict) -> bool:
 
 
 def at_rule(t: dict) -> bool:
-    """Trade pris à ta taille quand JARVIS n'en proposait pas autant : ta règle de 20 € sous un grade à 0 % (pas de
-    taille de JARVIS, `sizing_regle` à part) ou un risque demandé au-delà de ce qu'il propose (grade.hors_budget).
-    C'est le pari « 20 € quand JARVIS propose 0 % », mesuré par `!desaccords` à part de la note : un GO pris sous un
-    grade F est d'accord avec la note, pas avec la taille."""
-    return bool((t.get("sizing") is None and t.get("sizing_regle")) or (t.get("grade") or {}).get("hors_budget"))
+    """Trade pris à ta taille quand JARVIS proposait 0 % : ta règle de 20 € sous un grade à 0 % (pas de taille de
+    JARVIS, `sizing_regle` à part) ou un risque demandé alors qu'il ne proposait rien (grade.hors_budget avec un
+    risque proposé nul). C'est le pari « 20 € quand JARVIS propose 0 % », mesuré par `!desaccords` à part de la
+    note : un GO pris sous un grade F est d'accord avec la note, pas avec la taille. Un risque demandé au-delà d'un
+    risque proposé > 0 n'en est pas : JARVIS proposait de prendre le trade, seulement moins gros."""
+    g = t.get("grade") or {}
+    return bool((t.get("sizing") is None and t.get("sizing_regle"))
+                or (g.get("hors_budget") and not (g.get("risque_propose") or 0) > 0))
 
 
 def disagreement_text(p: dict) -> str:
@@ -1077,7 +1080,7 @@ def disagreements(book: Book, slopes: dict | None = None) -> dict:
     """Trades pris avec et contre l'avis de JARVIS : nombre, réussite et gain moyen des trades terminés, en R nets
     de frais estimés (et bruts), avec erreur type et IC à 95 % en grappes par jour de sortie (stats.mean_ci).
     Deux désaccords séparés : la note (« avec » : GO, « contre » : NO GO pris) et la taille (« regle » : à ta règle
-    quand JARVIS proposait 0 % ou moins que ton risque, at_rule ; un trade peut être dans « avec » et « regle »,
+    ou à ton risque quand JARVIS proposait 0 %, at_rule ; un trade peut être dans « avec » et « regle »,
     `avec.regle` les compte). `slopes` : pente de la note au labo par marché (note_slopes), qui conditionne
     « JARVIS a raison »."""
     from app.lab import stats as LS  # import tardif : le labo importe ce module
@@ -1128,7 +1131,7 @@ def disagreements_text(st: dict) -> str:
              "suivi, ou au tien avec `!sortie`)",
              f"-# Politique mesurée : {suivi_politique()}."]
     groups = (("avec", "Plans GO (JARVIS d'accord sur la note)"), ("contre", "Plans NO GO pris quand même"),
-              ("regle", "Taille à ta règle, hors avis de JARVIS (il proposait 0 %, ou moins que ton risque demandé)"))
+              ("regle", "Taille à ta règle, hors avis de JARVIS (il proposait 0 %)"))
     for name, label in groups:
         g = st.get(name)
         if g is None:  # tableau d'avant le groupe « regle »
