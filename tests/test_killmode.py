@@ -770,6 +770,78 @@ def test_gain_en_actions_entieres():
     assert K.bracket_orders(300.0, 250.0, [350.0, 400.0, 450.0]) == [(1, 400.0)]
 
 
+def test_change_du_jour_pour_l_ordre_affiche():
+    """11,60 $ de risque par action : 1 action au change par défaut (23 $), 2 au change du jour 1,17 (23,4 $), comme
+    le solde du journal (`_at_size` au change de son solde)."""
+    tps = [111.6, 123.2, 134.8]
+    assert K.bracket_orders(100.0, 88.4, tps) == [(1, 123.2)]
+    assert K.bracket_orders(100.0, 88.4, tps, 1.17) == [(1, 111.6), (1, 134.8)]
+    assert K.stop_cost(100.0, 88.4, 1.17)["actions"] == 2 and K.stop_cost(100.0, 88.4)["actions"] == 1
+
+
+async def test_kill_hors_budget_et_hors_grade_dit_en_clair(paths, monkeypatch):
+    from app.lab import grade as GR
+
+    data = {"marches": {"stock": {"grade": "F-", "rang": 0, "non_note": False, "risque_grade": 0.0,
+                                  "risque_max": 0.0, "mode_survie": True}}, "verifie_le": NOW.isoformat()}
+    monkeypatch.setattr(GR, "current", lambda: data)
+    sources(monkeypatch)
+    a = await K.analyze("ACME", NOW)
+    assert a["eurusd"] == 1.15 and a["grade"]["grade"] == "F-" and a["grade"]["risque_propose"] == 0.0
+    txt = K.text(a)
+    assert ("📋 Chez IBKR, à 20 € de risque hors grade (grade actuel F-, risque proposé 0 %) : **11 actions en 3 "
+            "brackets**") in txt and "Hors budget" not in txt
+    # Une action risque 50 $ (≈ 43 €) : 1 action forcée (le journal reste comparable), dit en clair.
+    plan = a["graphique"]["plan"] | {"entry": 300.0, "stop": 250.0, "targets": [350.0, 400.0, 450.0]}
+    over = a | {"graphique": a["graphique"] | {"plan": plan}}
+    txt = K.text(over)
+    assert "📋 Chez IBKR, 1 action = 43 € de risque (au-delà de 20 €) hors grade (grade actuel F-" in txt
+    assert "**1 action en 1 bracket**" in txt
+    assert "⚠️ Hors budget : à 20 € il faudrait 0 action ; 1 action, un seul bracket sur TP2." in txt
+    assert K.record(over, NOW)["hors_budget"] is True
+
+
+def test_bilan_compte_les_kill_hors_budget_a_part(paths, monkeypatch, gross):
+    monkeypatch.setattr(K, "lab_item", lambda: None)
+    calls = book([1.0, -1.0])
+    calls[1] |= {"entry": 300.0, "stop": 250.0, "targets": [350.0, 400.0, 450.0]}
+    calls[1]["resultat"] |= {"remplissage": 300.0, "sorties": [{"prix": 250.0, "part": 1.0, "raison": "stop"}]}
+    assert not K.hors_budget(calls[0]) and K.hors_budget(calls[1])
+    txt = K.bilan_text(calls).replace("−", "-")
+    assert "Hors budget : 1 KILL soldé où une seule action risquait plus de 20 € (1 action forcée" in txt
+    assert "à part : -1,00 R par trade sur 1 déclenché" in txt
+    assert "Hors budget" not in K.bilan_text(calls[:1])
+
+
+async def test_prends_un_kill_garde_sa_taille_de_20_euros(paths, monkeypatch):
+    from app import scheduler
+    from app.lab import grade as GR
+
+    monkeypatch.setattr(scheduler, "book", T.Book(None))
+    monkeypatch.setattr(GR, "current", lambda: None)  # grade pas encore calculé : JARVIS ne propose rien
+    monkeypatch.setenv("JARVIS_CAPITAL", "1000")
+
+    async def build_plan(symbol, market, side, entry, stop, targets, **kw):
+        p = {"symbol": symbol, "market": market, "side": side, "entry": entry, "stop": stop, "stop_pct": -2.0,
+             "stop_source": "KILL", "targets": [], "method": "m", "created_at": NOW.isoformat(), "sizing": None,
+             "checklist": {"verdict": "Feu vert", "score": 3, "max_score": 5, "items": []}}
+        T.apply_grade(p, None, None, NOW, trades=[], usd_per_eur=1.15)
+        assert p["sizing"] is None and p["sizing_regle"]
+        return p
+
+    monkeypatch.setattr(bot.trading, "build_plan", build_plan)
+    txt = await bot.handle("!prends ACME 106.6 stop 104.49 kill")
+    t = scheduler.book.trades[0]
+    s = t["sizing"]
+    assert t["killmode"] and "sizing_regle" not in t
+    assert s["risk_pct"] is None and s["risk_amount_eur"] == 20.0 and s["quantity"] == 10 and s["hors_grade"]
+    assert "💰 Risque 20 € (23,0 $) : 10 actions pour 1 066 $ · taille du KILL, hors grade" in txt
+    assert GR.open_risk([t]) == 2.0  # 20 € sur 1 000 € : compté dans le budget même sous un grade à 0 %
+    await bot.handle("!prends XYZ 300 stop 250 kill")
+    s = scheduler.book.trades[1]["sizing"]
+    assert s["quantity"] == 1 and s["hors_budget"] and s["risk_amount_eur"] == 43.48  # le vrai risque d'une action
+
+
 def test_pire_et_meilleur_ordre(paths, monkeypatch):
     """Une minute où le stop et TP1 sont touchés : le pire ordre (stop) décide, le meilleur est affiché."""
     at = OPEN + 30 * 60

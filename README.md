@@ -90,7 +90,8 @@ Le même tableau est réécrit chaque minute dans un message Discord (à épingl
 
 Corps des requêtes : `{"symbol": "NVDA", "market": "stock", "side": "long"}` (`market` : `crypto` ou
 `stock`). Facultatifs : `entry` (vide = dernier cours), `stop` (vide = niveau d'invalidation),
-`targets` (vide = prochaines résistances), `capital` et `risk_pct` pour la taille de position.
+`targets` (vide = prochaines résistances), `capital` (en euros) et `risk_pct` (0 à 100, 0 = pas de taille)
+pour la taille de position.
 
 **Délais estimés.** Pour chaque TP, JARVIS rejoue le même plan (mêmes écarts en %) depuis chaque
 bougie de l'historique de l'actif et mesure le temps qu'il a fallu pour toucher le TP avant le
@@ -293,16 +294,26 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
 - **Grade de JARVIS** (`app/lab/grade.py`, barème validé par Simão le 2026-10-07) : de F- à S+, la
   preuve mesurée par le worker (sans jeton) que la méthode en place gagne, par marché.
   - Lettre = espérance nette en R sur les 60 derniers jours de bourse de la méthode en place (hors
-    échantillon) : S ≥ +0,40 R, A ≥ +0,25, B ≥ +0,15, C ≥ +0,05 (borne basse de l'IC95 > 0 dès C),
-    D positive mais pas prouvée, E entre −0,10 et 0, F < −0,10. Moins de 100 trades sur 10 jours :
-    « non noté ».
+    échantillon ; actions : R après commission IBKR à 20 €, `r_20e`) : S ≥ +0,40 R, A ≥ +0,25,
+    B ≥ +0,15, C ≥ +0,05 (borne basse de l'IC95 en t de Student > 0 dès C), D positive mais pas
+    prouvée, E entre −0,10 et 0, F < −0,10. Moins de 100 trades sur 10 jours : « non noté ». La
+    fenêtre réelle est publiée (rejeu du … au …, direct depuis le …) ; coupée par un trou de plus de
+    10 jours, elle est notée sur son dernier segment s'il suffit, sinon marquée « discontinue » (0 %).
   - − / + : stabilité (pire série de pertes ≤ 1,25 × celle attendue, écart ≤ 0,15 R entre les deux
     moitiés de la fenêtre) et délais calibrés (40 à 65 % tenus). Réussite et % de TP sont affichés,
     sans effet sur le grade (un taux de réussite se gonfle en rapprochant le TP1).
   - Risque proposé par plan (`!plan`, cockpit) : F, E, non noté 0 % (plan en observation), D 0,25 %,
-    puis ¼ de Kelly (borne basse de l'espérance / variance des R) plafonné à C 1 %, B 1,5 %, A 3 %,
-    S 5 %. Plus un budget : risque ouvert sur les trades pris ≤ 4 %, arrêt de la journée à −3 R. Un
-    risque demandé explicitement (`risk_pct`) est gardé.
+    puis ¼ de Kelly (borne basse de l'espérance / variance des R, corrigé de la corrélation des
+    trades d'un même jour) plafonné à C 1 %, B 1,5 %, A 3 %, S 5 % (4 % en pratique). Plus un
+    budget : risque ouvert sur les trades pris ≤ 4 % (un trade pris compte ses euros sur le capital,
+    1 % sans capital connu), arrêt de la journée à −3 R. Grade illisible ou que le labo n'a pas
+    revérifié depuis 6 h (`JARVIS_GRADE_MAX_AGE_H`) : 0 %.
+  - Taille, une seule règle : risque = min(`JARVIS_CAPITAL` (€) × % proposé, `JARVIS_RISK_EUR` = 20 €),
+    20 € sans capital connu, converti au change BCE du jour, en actions entières (« 💰 Risque 20 €
+    (23,0 $) : 46 actions »). Grade à 0 % : JARVIS ne propose pas de taille ; ta règle de 20 € est
+    affichée à part, « hors avis de JARVIS » (plans, GO confirmés, potentiel +10, Killmode). Un
+    risque demandé explicitement (`risk_pct`) remplace le % du grade et est signalé hors budget
+    s'il engage plus que ce que propose JARVIS.
   - Changements : baisse immédiate ; hausse après au moins 150 nouveaux trades sur 5 nouveaux jours,
     et une hausse de **lettre** attend ton accord (proposition Approuver / Refuser en privé, `!oui N`) ;
     à partir de C, une baisse de 20 R depuis le sommet ramène tout de suite en D (coupe-circuit) ; une

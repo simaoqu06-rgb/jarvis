@@ -199,8 +199,9 @@ def eta_at(market: str, start: datetime, minutes: float) -> datetime:
 
 def sizing(entry: float, stop: float, capital: float | None, risk_pct: float) -> dict | None:
     """Taille de position EmperorBTC : on risque `risk_pct` % du capital, la taille découle du stop,
-    et le levier découle de la taille (jamais l'inverse)."""
-    if not capital:
+    et le levier découle de la taille (jamais l'inverse). Sans change ni plafond : le labo ; en direct,
+    apply_grade la remplace par la règle unique (euro_sizing)."""
+    if not capital or risk_pct <= 0:
         return None
     risk_amount = capital * risk_pct / 100
     quantity = risk_amount / abs(entry - stop)
@@ -281,7 +282,7 @@ def plan_from_bars(
         "targets": estimates,
         "stop_first_rate": timing["stop_first_rate"],
         "checklist": check,
-        "sizing": sizing(levels.entry, levels.stop, capital, risk_pct or RISK_PCT),
+        "sizing": sizing(levels.entry, levels.stop, capital, RISK_PCT if risk_pct is None else risk_pct),
         "method": (
             f"Délais mesurés en rejouant ce plan depuis chacune des {timing['starts']} bougies de "
             f"{step} min de l'historique ({cfg['label']}), horizon {cfg['horizon_bars'] * step // 60} h{clock_word}. "
@@ -347,7 +348,7 @@ async def build_plan(
     from app.lab import lessons as LESSONS  # import tardif : le labo importe ce module
 
     await LESSONS.apply(plan, daily, cat, now)
-    apply_grade(plan, capital, risk_pct, now)
+    apply_grade(plan, capital, risk_pct, now, usd_per_eur=await usd_per_eur())
     return plan
 
 
@@ -356,21 +357,83 @@ def taken_trades() -> list[dict]:
     return []
 
 
+def rule_eur() -> float:
+    """La règle de Simão : JARVIS_RISK_EUR (20 € par défaut) de risque par trade, la même que Killmode."""
+    from app.trading import killmode as K  # import tardif : killmode importe ce module
+
+    return K.RISK_EUR
+
+
+def recommended_eur(pct: float | None, capital: float | None = None) -> float | None:
+    """Règle unique de taille : risque recommandé en €, min(capital × pct / 100, JARVIS_RISK_EUR), JARVIS_RISK_EUR
+    si le capital n'est pas connu ; None si rien n'est proposé (pct ≤ 0). JARVIS_CAPITAL est en euros."""
+    if not pct or pct <= 0:
+        return None
+    if capital is None:
+        capital = env_float("JARVIS_CAPITAL", 0.0) or None
+    return min(capital * pct / 100, rule_eur()) if capital else rule_eur()
+
+
+def euro_sizing(entry: float, stop: float, market: str, risk_eur: float, usd_per_eur: float,
+                capital: float | None = None) -> dict | None:
+    """Taille pour `risk_eur` € de risque au change `usd_per_eur` (gardé dans la taille) : actions en nombre entier
+    (0 quand une seule action dépasse ce risque : pas d'ordre), crypto en quantité fractionnaire. La taille découle
+    du stop, le levier de la taille."""
+    unit = abs(entry - stop)
+    if not unit or risk_eur <= 0:
+        return None
+    risk_usd = risk_eur * usd_per_eur
+    quantity = math.floor(risk_usd / unit + 1e-9) if market == "stock" else round(risk_usd / unit, 6)
+    notional = quantity * entry
+    return {"capital": capital, "risk_pct": round(risk_eur / capital * 100, 3) if capital else None,
+            "risk_amount_eur": round(risk_eur, 2), "risk_amount": round(risk_usd, 2), "eurusd": usd_per_eur,
+            "quantity": quantity, "notional": round(notional, 2), "unit_risk_eur": round(unit / usd_per_eur, 2),
+            "leverage": round(max(notional / (capital * usd_per_eur), 1.0), 2) if capital else None}
+
+
+async def usd_per_eur() -> float:
+    """Change EUR→USD du jour (BCE, une heure de cache) pour la taille en euros ; 1,15 de Killmode si la source ne
+    répond pas."""
+    from app import needs  # import tardif : needs tire tout le serveur de données
+    from app.trading import killmode as K  # import tardif : killmode importe ce module
+
+    try:
+        return (await needs.fx_rates("EUR", ["USD"])).data["rates"]["USD"] or K.EURUSD_DEFAULT
+    except Exception as exc:
+        log.warning("Taux EUR/USD indisponible pour la taille du plan (%s) : %g par défaut", exc, K.EURUSD_DEFAULT)
+        return K.EURUSD_DEFAULT
+
+
 def apply_grade(plan: dict, capital: float | None, risk_pct: float | None, now: datetime,
-                trades: list[dict] | None = None) -> None:
-    """Grade de JARVIS : risque proposé par trade (grade, risque déjà ouvert, arrêt de la journée).
-    Un risque demandé explicitement est gardé tel quel. Jamais d'exception : plan inchangé en cas de souci."""
+                trades: list[dict] | None = None, usd_per_eur: float | None = None) -> None:
+    """Grade de JARVIS et taille du plan, une seule règle : risque en € = min(capital × % proposé, JARVIS_RISK_EUR)
+    (JARVIS_RISK_EUR sans capital connu), au change `usd_per_eur` (1,15 par défaut). Le grade propose 0 % (F, E,
+    non noté, périmé, illisible) : JARVIS ne propose pas de taille (`sizing` None) et la règle de Simão est à part
+    (`sizing_regle`, hors grade). Un risque demandé explicitement remplace le % du grade (même plafond en euros),
+    marqué hors budget s'il engage plus d'euros que ce que propose JARVIS (arrêt de la journée compris). Jamais
+    d'exception : un grade illisible vaut 0 % (fail-closed)."""
     from app.lab import grade as GRADE  # import tardif : le labo importe ce module
+    from app.trading import killmode as K  # import tardif : killmode importe ce module
 
     try:
         g = GRADE.risk_now(plan["market"], taken_trades() if trades is None else trades, now)
     except Exception as exc:
-        log.warning("Grade du labo non appliqué (%s: %s)", type(exc).__name__, exc)
-        return
+        log.warning("Grade du labo illisible (%s: %s) : risque proposé 0 %%", type(exc).__name__, exc)
+        g = GRADE.unreadable(exc)
     plan["grade"] = g
-    if risk_pct is None:
-        cap = capital if capital is not None else (env_float("JARVIS_CAPITAL", 0.0) or None)
-        plan["sizing"] = sizing(plan["entry"], plan["stop"], cap, g["risque_propose"]) if g["risque_propose"] > 0 else None
+    cap = capital if capital is not None else (env_float("JARVIS_CAPITAL", 0.0) or None)
+    rate = usd_per_eur or K.EURUSD_DEFAULT
+    proposed = recommended_eur(g["risque_propose"], cap)
+    eur = proposed if risk_pct is None else recommended_eur(risk_pct, cap)
+    if risk_pct is not None and (eur or 0.0) > (proposed or 0.0) + 1e-9:
+        g |= {"hors_budget": True, "risque_demande": risk_pct, "risque_demande_eur": eur, "propose_eur": proposed}
+    plan["sizing"] = euro_sizing(plan["entry"], plan["stop"], plan["market"], eur, rate, cap) if eur else None
+    plan.pop("sizing_regle", None)
+    if risk_pct is None and g["risque_propose"] <= 0:
+        rule = euro_sizing(plan["entry"], plan["stop"], plan["market"], rule_eur(), rate, cap)
+        if rule:
+            plan["sizing_regle"] = rule | {"hors_grade": True}
+
 
 def _num(x: float) -> str:
     return f"{x:,.6g}".replace(",", " ")
@@ -437,6 +500,46 @@ def confirmation_lines(p: dict, now: datetime | None = None) -> list[str]:
     return lines
 
 
+def _amount(x: float, digits: int = 2) -> str:
+    """Montant à la française : « 20 », « 12,5 », « 23,0 » (digits fixe le nombre de décimales, 2 au plus sinon)."""
+    if digits == 2:
+        return f"{x:.2f}".rstrip("0").rstrip(".").replace(".", ",")
+    return f"{x:.{digits}f}".replace(".", ",")
+
+
+def _quantity(p: dict, s: dict) -> str:
+    """Taille en clair : actions entières (« pas d'ordre » quand une seule action dépasse le risque), crypto en
+    quantité."""
+    q = s["quantity"]
+    if p.get("market") != "stock":
+        return f"taille {q:g} pour {_num(s['notional'])} $" + (
+            f" · levier {s['leverage']:g}×" if (s.get("leverage") or 1) > 1 else "")
+    if q < 1:
+        return (f"pas d'ordre, 1 action = {_amount(s['unit_risk_eur'])} € de risque, au-delà de "
+                f"{_amount(s['risk_amount_eur'])} €")
+    return f"{q} action{'s' if q > 1 else ''} pour {_num(s['notional'])} $"
+
+
+def sizing_lines(p: dict) -> list[str]:
+    """La ligne 💰 : la taille que propose JARVIS (règle unique en euros), ou, quand il n'en propose pas (grade à
+    0 %), la règle de Simão à part, jamais confondue avec une recommandation."""
+    s, rule = p.get("sizing"), p.get("sizing_regle")
+    if s and "risk_amount_eur" in s:
+        line = f"💰 Risque {_amount(s['risk_amount_eur'])} € ({_amount(s['risk_amount'], 1)} $) : {_quantity(p, s)}"
+        if s.get("hors_grade"):
+            line += " · taille du KILL, hors grade" + (
+                f", au-delà de {_amount(rule_eur())} € (une action au moins)" if s.get("hors_budget") else "")
+        return [line]
+    if s:  # taille sans change (plan_from_bars seul : labo, anciens trades)
+        return [f"💰 Risque {s['risk_pct']:g} % = {s['risk_amount']:g} · taille {s['quantity']:g} "
+                f"({_num(s['notional'])}) · levier {s['leverage']:g}×"]
+    if rule:
+        return [f"💰 JARVIS ne propose pas de taille (grade {(p.get('grade') or {}).get('grade', 'non noté')} : 0 %). "
+                f"Ta règle de {_amount(rule['risk_amount_eur'])} € : {_quantity(p, rule)} (exception, hors avis de "
+                "JARVIS)"]
+    return []
+
+
 def plan_text(p: dict) -> str:
     """Le plan en clair pour Discord."""
     arrow = "🟢 LONG" if p["side"] == "long" else "🔴 SHORT"
@@ -456,10 +559,7 @@ def plan_text(p: dict) -> str:
     lines += confirmation_lines(p)
     marks = {True: "✅", False: "❌", None: "➖"}
     lines.append(" · ".join(f"{marks[i['ok']]} {i['label']}" for i in check["items"]))
-    if p.get("sizing"):
-        s = p["sizing"]
-        lines.append(f"💰 Risque {s['risk_pct']:g} % = {s['risk_amount']:g} · taille {s['quantity']:g} "
-                     f"({_num(s['notional'])}) · levier {s['leverage']:g}×")
+    lines += sizing_lines(p)
     if p.get("grade"):
         from app.lab import grade as GRADE
 

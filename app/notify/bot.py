@@ -324,6 +324,8 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
                                             req["targets"])
             if req.get("killmode"):
                 plan["killmode"] = True
+                plan["sizing"] = killmode.taken_sizing(plan)  # 20 € hors grade, compté dans le risque ouvert
+                plan.pop("sizing_regle", None)
             async with lock or asyncio.Lock():
                 from app import scheduler  # import tardif : scheduler importe ce module
                 scheduler.book.add(plan, "via Killmode" if req.get("killmode") else "via Discord")

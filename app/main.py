@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app import alerts, config, needs, scheduler
 from app.lab import brief as lab_brief
@@ -275,8 +275,8 @@ class TradeRequest(BaseModel):
     entry: float | None = None      # vide = dernier cours
     stop: float | None = None       # vide = niveau d'invalidation (dernier creux de swing, 1 à 3 ATR)
     targets: list[float] | None = None  # vide = prochaines résistances (supports pour un short)
-    capital: float | None = None    # vide = JARVIS_CAPITAL ; sert à la taille de position
-    risk_pct: float | None = None   # vide = risque proposé par le grade de JARVIS
+    capital: float | None = None    # en euros ; vide = JARVIS_CAPITAL ; sert à la taille de position
+    risk_pct: float | None = Field(None, ge=0, le=100)  # vide = risque proposé par le grade ; 0 = pas de taille
     note: str | None = None
 
 

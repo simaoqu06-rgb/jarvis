@@ -17,7 +17,8 @@ Mesures (sur les trades déclenchés, en R nets de coûts) :
 
 Intervalle de confiance : les trades d'un même jour ne sont pas indépendants (même marché, mêmes
 nouvelles) ; l'erreur type est donc « en grappes par jour » (sommes journalières), plus large et plus
-honnête que l'erreur type naïve. Garde-fous : une tranche de moins de MIN_TRADES trades déclenchés est
+honnête que l'erreur type naïve, et l'IC est en t de Student à G − 1 degrés de liberté (G = jours ; le
+seuil de « dégradée » aussi). Garde-fous : une tranche de moins de MIN_TRADES trades déclenchés est
 marquée « echantillon_faible » et n'est jamais signalée comme dégradée ; une tranche de moins de
 DEGRADE_MIN_DAYS jours ne l'est pas non plus (avec 3 jours, l'erreur type en grappes repose sur 3 sommes
 journalières : le direct crypto à 3 jours sortait z −9,3 alors que l'écart vaut z ≈ −2 à l'échelle des jours).
@@ -37,7 +38,8 @@ from app.lab import seal as SEAL
 
 MIN_TRADES = 30
 Z95 = 1.959964
-DEGRADE_Z = 3.2          # écart au reste du marché en erreurs types (≈ Bonferroni à 5 % sur ~80 tranches)
+DEGRADE_Z = 3.2          # écart au reste du marché en erreurs types (≈ Bonferroni à 5 % sur ~80 tranches), en loi normale
+DEGRADE_P = 1 - 0.05 / 80  # seuil appliqué : le même en t de Student à G − 1 degrés de liberté (≈ 3,8 à 20 jours)
 DEGRADE_MIN_DAYS = 20    # jours distincts (grappes) avant de juger une tranche : en dessous, l'erreur type ne tient pas
 RECENT_DAYS = 20
 MOVE_PCT = 8.0           # potentiel +10 : plus haut de séance ≥ ouverture + 8 %
@@ -79,8 +81,10 @@ def mean_ci(day_sums: dict, total: float, n: int) -> tuple[float | None, float |
         return None, None, None
     m = total / n
     se = cluster_se(day_sums, m, n)
-    ci = [round(m - Z95 * se, 4), round(m + Z95 * se, 4)] if se is not None else None
-    return m, se, ci
+    if se is None:
+        return m, se, None
+    q = t_quantile(0.975, len(day_sums) - 1)  # G jours : G − 1 degrés de liberté (1,96 était trop étroit)
+    return m, se, [round(m - q * se, 4), round(m + q * se, 4)]
 
 
 def _beta_cf(a: float, b: float, x: float) -> float:
@@ -404,7 +408,8 @@ def summarize(rows, recent: dict[str, str] | None = None, min_n: int = MIN_TRADE
                 if acc.trig < min_n or len(acc.days) < DEGRADE_MIN_DAYS:
                     continue
                 c = contrast(acc, macc)
-                if not c or c["reste_n"] < min_n or c["z"] is None or c["z"] > -DEGRADE_Z:
+                if (not c or c["reste_n"] < min_n or c["z"] is None
+                        or c["z"] > -t_quantile(DEGRADE_P, len(acc.days) - 1)):
                     continue
                 m, _ = acc.mean_se()
                 degradations.append({"marche": market, "dimension": dim, "valeur": value, "n": acc.trig,

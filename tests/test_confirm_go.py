@@ -74,6 +74,64 @@ def test_texte_confirme_avec_taille():
     assert "stop d'achat 13.7" in txt and "92 actions" in txt  # 23,2 $ / 0,25
 
 
+AT = datetime(2026, 10, 8, 14, 0, tzinfo=timezone.utc)
+CONFIRMED = {"kind": "confirmé", "trigger": 13.70, "vwap": 13.65}
+GRADE_F = {"grade": "F", "risque_propose": 0.0, "observation": True,
+           "raison": "grade F : pas de capital réel tant que la méthode n'est pas au moins D"}
+
+
+def test_actions_entieres_et_action_hors_budget():
+    assert C.shares(10.3, 8.0, 23.0) == 10  # 23 / 2,3 : 10, pas 9 (arrondi flottant, comme Killmode)
+    big = go(entry=128.0, stop=100.0, targets=[160.0, 190.0, 220.0])
+    txt = C.event_text("BIG", big, {"kind": "confirmé", "trigger": 130.0, "vwap": 129.0}, AT, 20, 1.15)
+    assert "stop 100 · 1 action = 26 € de risque, au-delà de 20 € : pas de taille" in txt and "actions" not in txt
+
+
+def test_confirmation_grade_f_taille_hors_avis_de_jarvis():
+    txt = C.event_text("FRSH", go(), CONFIRMED, AT, 20, 1.16, GRADE_F)
+    assert "92 actions" in txt  # ta règle de 20 €, toujours chiffrée
+    assert "-# Taille à ta règle de 20 € (hors avis de JARVIS : grade F, 0 % proposé)." in txt
+    assert "🏅 Grade JARVIS **F** · risque proposé **0 %** : plan en observation" in txt
+    a = {"grade": "A", "risque_propose": 3.0, "observation": False, "raison": "grade A"}
+    txt = C.event_text("FRSH", go(), CONFIRMED, AT, 12.5, 1.16, a)
+    assert "**58 actions** (12.5 € ≈ 14 $ de risque" in txt and "hors avis" not in txt
+
+
+async def test_tick_confirm_taille_selon_le_grade(monkeypatch, tmp_path):
+    from app import scheduler as SCH
+    from app.lab import grade as GR
+
+    monkeypatch.setattr(C, "STATE_PATH", str(tmp_path / "c.json"))
+    monkeypatch.setattr(C, "LOG_PATH", str(tmp_path / "c.jsonl"))
+    bars = [bar(0, 13.8, 13.9, 13.7, 13.75), bar(1, 13.75, 13.76, 13.58, 13.62),
+            bar(2, 13.62, 13.66, 13.6, 13.64), bar(3, 13.64, 13.80, 13.63, 13.78)]
+
+    async def fake_bars(symbol):
+        return bars
+
+    async def fake_rate():
+        return 1.16
+
+    now = (DAY_OPEN + timedelta(minutes=21)).astimezone(timezone.utc)
+    sent = []
+    monkeypatch.setattr(SCH, "_bars_5min", fake_bars)
+    monkeypatch.setattr(SCH, "_usd_per_eur", fake_rate)
+    monkeypatch.setattr(SCH, "_queue", lambda texts, kind="", **kw: sent.extend(texts))
+    monkeypatch.setattr(SCH, "_dm_trades", lambda texts: None)
+    monkeypatch.setattr(SCH, "_kick_outbox", lambda: None)
+    monkeypatch.setattr(SCH.book, "trades", [])
+    monkeypatch.setenv("JARVIS_CAPITAL", "500")
+    stock = {"grade": "A", "rang": 16, "non_note": False, "risque_grade": 3.0, "risque_max": 3.0, "mode_survie": False}
+    for market, size, off in ((stock, "48 actions", False),  # 500 € × 3 % = 15 € : 17,4 $ / 0,36
+                              (stock | {"grade": "F", "risque_grade": 0.0}, "64 actions", True)):  # ta règle, 20 €
+        monkeypatch.setattr(GR, "current", lambda: {"marches": {"stock": market}, "verifie_le": now.isoformat()})
+        monkeypatch.setattr(SCH, "confirm_state", {})
+        C.register(SCH.confirm_state, scan_result(), "2026-10-08")
+        sent.clear()
+        await SCH.tick_confirm(now)
+        assert len(sent) == 1 and size in sent[0] and ("hors avis de JARVIS" in sent[0]) is off
+
+
 def test_bilan():
     rows = [{"day": "2026-10-08", "symbol": "A", "status": "confirmé", "brut_r": -1.0, "confirme_r": 0.5},
             {"day": "2026-10-08", "symbol": "B", "status": "annulé", "brut_r": -0.4, "confirme_r": None}]

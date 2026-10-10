@@ -7,7 +7,8 @@ bougies de 5 min en temps réel (Twelve Data ; Alpaca a 16 min de retard) :
 - annulé : une bougie 5 min clôture sous le stop, ou le TP1 est touché avant la confirmation ;
 - confirmé : le prix est revenu vers l'entrée (plus bas ≤ entrée) puis une bougie 5 min, close après
   le premier quart d'heure, clôture au-dessus du VWAP de la séance → ordre stop d'achat 1 cent
-  au-dessus de son plus haut, stop du plan, taille pour JARVIS_RISK_EUR (20 € par défaut) ;
+  au-dessus de son plus haut, stop du plan, taille de la règle unique (risque du grade, JARVIS_RISK_EUR = 20 €
+  au plus ; ta règle de 20 €, dite hors avis de JARVIS, quand le grade ne propose rien) ;
 - expiré : rien à 11 h 30 New York.
 
 Mesure, à la clôture : chaque GO est rejoué deux fois sur les bougies du jour, « brut » (acheté à
@@ -122,24 +123,46 @@ def expire_due(now: datetime, day_open: datetime) -> bool:
 # --- Messages -----------------------------------------------------------------------------
 
 def shares(trigger: float, stop: float, risk_usd: float | None) -> int | None:
+    """Actions entières pour `risk_usd` de risque (même arrondi que Killmode) ; 0 si une seule action le dépasse."""
     if not risk_usd or trigger <= stop:
         return None
-    return int(risk_usd // (trigger - stop))
+    return int(risk_usd / (trigger - stop) + 1e-9)
 
 
-def event_text(symbol: str, go: dict, ev: dict, now: datetime, risk_eur: float, usd_per_eur: float | None) -> str:
+def over_budget(entry: float, stop: float, risk_eur: float, usd_per_eur: float) -> str:
+    """« 1 action = 26 € de risque, au-delà de 20 € » : la taille à ce risque vaut 0 action."""
+    return f"1 action = {(entry - stop) / usd_per_eur:.0f} € de risque, au-delà de {risk_eur:g} €"
+
+
+def off_grade(grade: dict | None, risk_eur: float) -> str | None:
+    """Taille à la règle de Simão quand le grade ne propose rien (0 %) : dite comme telle, avec la ligne du grade."""
+    if not grade or grade.get("risque_propose", 0) > 0:
+        return None
+    from app.lab import grade as GRADE  # import tardif : le labo importe ce module
+
+    return (f"-# Taille à ta règle de {risk_eur:g} € (hors avis de JARVIS : grade {grade['grade']}, 0 % proposé).\n"
+            + GRADE.plan_line(grade))
+
+
+def event_text(symbol: str, go: dict, ev: dict, now: datetime, risk_eur: float, usd_per_eur: float | None,
+               grade: dict | None = None) -> str:
+    """`risk_eur` : la règle unique de taille (grade, plafond de 20 €), ou ta règle de 20 € quand le grade `grade`
+    ne propose rien (dit dans le message)."""
     if ev["kind"] == "annulé":
         return f"❌ **{symbol} annulé** : {ev['why']}. Pas de trade."
     risk_usd = risk_eur * usd_per_eur if usd_per_eur else None
     qty = shares(ev["trigger"], go["stop"], risk_usd)
     size = (f" · **{qty} actions** ({risk_eur:g} € ≈ {risk_usd:.0f} $ de risque, "
-            f"{_num(round(qty * ev['trigger'], 2))} $)" if qty else "")
+            f"{_num(round(qty * ev['trigger'], 2))} $)" if qty else
+            f" · {over_budget(ev['trigger'], go['stop'], risk_eur, usd_per_eur)} : pas de taille" if qty == 0 else "")
     tps = " · ".join(f"TP{i} {_num(p)}" for i, p in enumerate(go["targets"], start=1))
     r = (go["targets"][1] - ev["trigger"]) / (ev["trigger"] - go["stop"]) if len(go["targets"]) > 1 else None
+    off = off_grade(grade, risk_eur)
     return (f"✅ **{symbol} confirmé** ({time_fr(now, now)}) : repli tenu, clôture 5 min au-dessus du VWAP "
             f"({_num(ev['vwap'])}).\nOrdre : **stop d'achat {_num(ev['trigger'])}** · stop {_num(go['stop'])}"
             f"{size}\n{tps}" + (f" · TP2 à {r:.1f} R" if r is not None else "")
-            + "\n-# Valable jusqu'à 11 h 30 New York ; au-delà, annule l'ordre s'il n'est pas déclenché.")
+            + "\n-# Valable jusqu'à 11 h 30 New York ; au-delà, annule l'ordre s'il n'est pas déclenché."
+            + (f"\n{off}" if off else ""))
 
 
 def expired_text(symbols: list[str]) -> str:

@@ -237,7 +237,7 @@ dialog .actions { display: flex; gap: 8px; justify-content: flex-end; }
       <label>Entrée<input name="entry" type="number" step="any" inputmode="decimal" placeholder="cours actuel"></label>
       <label>Stop<input name="stop" type="number" step="any" inputmode="decimal" placeholder="auto (invalidation)"></label>
       <label>Objectifs<input name="targets" inputmode="decimal" placeholder="auto (ex. 286.8 290.5 299.5)"></label>
-      <label>Capital<input name="capital" type="number" step="any" inputmode="decimal" placeholder="facultatif"></label>
+      <label>Capital (€)<input name="capital" type="number" step="any" inputmode="decimal" placeholder="facultatif"></label>
       <button type="submit">Calculer le plan</button>
     </form>
     <div id="preview"></div>
@@ -651,17 +651,29 @@ function scoreHtml(p) {
     ${news.length ? `<div class="small" style="margin-top:8px">${news.map((n) => `<div>${tone[n.tone] || ""} ${safeUrl(n.url) ? `<a href="${esc(safeUrl(n.url))}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a>` : esc(n.title)}</div>`).join("")}</div>` : ""}`;
 }
 
+function sizeHtml(p) {
+  // Règle unique en euros (taille de JARVIS), ou ta règle de 20 € à part quand le grade ne propose rien.
+  const qty = (s) => p.market !== "stock" ? `taille ${fmt(s.quantity)} pour ${fmt(s.notional)} $`
+    : s.quantity < 1 ? `pas d'ordre, 1 action = ${fmt(s.unit_risk_eur)} € de risque, au-delà de ${fmt(s.risk_amount_eur)} €`
+    : `${s.quantity} action${s.quantity > 1 ? "s" : ""} pour ${fmt(s.notional)} $`;
+  const s = p.sizing, rule = p.sizing_regle;
+  if (s && s.risk_amount_eur != null) return ` · 💰 risque ${fmt(s.risk_amount_eur)} € (${fmt(s.risk_amount)} $) : ${qty(s)}`;
+  if (s) return ` · 💰 risque ${s.risk_pct} % = ${fmt(s.risk_amount)} · taille ${fmt(s.quantity)} (${fmt(s.notional)}) · levier ${s.leverage}×`;
+  if (rule) return ` · 💰 JARVIS ne propose pas de taille (grade ${esc((p.grade || {}).grade || "non noté")} : 0 %). Ta règle de ${fmt(rule.risk_amount_eur)} € : ${qty(rule)} (exception, hors avis de JARVIS)`;
+  return "";
+}
+
 function planHtml(p) {
   const mark = { true: "✅", false: "❌", null: "➖" }, c = p.checklist;
-  const s = p.sizing, g = p.grade;
+  const g = p.grade;
   return `<div class="preview">
     <div class="row between">
       <div class="row"><span class="pill ${p.side}">${p.side}</span><span class="sym">${esc(p.symbol)}</span><span class="pill ${verdictClass(c.verdict)}">${esc(c.verdict)}</span></div>
       <div class="num">Entrée <b>${fmt(p.entry)}</b> · SL <b class="down">${fmt(p.stop)}</b> <span class="muted">(${pct(p.stop_pct)})</span></div>
     </div>
     ${scoreHtml(p)}
-    <div class="small muted" style="margin-top:4px">Stop ${esc(p.stop_source)}${s ? ` · 💰 risque ${s.risk_pct} % = ${fmt(s.risk_amount)} · taille ${fmt(s.quantity)} (${fmt(s.notional)}) · levier ${s.leverage}×` : ""}</div>
-    ${g ? `<div class="small" style="margin-top:4px">🏅 Grade JARVIS <b>${esc(g.grade)}</b> · risque proposé <b>${g.risque_propose} %</b>${g.observation ? " · plan en observation" : ""} <span class="muted">(${esc(g.raison)})</span></div>` : ""}
+    <div class="small muted" style="margin-top:4px">Stop ${esc(p.stop_source)}${sizeHtml(p)}</div>
+    ${g ? `<div class="small" style="margin-top:4px">🏅 Grade JARVIS <b>${esc(g.grade)}</b> · risque proposé <b>${g.risque_propose} %</b>${g.observation ? " · plan en observation" : ""} <span class="muted">(${esc(g.raison)})</span>${g.hors_budget ? ` · ⚠️ <b>hors budget</b> : risque demandé ${g.risque_demande} %, ton choix` : ""}</div>` : ""}
     <div class="tps">${p.targets.map((x) => `<div class="tp">
       <div class="name">${x.name}</div>
       <div class="lvl-line"><b class="num">${fmt(x.price)}</b> <span class="muted small">${pct(x.pct)} · ${x.r_multiple} R</span></div>

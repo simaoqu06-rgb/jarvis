@@ -268,6 +268,18 @@ async def _usd_per_eur() -> float | None:
         return None
 
 
+def _size_rule(now: datetime) -> tuple[dict, float]:
+    """Grade du moment (actions, trades suivis) et risque en € des tailles des GO confirmés et du potentiel +10 :
+    la règle unique (risque du grade, 20 € au plus) ; ta règle de 20 € quand le grade ne propose rien (le message
+    le dit). Un grade illisible vaut 0 % (fail-closed)."""
+    try:
+        g = lab_grade.risk_now("stock", book.trades, now)
+    except Exception as exc:
+        log.warning("Grade illisible pour la taille des GO (%s: %s) : 0 %%", type(exc).__name__, exc)
+        g = lab_grade.unreadable(exc)
+    return g, trading.recommended_eur(g["risque_propose"]) or trading.rule_eur()
+
+
 async def _bars_5min(symbol: str) -> list[dict] | None:
     try:
         return await twelvedata.candles(symbol, 5, outputsize=100)
@@ -311,7 +323,7 @@ async def tick_confirm(now: datetime | None = None) -> None:
     last_closed = int(now.timestamp()) // CONFIRM.BAR * CONFIRM.BAR - CONFIRM.BAR
     if all((confirm_state["gos"][s]["last_bar"] or 0) >= last_closed for s in pending):
         return  # pas de nouvelle bougie 5 min close : rien à relire (un crédit Twelve Data par lecture)
-    texts, rate = [], None
+    texts, rate, size = [], None, None
     for s in pending:
         raw = await _bars_5min(s)
         if not raw:
@@ -322,7 +334,10 @@ async def tick_confirm(now: datetime | None = None) -> None:
             go["events"].append(ev)
             if ev["kind"] == "confirmé" and rate is None:
                 rate = await _usd_per_eur()
-            texts.append(CONFIRM.event_text(s, go, ev, now, env_float("JARVIS_RISK_EUR", 20.0), rate))
+            if ev["kind"] == "confirmé" and size is None:
+                size = _size_rule(now)  # une fois par passage
+            g, risk_eur = size or (None, trading.rule_eur())
+            texts.append(CONFIRM.event_text(s, go, ev, now, risk_eur, rate, g))
     async with _lock:
         CONFIRM.save(confirm_state)
         if texts:
@@ -339,14 +354,15 @@ async def tick_plus10(now: datetime | None = None) -> None:
     if not kind:
         return
     rate = await _usd_per_eur()
+    g, risk_eur = _size_rule(now)
     try:
-        result = await PLUS10.confirmed(kind, now, env_float("JARVIS_RISK_EUR", 20.0) * rate if rate else None)
+        result = await PLUS10.confirmed(kind, now, risk_eur * rate if rate else None)
     except Exception as exc:
         log.warning("Potentiel +10 : passage %s en échec : %s", kind, exc)
         return  # nouvelle tentative à la minute suivante, dans la fenêtre du passage
     PLUS10.mark_done(kind, now)
     bounds = CAL.session_bounds(now.astimezone(NEW_YORK).date())
-    text = PLUS10.confirmed_text(result)
+    text = PLUS10.confirmed_text(result | {"eurusd": rate, "risk_eur": risk_eur, "grade": g})
     async with _lock:
         _queue(text, "scanner", expires_at=bounds[1] if bounds else None)
         _dm_trades(text)

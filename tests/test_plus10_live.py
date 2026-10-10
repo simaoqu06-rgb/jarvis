@@ -141,3 +141,40 @@ async def test_tick_du_scheduler_envoie_salon_et_mp(live, monkeypatch):
     assert len(sent) == 1 and sent == dms and "liste confirmée" in sent[0] and "11 actions" in sent[0]  # 20 € × 1,15 = 23 $ / 2,02
     await SCH.tick_plus10(at(9, 47))
     assert len(sent) == 1  # une fois par passage
+
+
+async def test_tick_taille_selon_le_grade(live, monkeypatch):
+    from app import scheduler as SCH
+    from app.lab import grade as GR
+
+    async def rate():
+        return 1.15
+
+    sent = []
+    monkeypatch.setattr(SCH, "_usd_per_eur", rate)
+    monkeypatch.setattr(SCH, "_queue", lambda texts, kind="", **kw: sent.append(texts))
+    monkeypatch.setattr(SCH, "_dm_trades", lambda texts: None)
+    monkeypatch.setattr(SCH, "_kick_outbox", lambda: None)
+    monkeypatch.setattr(SCH.book, "trades", [])
+    monkeypatch.setenv("JARVIS_CAPITAL", "500")
+    stock = {"grade": "A", "rang": 16, "non_note": False, "risque_grade": 3.0, "risque_max": 3.0, "mode_survie": False}
+    monkeypatch.setattr(GR, "current", lambda: {"marches": {"stock": stock}, "verifie_le": at(9, 46).isoformat()})
+    live.now = at(9, 46)
+    await SCH.tick_plus10(at(9, 46))
+    assert "8 actions" in sent[0]  # 500 € × 3 % = 15 € : 17,25 $ / 2,02
+    assert "taille pour 15 € de risque (règle de JARVIS : grade A, 3 % proposé)" in sent[0]
+    assert "hors avis" not in sent[0]
+
+
+def test_texte_grade_f_hors_avis_et_action_hors_budget():
+    c = {"kind": "confirmee", "listes": {"s10": [], "rebond": []}, "mesures": {}, "niveaux_complets": {},
+         "gaps_attente": {}, "risk_usd": 23.0, "eurusd": 1.15, "risk_eur": 20.0,
+         "grade": {"grade": "F", "risque_propose": 0.0, "observation": True, "raison": "grade F"}}
+    txt = P.confirmed_text(c)
+    assert "-# Taille à ta règle de 20 € (hors avis de JARVIS : grade F, 0 % proposé)." in txt
+    assert "🏅 Grade JARVIS **F** · risque proposé **0 %** : plan en observation (grade F)" in txt
+    until = int(at(10, 0).timestamp())
+    assert P._order({"entry": 130.0, "stop": 100.0, "entry_until": until}, 23.0, 1.15).endswith(
+        " · 1 action = 26 € de risque, au-delà de 20 €")
+    assert P._order({"entry": 13.0, "stop": 12.0, "entry_until": until}, 23.0, 1.15).endswith(
+        " · 23 actions pour ce risque")

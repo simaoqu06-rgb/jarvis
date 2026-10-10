@@ -4,6 +4,7 @@ Grade de JARVIS (F- à S+, risque permis), avancement du rejeu, chiffres clés, 
 leur état, dernières règles testées, dernier message du matin. Les décisions se prennent dans le
 cockpit principal (propositions en attente), sur Discord (boutons, `!oui N` / `!non N`).
 """
+from datetime import datetime, timezone
 from html import escape
 
 from app.lab import method as M
@@ -64,14 +65,21 @@ def _grade_card(grade: dict | None) -> str:
         detail = (f'{_r(m.get("esperance_r"))} par trade sur {m.get("trades")} trades · réussite '
                   f'{round(100 * (m.get("reussite") or 0))} % · TP1 {round(100 * (m.get("tp1") or 0))} %'
                   if not g.get("non_note") else _e(m.get("raison")))
+        window = GR.window_text(m.get("fenetre"))
+        detail += f'<br>{_e(window)}' if window else ""
         flags = (" · ☠️ méthode morte" if g.get("morte") else " · 🆘 mode survie" if g.get("mode_survie") else "")
         wait = (f'<div class="small">⏳ hausse vers {_e(GR.name(g["hausse"]["vers"]))} en attente de ton accord</div>'
                 if g.get("hausse") else "")
         cells.append(f'<div><b>{_e(GR.MARKET_FR[market].capitalize())} : <span class="num">{_e(g["grade"])}</span></b>'
                      f' <span class="small muted">mesuré {_e(m.get("grade"))}</span><div class="small">risque permis '
-                     f'{g["risque_grade"]:g} % (plafond {g["risque_max"]:g} %){flags}</div>'
+                     f'{_e(GR.practical(g["risque_grade"]))} (plafond {g["risque_max"]:g} %){flags}</div>'
                      f'<div class="small muted">{detail}</div>{wait}</div>')
-    return f'<div class="card"><h2>🏅 Grade de JARVIS</h2><div class="grid">{"".join(cells)}</div></div>'
+    age = GR.age_h(grade, datetime.now(timezone.utc))
+    stale = ""
+    if age is None or age > GR.MAX_AGE_H:
+        when = "aucun passage du labo daté" if age is None else f"dernier passage du labo il y a {age:.0f} h"
+        stale = f'<div class="small">⚠️ Grade périmé ({when}) : JARVIS ne propose aucun risque (0 %)</div>'
+    return f'<div class="card"><h2>🏅 Grade de JARVIS</h2>{stale}<div class="grid">{"".join(cells)}</div></div>'
 
 
 def render(st: dict, proposals: list[dict], rules: list[dict], morning: dict | None, dm: bool,

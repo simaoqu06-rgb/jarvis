@@ -574,7 +574,20 @@ async def analyze(symbol: str, now: datetime | None = None, source: str | None =
            "catalyseur": cat, "potentiel": PO.hint(gap) if gap is not None else None, "jarvis": None, "source": src}
     if verdict == "kill":
         out["jarvis"] = await _jarvis_reading(symbol, chart["plan"], cat, source, now)
+        # Le change du moment (même source que le solde du journal) pour l'ordre affiché, et le grade : le KILL est
+        # pris à 20 € hors grade, dit comme tel.
+        out["eurusd"] = await eurusd() or EURUSD_DEFAULT
+        out["grade"] = _grade_now(now)
     return out
+
+
+def _grade_now(now: datetime) -> dict:
+    from app.lab import grade as GRADE  # import tardif : le grade lit le labo
+
+    try:
+        return GRADE.risk_now("stock", T.taken_trades(), now)
+    except Exception as exc:  # fail-closed : 0 %
+        return GRADE.unreadable(exc)
 
 
 def _company(symbol: str, profile: dict | None, cat: dict | None, feats: dict | None, before: list[dict]) -> dict:
@@ -747,7 +760,8 @@ def record(a: dict, now: datetime | None = None, sent: float | None = None) -> d
             "codes": a["codes"] if "codes" in a else catalyst_codes(cat, now), "motif": call_motif(cat, now),
             "actus": [{"titre": n["title"], "publiee": n["published_at"], "ton": n["tone"],
                        "motif": motif(n["title"]) if n["tone"] == "positive" else None} for n in fresh[:8]],
-            "resultats": cat.get("last_earnings"), "actu": pos[0]["title"] if pos else None, "resultat": None}
+            "resultats": cat.get("last_earnings"), "actu": pos[0]["title"] if pos else None, "resultat": None,
+            "hors_budget": plan["entry"] - plan["stop"] > RISK_EUR * (a.get("eurusd") or EURUSD_DEFAULT) + 1e-9}
     if sent is not None:
         call["envoye_a"] = math.ceil(sent)
     book.append(call)
@@ -1185,6 +1199,28 @@ async def settle_due(now: datetime | None = None) -> int:
 def shares(risk: float, rate: float | None = None) -> int:
     """Actions achetées pour RISK_EUR de risque à `risk` $ par action (au moins une)."""
     return max(1, math.floor(RISK_EUR * (rate or EURUSD_DEFAULT) / risk + 1e-9))
+
+
+def hors_budget(c: dict) -> bool:
+    """Appel où une seule action dépassait RISK_EUR de risque, au change de son solde (celui de `_at_size`) : 1 action
+    forcée par `shares`, un bracket sur TP2 ; compté à part au bilan."""
+    rate = (c.get("resultat") or {}).get("eurusd") or EURUSD_DEFAULT
+    return c["entry"] - c["stop"] > RISK_EUR * rate + 1e-9
+
+
+def taken_sizing(plan: dict) -> dict:
+    """`!prends … kill` : la taille du KILL gardée sur le trade (RISK_EUR hors grade, au moins une action, au change
+    du plan) pour que le budget de risque ouvert la compte ; au-delà de RISK_EUR (une action trop chère), le risque
+    réel de cette action."""
+    rate = (plan.get("sizing") or plan.get("sizing_regle") or {}).get("eurusd") or EURUSD_DEFAULT
+    risk = abs(plan["entry"] - plan["stop"])
+    q = shares(risk, rate)
+    over = risk > RISK_EUR * rate + 1e-9
+    capital = T.env_float("JARVIS_CAPITAL", 0.0) or None  # en euros
+    eur = q * risk / rate if over else RISK_EUR
+    return {"capital": capital, "risk_pct": None, "risk_amount_eur": round(eur, 2), "risk_amount": round(eur * rate, 2),
+            "eurusd": rate, "quantity": q, "notional": round(q * plan["entry"], 2),
+            "unit_risk_eur": round(risk / rate, 2), "leverage": None, "hors_grade": True, "hors_budget": over}
 
 
 def _brackets(q: int, n: int) -> list[int]:
@@ -1741,12 +1777,12 @@ def ny_time(ts: float) -> str:
     return f"{t.hour} h {t.minute:02d}" if t.minute else f"{t.hour} h"
 
 
-def stop_cost(entry: float, stop: float) -> dict:
-    """Frais d'un trade stoppé, en R : à la taille de Simão (RISK_EUR, un bracket par objectif, une entrée et un
-    stop chacun, minimum par ordre, glissement d'au moins un demi-pas), au labo, et au stress de 3 c de Gemini
-    (mêmes brackets et minimums, jamais plus doux que le chiffre réel, comme `stress_20e`)."""
+def stop_cost(entry: float, stop: float, rate: float | None = None) -> dict:
+    """Frais d'un trade stoppé, en R : à la taille de Simão (RISK_EUR au change `rate`, un bracket par objectif, une
+    entrée et un stop chacun, minimum par ordre, glissement d'au moins un demi-pas), au labo, et au stress de 3 c de
+    Gemini (mêmes brackets et minimums, jamais plus doux que le chiffre réel, comme `stress_20e`)."""
     risk = entry - stop
-    q = shares(risk)
+    q = shares(risk, rate)
     plan = IBKR_PLANS.get(IBKR_PLAN, IBKR_PLANS["fixe"])
     parts = _brackets(q, len(ST.TARGETS_R))
     fees = sum(order_commission(n, entry, plan) + order_commission(n, stop, plan) for n in parts) / (q * risk)
@@ -1756,10 +1792,11 @@ def stop_cost(entry: float, stop: float) -> dict:
             "stress": (max(_half_tick_slip(entry), s3) + max(_half_tick_slip(stop), s3)) / risk + fees}
 
 
-def bracket_orders(entry: float, stop: float, targets: list[float]) -> list[tuple[int, float]]:
+def bracket_orders(entry: float, stop: float, targets: list[float], rate: float | None = None) -> list[tuple[int, float]]:
     """Ce que Simão saisit chez IBKR : les actions de chaque bracket et son objectif, comme le journal les solde
-    (`_legs` : avec moins d'actions que d'objectifs, l'objectif du milieu de la part du bracket)."""
-    q = shares(entry - stop)
+    (`_legs` : avec moins d'actions que d'objectifs, l'objectif du milieu de la part du bracket), au change `rate`
+    (celui du journal ; 1,15 par défaut)."""
+    q = shares(entry - stop, rate)
     thirds = [{"prix": p, "part": 1 / len(targets), "raison": f"tp{i}"} for i, p in enumerate(targets, start=1)]
     return [(n, e["prix"]) for n, e in _legs(q, len(targets), thirds)]
 
@@ -1784,10 +1821,17 @@ def text(a: dict, lab: str | None = None) -> str:
                      f" - {_fr(plan['range_high'])}), valable jusqu'à {_paris(plan['until'], now)} · **stop "
                      f"{_fr(plan['stop'])}** ({_pct((plan['stop'] / plan['entry'] - 1) * 100)})")
         lines.append(f"{tps} · un tiers par objectif, stop à l'entrée après TP1, le reste vendu à la clôture")
-        orders = bracket_orders(plan["entry"], plan["stop"], plan["targets"])
+        rate = a.get("eurusd") or EURUSD_DEFAULT  # le change du journal, pas 1,15 implicite
+        orders = bracket_orders(plan["entry"], plan["stop"], plan["targets"], rate)
         q = sum(n for n, _ in orders)
         legs = " · ".join(f"{_n(n, 'action')} → TP{plan['targets'].index(p) + 1} {_fr(p)}" for n, p in orders)
-        lines.append(f"📋 Chez IBKR, à {RISK_EUR:g} € de risque : **{_n(q, 'action')} en {_n(len(orders), 'bracket')}** "
+        rpa = plan["entry"] - plan["stop"]
+        over = rpa > RISK_EUR * rate + 1e-9
+        g = a.get("grade")
+        size = (f"1 action = {rpa / rate:.0f} € de risque (au-delà de {RISK_EUR:g} €)" if over
+                else f"à {RISK_EUR:g} € de risque")
+        size += (f" hors grade (grade actuel {g['grade']}, risque proposé {g['risque_propose']:g} %)" if g else "")
+        lines.append(f"📋 Chez IBKR, {size} : **{_n(q, 'action')} en {_n(len(orders), 'bracket')}** "
                      f"(stop d'achat {_fr(plan['entry'])} en GTD jusqu'à "
                      f"{datetime.fromtimestamp(plan['until'], NEW_YORK):%H:%M:%S} heure de New York, SL "
                      f"{_fr(plan['stop'])} et TP liés en ordres du jour) : "
@@ -1798,7 +1842,10 @@ def text(a: dict, lab: str | None = None) -> str:
                      f"{ny_time(plan['close_ts'] - 60)} New York ({_paris(plan['close_ts'] - 60, now)} à Paris), "
                      "annule les TP et SL restants puis vends le reste au marché en un ordre. "
                      "C'est la gestion que le journal mesure.")
-        cost = stop_cost(plan["entry"], plan["stop"])
+        if over:
+            lines.append(f"-# ⚠️ Hors budget : à {RISK_EUR:g} € il faudrait 0 action ; 1 action, un seul bracket "
+                         "sur TP2.")
+        cost = stop_cost(plan["entry"], plan["stop"], rate)
         lines.append(f"-# Un trade stoppé coûte ≈ {_fr(cost['reel'])} R de frais à {RISK_EUR:g} € de risque "
                      f"({_n(len(cost['brackets']), 'bracket')} IBKR {IBKR_PLAN}, minimum par ordre compris) ; labo "
                      f"≈ {_fr(cost['labo'])} R ; avec au moins "
@@ -2039,6 +2086,13 @@ def bilan_text(book: list[dict], trades: list[dict] | None = None, now: datetime
                      + ", minute ambiguë dans le pire de tous les ordres compatibles avec les bougies (hypothèses "
                      "d'exécution du journal). "
                      f"IC 95 % en t, indicatif avant {READ_AT} KILL.")
+    over = [c for c in kills if c.get("resultat") and hors_budget(c)]
+    if over:
+        rs = [value(c) for c in over if value(c) is not None]
+        lines.append(f"-# Hors budget : {_n(len(over), 'KILL soldé')} où une seule action risquait plus de "
+                     f"{RISK_EUR:g} € (1 action forcée, un bracket sur TP2), comptés dans les chiffres ci-dessus"
+                     + (f" ; à part : {SS._r(sum(rs) / len(rs))} R par trade sur {_n(len(rs), 'déclenché')}" if rs
+                        else "") + ".")
     for line in (errors_line(cur), _call_gap_line(cur), stress_line(cur), execution_line(kills, now),
                  ambiguous_line(kills), risk_line(kills),
                  status_line([("KILL", kills), ("témoin propre", clean_),
