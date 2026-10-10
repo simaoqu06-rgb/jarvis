@@ -699,7 +699,7 @@ def test_etiquette_absolue():
         "méthode positive mais non prouvée (IC95 −0,010 ; +0,110)"
     assert M.absolute_label({"esperance_r": 0.05, "ic95": [0.01, 0.09]}) == ""
     assert M.absolute_label({"esperance_r": 0.05, "ic95": None}) == "" == M.absolute_label({"esperance_r": None})
-    assert M.absolute_fr({"esperance_r": -0.12}) == " Filtre moins perdant, méthode toujours perdante."
+    assert M.absolute_fr({"esperance_r": -0.12}, 0.05) == " Filtre moins perdant, méthode toujours perdante."
 
 
 def test_labo_et_cockpit_disent_methode_toujours_perdante(db, monkeypatch):
@@ -731,3 +731,32 @@ def test_bascule_d_une_methode_toujours_perdante_le_dit(db):
     note = json.loads(db.conn.execute("SELECT note FROM method_versions WHERE version = 'v2'").fetchone()[0])
     assert note["rang_challenger"] == 1 and note["seuil_z"] == round(V.challenger_z(1, 20), 3)
     assert note["challenger"]["esperance_r"] < 0 and note["challenger"]["ic95"][1] < 0
+
+
+def test_ecart_inconnu_ou_negatif_ne_dit_pas_filtre_moins_perdant(db, monkeypatch):
+    """Relecture de la fusion (L3) : « filtre moins perdant » seulement quand l'écart est connu ET positif. Le
+    premier jour de trades d'un challenger (écart inconnu sous 2 jours), !labo et le cockpit disaient « filtre moins
+    perdant » même quand le filtre faisait pire ; promotion_text et _promote (écart recalculé à la décision de
+    Simão) l'écrivaient sans regarder l'écart."""
+    from app.lab import page as P
+
+    m = M.measure_days({"2026-10-12": [-1.0, 10, -1.2, 6]})  # 1 jour : −0,20 R gardés contre −0,10 R
+    assert m["delta_r"] is None
+    assert M.absolute_label({"esperance_r": -0.2}, m["delta_r"]) == "méthode toujours perdante"
+    assert M.absolute_fr({"esperance_r": -0.2}) == " Méthode toujours perdante."
+    challenger_ready(db, losers, n_days=1, per_day=10)
+    cmp = cmp_at(1) | {"delta_r": None, "z": None, "marches": ["stock"]}
+    cmp["challenger"]["esperance_r"], cmp["champion"]["esperance_r"] = -0.2, -0.1
+    monkeypatch.setattr(M, "compare", lambda *a, **k: cmp)
+    st = M.state(db.conn)
+    assert st["challenger"]["etiquette"] == "méthode toujours perdante"
+    assert M.state_line(st).endswith("· méthode toujours perdante") and "moins perdant" not in M.state_line(st)
+    html = P.render({"exists": True, "methode": st}, [], [], None, False)
+    assert "<b>Méthode toujours perdante.</b>" in html and "moins perdant" not in html
+    # Promotion proposée puis mise en place : l'étiquette suit l'écart de la comparaison.
+    champ, chall = M.champion(db.conn), M.challenger(db.conn)
+    worse = cmp_at(20, delta=-0.01) | {"marches": ["stock"]}
+    worse["challenger"]["esperance_r"], worse["champion"]["esperance_r"] = -0.12, -0.11
+    text = M.promotion_text(worse, dict(V.DEFAULTS), champ, chall, 20)
+    assert "Méthode toujours perdante. Regard 1 sur 3." in text and "moins perdant" not in text
+    assert M._promote(db, champ, chall, worse, NOW).endswith("(contre 3). Méthode toujours perdante.")

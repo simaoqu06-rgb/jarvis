@@ -327,8 +327,9 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
   réparti sur les 3 regards, en t de Student à g − 1 degrés (g jours du regard) : 2,53 au premier regard
   du premier challenger, 4,58 pour le dixième. Il ne bascule pas seul : tu reçois une proposition « mettre
   en place la méthode v2 » (boutons, `!oui N` / `!non N`), avec l'espérance des trades gardés (« filtre
-  moins perdant, méthode toujours perdante » si elle reste ≤ 0, « positive mais non prouvée » si son IC95
-  touche 0 ; !labo et le cockpit le disent aussi). Approuvée : « Méthode v2 en place : … » ; refusée : v2
+  moins perdant, méthode toujours perdante » si elle reste ≤ 0, « méthode toujours perdante » seul tant que
+  l'écart n'est pas connu et positif, « positive mais non prouvée » si son IC95 touche 0 ; !labo et le
+  cockpit le disent aussi). Approuvée : « Méthode v2 en place : … » ; refusée : v2
   est retirée ; sans réponse, il reste mesuré et le regard suivant remplace la proposition ; une
   promotion du dernier regard sans réponse depuis 14 jours est retirée. Pas assez net au dernier regard
   (ou 100 jours sans l'atteindre), il est retiré (message aussi). Seuils `challenger_looks_days`,

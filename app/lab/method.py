@@ -707,13 +707,14 @@ def _where(cmp: dict) -> str:
 
 def absolute_label(h: dict, delta: float | None = None) -> str:
     """Étiquette absolue des trades gardés (« méthode toujours perdante »…) ; vide si rien à dire. Un filtre peut
-    seulement perdre moins : « moins perdant » seulement quand l'écart relatif `delta` est positif (une promotion
-    l'est toujours). Espérance positive : « non prouvée » tant que la borne basse de son IC95 n'est pas > 0."""
+    seulement perdre moins : « moins perdant » seulement quand l'écart relatif `delta` est connu et positif (inconnu
+    sous 2 jours de trades : rien ne dit que le filtre perd moins). Espérance positive : « non prouvée » tant que la
+    borne basse de son IC95 n'est pas > 0."""
     e = h.get("esperance_r")
     if e is None:
         return ""
     if e <= 0:
-        return "filtre moins perdant, méthode toujours perdante" if delta is None or delta > 0 else \
+        return "filtre moins perdant, méthode toujours perdante" if delta is not None and delta > 0 else \
             "méthode toujours perdante"
     ci = h.get("ic95")
     if ci and ci[0] is not None and ci[0] <= 0:
@@ -733,7 +734,7 @@ def promotion_text(cmp: dict, cfg: dict, champ: dict, chall: dict, look: int) ->
             f"jours de trades{_where(cmp)} : {fr(cmp['delta_r'], 3)} par trade de mieux que {champ['version']}, "
             f"z = {num_fr(cmp['z'])}, {threshold_fr(cmp, cfg)} ; {fr(h['esperance_r'], 3)} par trade sur "
             f"{h['declenches']} trades gardés, contre {fr(c['esperance_r'], 3)} sur {c['declenches']} ; potentiel +10 "
-            f"capturé {h['capture']} fois (contre {c['capture']}).{absolute_fr(h)} "
+            f"capturé {h['capture']} fois (contre {c['capture']}).{absolute_fr(h, cmp['delta_r'])} "
             f"Regard {n_looks.index(look) + 1} sur {len(n_looks)}.")
 
 
@@ -762,7 +763,7 @@ def _promote(db: LabDB, champ: dict, chall: dict, cmp: dict, now: datetime) -> s
             f"(promotion approuvée par Simão). En direct sur {cmp['jours']} jours de trades{_where(cmp)} : "
             f"{fr(h['esperance_r'], 3)} par trade sur {h['declenches']} trades, contre {fr(c['esperance_r'], 3)} sur "
             f"{c['declenches']} pour {champ['version']} ; potentiel +10 capturé {h['capture']} fois "
-            f"(contre {c['capture']}).{absolute_fr(h)}")
+            f"(contre {c['capture']}).{absolute_fr(h, cmp['delta_r'])}")
     event(db, "bascule", chall["version"], text, cmp, now)
     return text
 
