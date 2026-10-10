@@ -389,7 +389,7 @@ def test_nouvelle_declaration_relance_le_rattrapage(tmp_path, monkeypatch):
 
 def test_seuil_candidate_corrige_du_nombre_d_essais():
     assert SS.candidate_z(32) == pytest.approx(2.96, abs=0.01) and SS.candidate_z(60) == pytest.approx(3.14, abs=0.01)
-    assert SS.candidate_z() == pytest.approx(3.40, abs=0.001)  # 148 essais (déclaration n° 8)
+    assert SS.candidate_z() == pytest.approx(3.41, abs=0.001)  # 152 essais (déclaration n° 9)
     db = LabDB(":memory:")
     _rows(db, "pullback", 0.3, 0.2, days=40)   # bat son témoin (z ≈ 2,5), mais trop peu pour 60 essais
     db.conn.execute("UPDATE strat_trades SET temoin_r = r_net - (0.1 + CASE WHEN CAST(substr(day, 9, 2) AS INTEGER) "
@@ -469,8 +469,8 @@ def test_essais_declares():
     # et en 1 h (crypto), soit 3 couples de plus ; n° 5 : Killmode (actions), un couple de plus ; n° 6 : 3 sorties
     # de plus sur les 9 couples des actions ; n° 7 : 2 bras × 2 stops, avec la seule sortie stop fixe ; n° 8 : les
     # 3 filtres FRSH du bras confirmé (stop d'origine) et Killmode complet (espérance, écart au témoin propre).
-    assert len(t) == 148 and len(ST.EXITS) == 7 and len(ST.STOCK_EXITS) == 3
-    assert t[-2:] == list(ST.KILL_COMPLETE_TRIALS)
+    assert len(t) == 152 and len(ST.EXITS) == 7 and len(ST.STOCK_EXITS) == 3
+    assert t[-6:] == list(ST.KILL_COMPLETE_TRIALS) + list(ST.PLUS10_TRIALS)
     assert {x["exit"] for x in t if x["market"] == "crypto"} == set(ST.EXITS)
     assert {x["exit"] for x in t if x["market"] == "stock"} == set(ST.EXITS) | set(ST.STOCK_EXITS) | {"r_20e"}
     assert [x for x in t if x["strategy"] in ST.GO_STRATEGIES] == [
@@ -631,4 +631,4 @@ def test_route_api_des_strategies(tmp_path, monkeypatch):
     _rows(db, "pullback", 0.3, -0.2)
     r = TestClient(main.app).get("/api/lab/strategies", headers={"X-Lab-Key": "cle"})
     assert r.status_code == 200 and "pullback" in r.json()["strategies"]["stock"]
-    assert r.json()["declaration"]["essais"] == 148 and r.json()["declaration"]["z_candidate"] == 3.4
+    assert r.json()["declaration"]["essais"] == 152 and r.json()["declaration"]["z_candidate"] == 3.41

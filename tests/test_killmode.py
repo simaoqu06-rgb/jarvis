@@ -77,7 +77,7 @@ def test_regle_killmode_refus():
 
 def test_killmode_au_labo():
     assert "killmode" in ST.STRATEGIES and ST.STRATEGIES["killmode"]["markets"] == ("stock",)
-    assert ST.DECLARATION >= 5 and len(ST.trials()) == 148  # n° 5, sorties de Gemini (n° 6), GO (n° 7), n° 8
+    assert ST.DECLARATION >= 5 and len(ST.trials()) == 152  # n° 5, sorties de Gemini (n° 6), GO (n° 7), n° 8, n° 9
     rows = {r["strategy"]: r for r in ST.strategy_rows(day(), "AAA", 3, 5.0)}
     k = rows["killmode"]
     assert k["triggered"] == 1 and k["signal_at"] == OPEN + 15 * 60 and k["r_net"] > 0

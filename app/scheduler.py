@@ -20,6 +20,7 @@ from app.notify import bot, discord
 from app.sources import alpaca, twelvedata
 from app.trading import calendar as CAL
 from app.trading import advice, paper, scanner
+from app.trading import plus10 as PLUS10
 from app.trading import confirm as CONFIRM
 from app.trading import proposals as PR
 from app.trading.proposals import proposals
@@ -234,8 +235,13 @@ async def tick_scan() -> None:
                 await _post_all([f"🔭 Scanner pré-ouverture impossible : {exc}"], "scanner")
         return
     bounds = CAL.session_bounds(now_ny.date())
+    text = scanner.text(result)
+    try:  # n° 9 : liste d'attente « potentiel +10 », mesurée, jamais un GO ; son échec ne retient pas le scanner
+        text += "\n\n" + PLUS10.waitlist_text(await PLUS10.waitlist(now))
+    except Exception as exc:
+        log.warning("Potentiel +10 : liste d'attente en échec : %s", exc)
     async with _lock:
-        _queue(scanner.text(result), "scanner", expires_at=bounds[1] if bounds else None)
+        _queue(text, "scanner", expires_at=bounds[1] if bounds else None)
         state.data["scan_date"] = today
         state.save()
         confirm_state.clear()  # GO du jour, relus après l'ouverture par tick_confirm
@@ -322,6 +328,28 @@ async def tick_confirm(now: datetime | None = None) -> None:
             _kick_outbox()
 
 
+async def tick_plus10(now: datetime | None = None) -> None:
+    """n° 9 : liste « potentiel +10 » confirmée au gap d'ouverture (9 h 46 New York) avec les niveaux des essais du
+    labo, puis le range de 30 min de Rebond (10 h 01) ; sur le salon et en MP. Une fois par passage et par séance."""
+    now = now or datetime.now(timezone.utc)
+    kind = PLUS10.due(now)
+    if not kind:
+        return
+    rate = await _usd_per_eur()
+    try:
+        result = await PLUS10.confirmed(kind, now, env_float("JARVIS_RISK_EUR", 20.0) * rate if rate else None)
+    except Exception as exc:
+        log.warning("Potentiel +10 : passage %s en échec : %s", kind, exc)
+        return  # nouvelle tentative à la minute suivante, dans la fenêtre du passage
+    PLUS10.mark_done(kind, now)
+    bounds = CAL.session_bounds(now.astimezone(NEW_YORK).date())
+    text = PLUS10.confirmed_text(result)
+    async with _lock:
+        _queue(text, "scanner", expires_at=bounds[1] if bounds else None)
+        _dm_trades(text)
+        _kick_outbox()
+
+
 def report_due(now: datetime) -> bool:
     now_ny = now.astimezone(NEW_YORK)
     week = now_ny.strftime("%G-W%V")
@@ -391,6 +419,7 @@ CORE_JOBS = [
     ("conseil avant la clôture", tick_closing, MINUTE, False),  # idem
     ("forward-test sur le compte fictif", tick_paper, 2 * MINUTE, True),
     ("contrôle des GO après l'ouverture", tick_confirm, MINUTE, False),  # prend le verrou lui-même pour écrire
+    ("potentiel +10 confirmé", tick_plus10, MINUTE, False),  # n° 9 ; prend le verrou lui-même pour envoyer
 ]
 # Seulement avec les notifications actives.
 JOBS = [
