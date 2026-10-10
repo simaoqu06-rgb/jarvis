@@ -665,7 +665,7 @@ def test_commande_manuelle_de_deploy_puis_archive_automatique(tmp_path):
 
     root = Path(__file__).resolve().parents[1]
     deploy = (root / "DEPLOY.md").read_text(encoding="utf-8")
-    script = deploy.split("docker compose exec -T jarvis-lab python - <<'EOF'\n")[1].split("\nEOF\n")[0]
+    script = deploy.split("docker compose run --rm --no-deps -T jarvis-lab python - <<'EOF'\n")[1].split("\nEOF\n")[0]
     db = _base(tmp_path)
     run = subprocess.run([sys.executable, "-c", script], cwd=tmp_path, capture_output=True, text=True,
                          env=os.environ | {"JARVIS_LAB_DB": str(tmp_path / "lab.db")}, timeout=60)

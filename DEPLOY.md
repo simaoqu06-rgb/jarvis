@@ -164,11 +164,12 @@ L'archive sert seulement à l'audit (`!strategies`, section « Audit », et `GET
 ne la lit pour décider. Le fichier fait à peu près la taille des lignes remplacées ; `data/` n'est jamais effacé
 par le ménage.
 
-En secours (worker arrêté ou ancienne version du code), la même copie à la main, depuis le dossier de JARVIS. Elle
-ne crée une table que si elle manque (l'image n'a pas l'outil `sqlite3`, d'où Python) :
+En secours (worker arrêté ou ancienne version du code), la même copie à la main, depuis le dossier de JARVIS
+(`docker compose run` lance un conteneur à part sur la même image, le même `.env` et le même `data/`, que le worker
+tourne ou non). Elle ne crée une table que si elle manque (l'image n'a pas l'outil `sqlite3`, d'où Python) :
 
 ```bash
-docker compose exec -T jarvis-lab python - <<'EOF'
+docker compose run --rm --no-deps -T jarvis-lab python - <<'EOF'
 import os, sqlite3
 db = os.getenv("JARVIS_LAB_DB", "data/lab.db")
 out = os.path.join(os.path.dirname(db) or ".", "archives", "labo2-avant-n10.db")

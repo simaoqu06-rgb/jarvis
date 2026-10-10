@@ -251,3 +251,17 @@ def test_labo_separe_rattrapage_et_direct_en_attente(tmp_path):
     lines = STATUS.text(STATUS.status(path)).splitlines()
     assert ("Labo v2 : 2 lignes de stratégies (`!strategies`) · rattrapage : 5 jours actions, 0 jour crypto · direct "
             "en attente de calcul : 1 jour actions") in lines
+
+
+# --- W5 : commande de secours de DEPLOY.md ----------------------------------------------------------------------------
+
+def test_copie_de_secours_marche_worker_arrete():
+    """« En secours (worker arrêté…) » : `docker compose exec` exige un conteneur en marche (« service is not
+    running ») ; `docker compose run --rm --no-deps` marche que le worker tourne ou non (même image, .env et data/)."""
+    from pathlib import Path
+
+    deploy = (Path(__file__).resolve().parents[1] / "DEPLOY.md").read_text(encoding="utf-8")
+    section = deploy.split("### Archive d'audit des mesures remplacées")[1].split("\n### ")[0]
+    assert "worker arrêté" in section
+    assert "docker compose run --rm --no-deps -T jarvis-lab python - <<'EOF'\n" in section
+    assert "docker compose exec" not in section
