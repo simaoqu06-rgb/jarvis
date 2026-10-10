@@ -427,15 +427,15 @@ def test_jours_par_categorie_rejeu_non_consulte_et_direct(db):
     assert m["jours"] == 75 and m["jours_par_categorie"] == {"historique_exploratoire": 60,
                                                              "historique_non_consulte": 70, "prospectif": 5}
     text = M.proof_fr(res)
-    assert "Jours de test : 70 historiques jamais lus (rejeu), 5 du direct." in text
+    assert "Jours neufs depuis la soumission : 70 historiques jamais lus (rejeu), 5 du direct." in text
     assert "historique seulement" not in text
     if res["etat"] == "validee":  # écart relatif dit comme tel, avec l'espérance des trades gardés
         assert "Écart relatif : les trades gardés font encore" in text and "avant commission IBKR à 20 €" in text
     # Sans jour du direct : validée sur l'historique seulement, le challenger décidera.
     no_live = res | {"mesures": m | {"jours_par_categorie": {"historique_exploratoire": 60,
                                                              "historique_non_consulte": 75, "prospectif": 0}}}
-    assert ("Jours de test : 75 historiques jamais lus (rejeu), 0 du direct ; validée sur l'historique seulement : "
-            "le challenger en direct décidera.") in M.proof_fr(no_live)
+    assert ("Jours neufs depuis la soumission : 75 historiques jamais lus (rejeu), 0 du direct ; validée sur "
+            "l'historique seulement : le challenger en direct décidera.") in M.proof_fr(no_live)
 
 
 def test_jours_par_categorie_sans_walk_forward_exploratoire(db):
@@ -474,6 +474,20 @@ def test_regle_sans_frontiere_tout_est_exploratoire(db):
                                                      "prospectif": 0}
     assert "65 jours qui ont pu être lus avant la règle (sans frontière) ; validée sur l'historique seulement" in \
         M.proof_fr(res)
+
+
+def test_jours_par_categorie_ne_se_disent_pas_jours_de_test():
+    """Relecture de la fusion (L4) : la catégorie compte TOUS les jours après la frontière, y compris le 1er bloc du
+    walk-forward (ajustement seul) et les jours d'embargo, jamais testés : le libellé ne dit pas « Jours de test »."""
+    from app.lab import method as M
+
+    cats = {"historique_exploratoire": 60, "historique_non_consulte": 70, "prospectif": 5}
+    seen = {"stock": "2026-03-02"}
+    assert M.days_fr({"frontiere": seen, "jours_par_categorie": cats}) == \
+        "Jours neufs depuis la soumission : 70 historiques jamais lus (rejeu), 5 du direct."
+    no_frontier = M.days_fr({"jours_par_categorie": cats | {"historique_non_consulte": 0, "prospectif": 0}})
+    assert no_frontier.startswith("Jours de données : 60 jours qui ont pu être lus avant la règle (sans frontière)")
+    assert "Jours de test" not in no_frontier
 
 
 def test_readme_cite_la_formule_du_code():

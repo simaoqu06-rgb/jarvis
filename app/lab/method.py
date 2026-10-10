@@ -465,19 +465,21 @@ def _kept_mean(windows: list[dict]) -> float | None:
 
 
 def days_fr(m: dict) -> str | None:
-    """Catégorie des jours de test (validator.day_categories, avis de GPT du 10 octobre 2026) : « Jours de test : 70
-    historiques jamais lus (rejeu), 5 du direct. » ; sans jour du direct, la règle n'est validée que sur l'historique
-    et c'est le challenger, jugé sur le direct seul, qui décidera. None pour une règle testée avant ce compte."""
+    """Catégorie des jours après la frontière (validator.day_categories, avis de GPT du 10 octobre 2026) : « Jours
+    neufs depuis la soumission : 70 historiques jamais lus (rejeu), 5 du direct. » ; sans jour du direct, la règle
+    n'est validée que sur l'historique et c'est le challenger, jugé sur le direct seul, qui décidera. Pas « jours de
+    test » : le compte inclut le 1er bloc du walk-forward (ajustement seul) et les jours d'embargo, jamais testés.
+    None pour une règle testée avant ce compte."""
     cats = m.get("jours_par_categorie")
     if not cats:
         return None
     direct = cats.get("prospectif") or 0
     if m.get("frontiere") is None:  # règle d'avant la frontière : ses jours ont pu être vus
-        head = (f"Jours de test : {cats.get('historique_exploratoire') or 0} jours qui ont pu être lus avant la règle "
+        head = (f"Jours de données : {cats.get('historique_exploratoire') or 0} jours qui ont pu être lus avant la règle "
                 "(sans frontière)")
     else:
-        head = (f"Jours de test : {cats.get('historique_non_consulte') or 0} historiques jamais lus (rejeu), "
-                f"{direct} du direct")
+        head = (f"Jours neufs depuis la soumission : {cats.get('historique_non_consulte') or 0} historiques jamais lus "
+                f"(rejeu), {direct} du direct")
     return head + (" ; validée sur l'historique seulement : le challenger en direct décidera." if not direct
                    or m.get("frontiere") is None else ".")
 

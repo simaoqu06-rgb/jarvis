@@ -291,8 +291,9 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
 - **Le matin (8 h - 9 h, heure de Paris)** : un seul message privé groupé (`app/lab/morning.py`) avec
   chaque règle validée, sa preuve chiffrée (« Les trades où rvol > 5 font −0,40 R en moyenne sur 212
   trades ; les exclure donne +0,15 R par trade sur 3 périodes de test », écart relatif en R du labo,
-  avec ce que font encore les trades gardés, puis « Jours de test : 70 historiques jamais lus (rejeu),
-  5 du direct » ; sans jour du direct : « validée sur l'historique seulement : le challenger en direct
+  avec ce que font encore les trades gardés, puis « Jours neufs depuis la soumission : 70 historiques
+  jamais lus (rejeu), 5 du direct » (tous les jours après la frontière, y compris le 1er bloc du
+  walk-forward et l'embargo, qui ne sont pas testés) ; sans jour du direct : « validée sur l'historique seulement : le challenger en direct
   décidera ») et son « pourquoi », plus le nombre d'idées écartées depuis la veille. Boutons Approuver / Refuser par règle, ou `!oui N` /
   `!non N` (mêmes propositions que les réglages, même cockpit). Rien de validé : pas de message.
   Jamais hors de 8 h - 9 h ; manqué, il repart le lendemain ; jamais deux le même jour, même après un
