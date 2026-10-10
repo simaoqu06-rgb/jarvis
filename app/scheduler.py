@@ -178,9 +178,11 @@ async def tick_closing(now: datetime | None = None) -> None:
         state.save()
     _, close = CAL.session_bounds(now.astimezone(NEW_YORK).date())
     if kills:
-        text = ("🔪 **Killmode** : vends le reste de " + ", ".join(sorted({t["symbol"] for t in kills}))
-                + f" avant la clôture ({close.astimezone(NEW_YORK).hour} h New York), après avoir annulé ses TP et SL : "
-                "un KILL ne passe pas la nuit, c'est la règle que mesure son journal.")
+        last = (close - timedelta(minutes=1)).astimezone(NEW_YORK)
+        text = ("🔪 **Killmode** : vers " + f"{last.hour} h {last.minute:02d}" + " New York, annule les TP et SL de "
+                + ", ".join(sorted({t["symbol"] for t in kills})) + " puis vends le reste au marché en un ordre, avant "
+                f"la clôture ({close.astimezone(NEW_YORK).hour} h New York) : un KILL ne passe pas la nuit, c'est la "
+                "règle que mesure son journal (vendu à la dernière minute de la séance).")
         async with _lock:
             _queue(text, "clôture des KILL", expires_at=close)
             _dm_trades(text)

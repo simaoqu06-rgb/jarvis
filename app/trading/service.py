@@ -590,8 +590,13 @@ def apply_bars(trade: dict, bars: list[dict], now: datetime) -> list[str]:
                 if trade.get("killmode"):  # la gestion du KILL, celle que son journal mesure : l'entrée dès TP1
                     trade["stop_current"] = trade["entry"]
                     trade["stop_moved_at"] = bar["t"]
-                    stop_text = (f"Remonte les SL des brackets restants à l'entrée ({_num(trade['entry'])}) : c'est la "
-                                 "gestion du KILL que le journal mesure. Le reste se vend avant la clôture.")
+                    bounds = CAL.session_bounds(datetime.fromtimestamp(bar["t"], NEW_YORK).date())
+                    last = (bounds[1] - timedelta(minutes=1)).astimezone(NEW_YORK) if bounds else None
+                    stop_text = (f"Vérifie que le stop ajustable des brackets restants est passé à l'entrée "
+                                 f"({_num(trade['entry'])}), sinon remonte-les : c'est la gestion du KILL que le "
+                                 "journal mesure. Le reste se vend au marché "
+                                 + (f"vers {last.hour} h {last.minute:02d} New York." if last
+                                    else "juste avant la clôture."))
                 elif n >= 2:
                     trade["stop_current"] = trade["entry"]
                     trade["stop_moved_at"] = bar["t"]
