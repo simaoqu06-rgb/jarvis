@@ -30,6 +30,7 @@ from app.lab import morning as lab_morning
 from app.lab import page as lab_page
 from app.lab import stats as lab_stats
 from app.lab import potentiel as lab_potentiel
+from app.lab import autopsie as lab_autopsie
 from app.lab import strat_stats as lab_strategies
 from app.lab import status as lab_status
 from app.lab import summary as lab_summary
@@ -712,7 +713,9 @@ def lab_grade_get(limit: int = Query(20, ge=1, le=200)):
     historique des changements."""
     conn = _lab_conn()
     try:
-        return lab_grade.payload(conn) | {"historique": lab_grade.history(conn, limit=limit)}
+        return lab_grade.payload(conn) | {"historique": lab_grade.history(conn, limit=limit),
+                                          "indicatif_go_confirmes": (lab_autopsie.cached(conn) or {}).get("grade_indicatif"),
+                                          "trades_reels": lab_grade.reels(scheduler.book.trades)}
     finally:
         conn.close()
 
@@ -724,6 +727,17 @@ def lab_strategies_get():
     conn = _lab_conn()
     try:
         return lab_strategies.cached(conn) or lab_strategies.report(conn)
+    finally:
+        conn.close()
+
+
+@app.get("/api/lab/autopsie", dependencies=[Depends(lab_key)])
+def lab_autopsie_get():
+    """Autopsie des trades : élan contre le hasard, stops, gagnants qui frôlent le stop, par setup et par
+    stratégie, et grade indicatif des GO confirmés. Mesure seulement. Cache du worker, sinon calcul direct."""
+    conn = _lab_conn()
+    try:
+        return lab_autopsie.cached(conn) or lab_autopsie.report(conn)
     finally:
         conn.close()
 
@@ -754,7 +768,7 @@ async def lab_grade_avis(request: Request):
 
 @app.get("/api/lab/brief", dependencies=[Depends(lab_key)])
 def lab_brief_get():
-    """Tout ce qu'il faut à la routine du soir en un appel (< ~20 Ko)."""
+    """Tout ce qu'il faut à la routine du soir en un appel (< ~45 Ko)."""
     conn = _lab_conn()
     try:
         return lab_brief.build(conn, datetime.now(timezone.utc), lab_db.db_path(),
