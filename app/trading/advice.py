@@ -63,14 +63,27 @@ def decide(plans: list[dict]) -> dict:
 
     Un côté GO passe ; s'il y en a deux, la meilleure note. Un GO dont aucun objectif n'a une espérance
     rejouée positive sur l'historique de l'actif est ramené à ATTENDRE : la note seule n'est pas prouvée.
+    Un GO que la méthode championne écarte (grade.ecarte, apply_grade) l'est aussi : le scanner ne le proposerait
+    pas et le grade ne mesure pas ces plans.
     """
-    go = sorted((p for p in plans if p["score"]["go"]), key=lambda p: p["score"]["composite"], reverse=True)
+    gos = sorted((p for p in plans if p["score"]["go"]), key=lambda p: p["score"]["composite"], reverse=True)
+    go = [p for p in gos if not (p.get("grade") or {}).get("ecarte")]
     best = max(plans, key=lambda p: p["score"]["composite"])
+
+    def go_reason(p: dict) -> str:
+        return (f"{p['checklist']['verdict']} (checklist EmperorBTC {p['checklist']['score']}/"
+                f"{p['checklist']['max_score']}), note {p['score']['composite']:g}/10")
+
+    if not go and gos:  # GO sur la note, mais hors de la méthode championne
+        p = gos[0]
+        version = (p.get("methode") or {}).get("version") or "championne"
+        return {"decision": "ATTENDRE", "plan": p, "reasons": [
+            go_reason(p), f"mais {p['grade']['raison']} : le scanner ne le proposerait pas"],
+            "unlock": f"un plan que la méthode {version} garde (le grade ne mesure que ceux-là)"}
     if go:
         p = go[0]
         b = best_target(p)
-        reasons = [f"{p['checklist']['verdict']} (checklist EmperorBTC {p['checklist']['score']}/{p['checklist']['max_score']}), "
-                   f"note {p['score']['composite']:g}/10"]
+        reasons = [go_reason(p)]
         if b["expectancy_r"] <= 0:
             return {"decision": "ATTENDRE", "plan": p, "reasons": reasons + [
                 f"mais rejoué sur l'historique de {p['symbol']}, aucun objectif ne gagne (meilleur : {b['name']} "
@@ -153,7 +166,9 @@ def measure_lines(m: dict | None, symbol: str, market: str | None = None) -> lis
             lines.append(f"-# {gap} ; le GO gagne {_fr(go['r'])} R en moyenne ({unit}) : la note départage sur ce "
                          "marché.")
         else:
-            lines.append(f"-# {gap}, mais le GO perd encore {_fr(go['r'])} R en moyenne ({unit}) : moins mauvais, "
+            # « fait encore -0.02 R » : juste pour un GO négatif comme nul (« perd encore -0.02 R » était une double
+            # négation, et « perd encore +0.00 R » faux).
+            lines.append(f"-# {gap}, mais le GO fait encore {_fr(go['r'])} R en moyenne ({unit}) : moins mauvais, "
                          "pas gagnant.")
     else:
         lines.append("-# La note GO/NO GO n'a pas encore prouvé qu'elle gagne (GO pas nettement meilleur que NO GO) : "
@@ -189,7 +204,8 @@ def opinion_text(o: dict) -> str:
     cat = o["plans"][0].get("catalyst") or {}
     if o["market"] == "stock" and cat.get("hours_to_earnings") is not None:
         lines.append(f"• résultats trimestriels dans {cat['hours_to_earnings']:.0f} h")
-    lines.append(("Ce qui invalide : " if o["plan"] else "Ce qui débloquerait : ") + o["unlock"])
+    lines.append(("Ce qui invalide : " if o["decision"].startswith("ENTRER") else "Ce qui débloquerait : ")
+                 + o["unlock"])
     lines += [side_line(p) for p in o["plans"]]
     lines += [f"-# Plan impossible côté {e}" for e in o["errors"]]
     lines += measure_lines(o["lab"], o["symbol"], o["market"])

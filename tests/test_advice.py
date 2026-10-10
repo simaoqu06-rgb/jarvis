@@ -49,6 +49,31 @@ def test_avis_go_mais_rejeu_perdant_attend():
     assert v["decision"] == "ATTENDRE" and "aucun objectif ne gagne" in v["reasons"][-1]
 
 
+def test_avis_go_ecarte_par_la_methode_attend(monkeypatch):
+    """Un GO que la méthode championne écarte (le scanner ne le proposerait pas) n'est pas « ENTRER » : ATTENDRE avec
+    la raison, le plan reste affiché ; un autre côté GO gardé passe."""
+    ecarte = {"grade": "A", "risque_propose": 0.0, "ecarte": True,
+              "raison": "écarté par la méthode v2 (règle « stop trop large »)"}
+    long_ = plan("long", True, 7, [0.1, 0.3]) | {"grade": ecarte,
+                                                 "methode": {"garde": False, "regles": ["stop trop large"],
+                                                             "version": "v2"}}
+    v = A.decide([long_, plan("short", False, 4, [-0.4])])
+    assert v["decision"] == "ATTENDRE" and v["plan"] is long_
+    assert v["reasons"][-1] == ("mais écarté par la méthode v2 (règle « stop trop large ») : le scanner ne le "
+                                "proposerait pas")
+    assert v["unlock"] == "un plan que la méthode v2 garde (le grade ne mesure que ceux-là)"
+    monkeypatch.setattr(A.S, "plan_text", lambda p: "PLAN")  # testé ailleurs
+    text = A.opinion_text(v | {"symbol": "NVDA", "market": "stock", "plans": [long_], "errors": [], "lab": None})
+    assert "**⏸️ ATTENDRE**" in text and "ENTRER" not in text
+    assert "Ce qui débloquerait : un plan que la méthode v2 garde" in text
+    short = plan("short", True, 6, [0.2])
+    assert A.decide([long_, short])["decision"] == "ENTRER SHORT"
+    # ATTENDRE avec un plan (ici rejoué perdant) : ce qui débloquerait, pas « ce qui invalide ».
+    v = A.decide([plan("long", True, 7, [-0.1])])
+    text = A.opinion_text(v | {"symbol": "NVDA", "market": "stock", "plans": [v["plan"]], "errors": [], "lab": None})
+    assert "Ce qui débloquerait : un objectif à espérance positive" in text
+
+
 def test_avis_deux_no_go_dit_ce_qui_debloquerait():
     v = A.decide([plan("long", False, 5, [0.1]), plan("short", False, 4, [0.2])])
     assert v["decision"] == "ATTENDRE" and v["plan"] is None
@@ -93,7 +118,11 @@ def test_avis_go_meilleur_que_no_go_dit_l_ecart_relatif_et_l_esperance_absolue()
     # GO meilleur mais encore perdant : moins mauvais, pas gagnant.
     m["marche"]["GO"]["r"] = -0.02
     text = "\n".join(A.measure_lines(m, "BTC", "crypto"))
-    assert "mais le GO perd encore -0.02 R en moyenne (R du labo, frais OKX compris) : moins mauvais, pas gagnant." in text
+    assert "mais le GO fait encore -0.02 R en moyenne (R du labo, frais OKX compris) : moins mauvais, pas gagnant." in text
+    assert "perd encore" not in text
+    m["marche"]["GO"]["r"] = 0.0  # nul : ni « perd » ni gagnant
+    text = "\n".join(A.measure_lines(m, "BTC", "crypto"))
+    assert "mais le GO fait encore +0.00 R en moyenne (R du labo, frais OKX compris) : moins mauvais, pas gagnant." in text
 
 
 def test_mesure_du_labo_filtre_version_de_generation_et_rejeu(tmp_path):

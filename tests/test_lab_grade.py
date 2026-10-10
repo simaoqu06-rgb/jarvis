@@ -615,6 +615,55 @@ def test_ligne_taille_sous_grade_perime(monkeypatch):
                                  "a 7 h)). Ta règle de 20 € : 46 actions pour 460 $ (exception, hors avis de JARVIS)"]
 
 
+def _cockpit_size_html(plans: list[dict]) -> list[str]:
+    """sizeHtml du cockpit (app/web/cockpit.html) exécuté par node sur `plans`, avec ses aides fmt et esc."""
+    import re
+    import shutil
+    import subprocess
+    from html import unescape
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node absent : le JavaScript du cockpit n'est pas exécutable ici")
+    page = (Path(main.__file__).parent / "web" / "cockpit.html").read_text(encoding="utf-8")
+    parts = [re.search(rf"^const {name} = .*$", page, re.M).group(0) for name in ("fmt", "esc")]
+    parts.append(re.search(r"^function sizeHtml\(p\) \{.*?^\}$", page, re.M | re.S).group(0))
+    script = "\n".join(parts) + "\nconst plans = JSON.parse(require('fs').readFileSync(0, 'utf8'));\n" \
+        "process.stdout.write(JSON.stringify(plans.map(sizeHtml)));"
+    out = subprocess.run([node, "-e", script], input=json.dumps(plans), capture_output=True, text=True, check=True,
+                         timeout=30)
+    return [unescape(x) for x in json.loads(out.stdout)]
+
+
+def test_cockpit_dit_la_meme_raison_que_discord_sous_un_grade_a_0(monkeypatch):
+    """Ligne 💰 du cockpit sous un grade à 0 % : la même raison que sizing_lines (lettre seule si c'est elle, sinon
+    arrêt du jour, grade périmé, illisible, plan écarté par la méthode), jamais « grade C : 0 % » pour un plan écarté."""
+    monkeypatch.setattr(GR, "current", lambda: DATA | {"marches": {"stock": DATA["marches"]["crypto"]}})
+    monkeypatch.delenv("JARVIS_CAPITAL", raising=False)
+    base = plan(10.0, 9.5)
+    T.apply_grade(base, None, None, NOW, trades=[], usd_per_eur=1.15)
+    assert base["sizing"] is None and base["sizing_regle"]
+    grades = [base["grade"],
+              {"grade": "C", "risque_grade": 1.0, "risque_propose": 0.0, "observation": True, "ecarte": True,
+               "raison": "écarté par la méthode v2 (règle « stop trop large »)"},
+              {"grade": "A", "risque_grade": 3.0, "risque_propose": 0.0, "raison": "arrêt de la journée à −3 R atteint"},
+              {"grade": "A", "risque_grade": 3.0, "risque_propose": 0.0, "perime": True,
+               "raison": "grade périmé (dernier passage du labo il y a 7 h)"},
+              {"grade": "non noté", "risque_grade": 0.0, "risque_propose": 0.0,
+               "raison": "grade illisible (KeyError: 'marches')"},
+              {"grade": "D", "risque_propose": 0.0}]
+    plans = [base | {"grade": g} for g in grades]
+    html = _cockpit_size_html(plans)
+    for p, h in zip(plans, html):
+        discord = T.sizing_lines(p)[0]
+        why = discord[len("💰 JARVIS ne propose pas de taille"):discord.index(". Ta règle de")]
+        assert h.startswith(f" · 💰 JARVIS ne propose pas de taille{why}. Ta règle de 20 € : "), (why, h)
+    assert html[1].startswith(" · 💰 JARVIS ne propose pas de taille : plan écarté par la méthode v2 (règle « stop "
+                              "trop large »). Ta règle de 20 €")
+    assert "(grade F- : 0 %)" in html[0] and "(0 % : arrêt de la journée" in html[2]
+
+
 def test_regle_de_simao_en_crypto_sous_un_grade_a_0_arrondie_vers_le_bas(monkeypatch):
     """Scénario 2 de GPT : la crypto garde une quantité fractionnaire (jamais « actions entières »), arrondie vers le
     bas à 6 décimales (jamais plus de risque que la règle), affichée sans notation scientifique."""

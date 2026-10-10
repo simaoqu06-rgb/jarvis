@@ -323,6 +323,52 @@ async def test_plan_verdict_regime_absent_plan_garde_une_ligne(champ_file, monke
     assert calls.count("SPY") == 2 and "BTC" in calls  # réessayé : une panne n'est pas gardée pour la journée
 
 
+def test_journalier_absent_regles_sur_rvol_non_appliquees(champ_file, full_db, monkeypatch, caplog):  # noqa: F811
+    """Bougies journalières en panne (build_plan les lit sans les exiger) : les règles sur rvol et day_change_pct ne
+    s'appliquent pas, plutôt que d'écarter le plan « par la méthode » sur un champ inconnu ; les autres règles
+    oui ; une seule ligne de journal. Avec les bougies, la règle s'applique comme avant."""
+    import asyncio
+
+    from app.lab import generator as G
+    from tests.test_lab_generator import DAY as GEN_DAY
+
+    caplog.set_level(logging.WARNING)
+    inp = G.stock_inputs(full_db, "AAA", GEN_DAY)
+    now = datetime.fromtimestamp(U.stock_decision_ts(GEN_DAY), timezone.utc)
+    fail = {"daily": False}
+
+    async def fake_candles(symbol, market, interval, source=None, max_age=None, outputsize=None):
+        if interval == 1440 and fail["daily"]:
+            raise T.PlanError("bougies journalières indisponibles (test)")
+        return {15: inp["bars"], 1440: inp["daily"], 240: inp["h4"]}[interval]
+
+    async def no_cat(symbol, now):
+        return None
+
+    monkeypatch.setattr(T, "candles", fake_candles)
+    monkeypatch.setattr(T.C, "safe_check", no_cat)
+    monkeypatch.setattr(GR, "current", lambda: GRADE_A | {"verifie_le": now.isoformat()})
+    keep_rvol = rule({"field": "context.rvol", "op": ">=", "value": 0.5}, kind="keep", name="rvol au moins 0,5")
+    write_champion(champ_file, [keep_rvol])
+    ok = asyncio.run(T.build_plan("AAA", "stock", now=now))
+    assert ok["methode"] == {"garde": True, "regles": [], "version": "v2"}
+    write_champion(champ_file, [rule({"field": "context.rvol", "op": ">=", "value": 1e9}, kind="keep",
+                                     name="rvol énorme")])
+    assert not asyncio.run(T.build_plan("AAA", "stock", now=now))["methode"]["garde"]  # lu sur les bougies
+    fail["daily"] = True
+    for _ in range(2):
+        ko = asyncio.run(T.build_plan("AAA", "stock", now=now))
+        assert ko["methode"] == {"garde": True, "regles": [], "version": "v2"} and not ko["grade"].get("ecarte")
+    assert caplog.text.count("bougies journalières du plan indisponibles") == 1
+    # Les autres règles s'appliquent toujours ; une condition mixte (rvol ou autre) n'est pas appliquée.
+    write_champion(champ_file, [keep_rvol, rule({"field": "symbol", "op": "==", "value": "AAA"}, name="pas AAA")])
+    assert asyncio.run(T.build_plan("AAA", "stock", now=now))["methode"]["regles"] == ["pas AAA"]
+    mixed = rule({"or": [{"field": "context.day_change_pct", "op": ">", "value": 50},
+                         {"field": "symbol", "op": "==", "value": "AAA"}]}, name="mixte")
+    write_champion(champ_file, [mixed])
+    assert asyncio.run(T.build_plan("AAA", "stock", now=now))["methode"]["garde"]
+
+
 def test_ligne_crypto_au_nom_du_labo_avec_le_regime_de_btc():
     """Plan crypto du direct (« BTC », Kraken) : la ligne de lessons.crypto_row, le symbole du labo (« BTC-USDT »)
     et le régime de BTC comme generator.crypto_day."""
@@ -335,15 +381,36 @@ def test_ligne_crypto_au_nom_du_labo_avec_le_regime_de_btc():
     row = LIVE.crypto_row(p, daily, btc, NOW)
     base = L.crypto_row(p, daily, NOW)
     assert row["symbol"] == "ETH-USDT" and LIVE.lab_symbol("btc-usdt") == "BTC-USDT"
-    assert {k: v for k, v in row.items() if not k.startswith("regime") and k not in ("symbol", "context")} == \
-        {k: v for k, v in base.items() if k not in ("symbol", "context")}
-    assert row["context"] == base["context"] | {"regime": U.regime(btc, CO.utc_midnight(day), 365)}
+    assert {k: v for k, v in row.items() if not k.startswith("regime") and k not in ("symbol", "context", "planned_at")} \
+        == {k: v for k, v in base.items() if k not in ("symbol", "context", "planned_at")}
+    # 13 h 10 UTC : créneau du labo de 12 h (voir test_plan_crypto_au_creneau_du_labo)
+    assert row["planned_at"] == int(datetime(2026, 10, 7, 12, tzinfo=timezone.utc).timestamp())
+    assert row["context"] == base["context"] | {"regime": U.regime(btc, CO.utc_midnight(day), 365), "window_utc": "12:00"}
     assert row["context"]["regime"] is not None
     label = REG.series(btc, "crypto", [day])["2026-10-07"]
     assert (row["regime_label"], row["regime_trend"], row["regime_vol_tercile"]) == \
         (label["label"], label["trend"], label["vol_tercile"]) and row["regime_trend"] == "haussier"
     # Sans BTC : pas de régime (les règles qui le lisent ne s'appliquent pas, voir plus haut).
     assert "regime_label" not in LIVE.crypto_row(p, daily, None, NOW)
+
+
+async def test_plan_crypto_au_creneau_du_labo(champ_file):
+    """Le labo crypto ne planifie qu'à 00, 04… 20 h UTC : le plan du direct est ramené au créneau qui le précède
+    (même jour UTC), pour qu'une règle sur hour_utc ou context.window_utc le juge comme le labo l'a mesurée."""
+    p = fake_plan("SOL") | {"market": "crypto"}
+    write_champion(champ_file, [rule({"field": "context.window_utc", "op": "==", "value": "00:00"}, name="pas minuit")
+                                | {"markets": ["crypto"]}])
+    for hm in ((0, 0), (0, 1), (0, 30), (3, 59)):
+        assert not (await LIVE.plan_verdict(p, None, datetime(2026, 10, 7, *hm, tzinfo=timezone.utc)))["garde"], hm
+    assert (await LIVE.plan_verdict(p, None, datetime(2026, 10, 7, 4, 0, tzinfo=timezone.utc)))["garde"]
+    write_champion(champ_file, [rule({"field": "hour_utc", "op": "in", "value": [8, 12]}, kind="keep",
+                                     name="journée") | {"markets": ["crypto"]}])
+    for hm, kept in (((8, 15), True), ((9, 30), True), ((12, 5), True), ((13, 0), True), ((7, 59), False),
+                     ((16, 0), False), ((23, 59), False)):
+        assert (await LIVE.plan_verdict(p, None, datetime(2026, 10, 7, *hm, tzinfo=timezone.utc)))["garde"] is kept, hm
+    row = LIVE.crypto_row(p, None, None, datetime(2026, 10, 7, 23, 59, 30, tzinfo=timezone.utc))
+    assert row["day"] == "2026-10-07" and row["context"]["window_utc"] == "20:00"
+    assert row["planned_at"] == int(datetime(2026, 10, 7, 20, tzinfo=timezone.utc).timestamp())
 
 
 async def test_plan_crypto_ecarte_sur_le_regime_de_btc(champ_file, monkeypatch):
@@ -416,3 +483,65 @@ async def test_scanner_reprend_le_verdict_du_plan(champ_file, scan_env, monkeypa
     result = await scanner.scan(NOW, Settings(None), save=False)
     assert [e["regles"] for e in result["ecartees_methode"]] == [["vu par build_plan"]]
     assert "BBB" not in [p["symbol"] for p in result["picks"]]
+
+
+async def test_prends_go_garde_la_taille_du_go_confirme(champ_file, full_db, monkeypatch):  # noqa: F811
+    """`!prends … go` : le GO confirmé a été gardé par le champion au scanner ; le plan recalculé au déclenchement
+    (stop plus large) n'est pas refiltré, il garde la taille du MP de confirmation et compte avec JARVIS, pas « à
+    ta règle » dans `!desaccords`. `!prends` sans `go` passe toujours par le filtre."""
+    from app import scheduler
+    from app.lab import generator as G
+    from app.notify import bot
+    from app.trading import confirm as CF
+    from tests.test_lab_generator import DAY as GEN_DAY
+
+    inp = G.stock_inputs(full_db, "AAA", GEN_DAY)
+    now = datetime.fromtimestamp(U.stock_decision_ts(GEN_DAY), timezone.utc)
+    by_interval = {15: inp["bars"], 1440: inp["daily"], 240: inp["h4"]}
+
+    async def fake_candles(symbol, market, interval, source=None, max_age=None, outputsize=None):
+        return by_interval[interval]
+
+    async def no_cat(symbol, now):
+        return None
+
+    monkeypatch.setattr(T, "candles", fake_candles)
+    monkeypatch.setattr(T.C, "safe_check", no_cat)
+    monkeypatch.setattr(GR, "current", lambda: GRADE_A | {"verifie_le": now.isoformat()})
+    monkeypatch.setenv("JARVIS_CAPITAL", "10000")
+    real_build = T.build_plan
+    p0 = await real_build("AAA", "stock", now=now)
+    tp1 = p0["targets"][0]["price"]
+    trigger = round(p0["entry"] + 0.9 * (tp1 - p0["entry"]), 2)  # déclenché sous TP1, stop plus large
+    thr = (p0["stop_pct"] - (trigger - p0["stop"]) / trigger * 100) / 2
+    write_champion(champ_file, [rule({"field": "plan.stop_pct", "op": "<", "value": thr}, name="stop trop large")])
+    p0 = await real_build("AAA", "stock", now=now)
+    assert p0["methode"]["garde"]  # le plan du scan est gardé : c'est un pick
+    g = GR.risk_now("stock", [], now)
+    risk = CF.rule_size(g, T.recommended_eur(g["risque_propose"]), T.rule_eur())
+    targets = [t["price"] for t in p0["targets"]]
+    mp = CF.event_text("AAA", {"stop": p0["stop"], "targets": targets, "entry": p0["entry"]},
+                       {"kind": "confirmé", "trigger": trigger, "vwap": p0["entry"]}, now, risk, 1.15, g)
+    book = T.Book(None)
+    monkeypatch.setattr(scheduler, "book", book)
+    today = datetime.now(timezone.utc).astimezone(T.NEW_YORK).date().isoformat()
+    monkeypatch.setattr(scheduler, "confirm_state", {"day": today, "closed": False, "gos": {
+        "AAA": {"status": "confirmé", "entry": p0["entry"], "stop": p0["stop"], "targets": targets,
+                "trigger": trigger, "composite": p0["score"]["composite"], "last_bar": None, "events": []}}})
+
+    async def build_at_now(*a, **k):
+        return await real_build(*a, **(k | {"now": now}))
+
+    monkeypatch.setattr(bot.trading, "build_plan", build_at_now)
+    txt = await bot.handle("!prends AAA go")
+    tr = book.trades[-1]
+    assert "methode" not in tr and not tr["grade"].get("ecarte") and "plan écarté" not in txt
+    assert f"**{tr['sizing']['quantity']} actions**" in mp  # la taille du MP de confirmation
+    assert not T.at_rule(tr) and not T.against_jarvis(tr)
+    st = T.disagreements(book)
+    assert st["regle"]["total"] == 0 and st["avec"]["total"] == 1
+    # Sans `go`, mêmes prix : le plan passe par le filtre de la méthode, comme tous les plans.
+    txt = await bot.handle(f"!prends AAA {trigger:g} stop {p0['stop']:g}")
+    tr = book.trades[-1]
+    assert tr["methode"] == {"garde": False, "regles": ["stop trop large"], "version": "v2"} and tr["sizing"] is None
+    assert "plan écarté par la méthode v2 (règle « stop trop large »)" in txt and T.at_rule(tr)

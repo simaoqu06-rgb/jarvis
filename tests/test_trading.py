@@ -478,21 +478,24 @@ def closed_with(book, go: bool, outcome: str, day: int, **over):
 
 def test_desaccords_taille_a_ta_regle_quand_jarvis_propose_0():
     """Le pari « 20 € quand JARVIS propose 0 % » est mesuré à part : un GO pris sous un grade F est d'accord avec la
-    note, pas avec la taille ; un risque demandé au-delà de ce que propose JARVIS (hors budget) aussi."""
+    note, pas avec la taille ; un risque demandé alors que JARVIS ne propose rien (hors budget à 0 %) aussi. Un
+    risque demandé au-delà d'un risque proposé > 0 n'en est pas : la question 3 juge « quand JARVIS n'en propose
+    pas »."""
     book = S.Book(None)
     closed_with(book, True, "tp", 0, **RULE)                      # GO sous grade F, à ta règle
     closed_with(book, True, "tp", 1)                              # GO à la taille de JARVIS
     closed_with(book, False, "stop", 2, **RULE)                   # NO GO à ta règle
     closed_with(book, True, "be", 3, grade={"grade": "D", "risque_propose": 0.25, "hors_budget": True})
+    closed_with(book, True, "be", 4, grade={"grade": "F", "risque_propose": 0.0, "hors_budget": True})
     book.add(scored(True, killmode=True, **RULE))                 # KILL : mesuré par son journal, pas ici
-    assert S.at_rule(book.trades[0]) and not S.at_rule(book.trades[1]) and S.at_rule(book.trades[3])
+    assert S.at_rule(book.trades[0]) and not S.at_rule(book.trades[1]) and not S.at_rule(book.trades[3])
+    assert S.at_rule(book.trades[4])
     st = S.disagreements(book, {"stock": 0.05})
     assert st["regle"]["total"] == 3 and st["regle"]["closed"] == 3 and st["regle"]["avg_r_brut"] == pytest.approx(2 / 3, abs=1e-3)
-    assert st["avec"]["total"] == 3 and st["avec"]["regle"] == 2 and st["contre"]["regle"] == 1
+    assert st["avec"]["total"] == 4 and st["avec"]["regle"] == 2 and st["contre"]["regle"] == 1
     text = S.disagreements_text(st)
-    assert "Plans GO (JARVIS d'accord sur la note) : 3 terminé(s)" in text and "; dont 2 à ta règle de taille" in text
-    assert ("Taille à ta règle, hors avis de JARVIS (il proposait 0 %, ou moins que ton risque demandé) : 3 terminé(s) "
-            "sur 3 jour(s)") in text
+    assert "Plans GO (JARVIS d'accord sur la note) : 4 terminé(s)" in text and "; dont 2 à ta règle de taille" in text
+    assert "Taille à ta règle, hors avis de JARVIS (il proposait 0 %) : 3 terminé(s) sur 3 jour(s)" in text
     assert "**3. Ta taille quand JARVIS n'en propose pas ?** Pas de réponse :" in text and "il en faut 30 sur 20" in text
 
 

@@ -6,7 +6,8 @@ du scanner (« écartées par la méthode vN ») et dans data/scans.jsonl. Le fi
 ou sans filtre : aucun filtre, une seule ligne de journal ; une erreur ici ne casse jamais le scanner.
 Hors scanner (`!plan`, `!prends`, API, plans crypto), plan_verdict évalue le même filtre (service.build_plan) :
 le grade est mesuré sur les trades que garde le champion, un plan écarté ne reçoit donc pas son risque
-(risque proposé 0 %, « écarté par la méthode vN »), il reste affiché.
+(risque proposé 0 %, « écarté par la méthode vN »), il reste affiché. Exception : `!prends … go`, dont le GO
+confirmé a déjà été gardé au scanner (le plan recalculé au déclenchement n'est pas refiltré).
 
 Les règles s'évaluent avec le SQL du labo (method.evaluate_rows) sur une ligne aux mêmes champs que
 le journal du labo (generator.py) :
@@ -16,8 +17,9 @@ le journal du labo (generator.py) :
   closes, comme l'univers du labo), regime (universe.regime sur SPY), catalyst_replayed = false ;
 - regime, regime_trend, regime_vol_tercile : regime.series sur ~500 jours de SPY (table regimes du labo) ;
 - weekday, hour_utc, market, symbol, side : du jour et de l'heure du plan.
-Crypto (crypto_row) : la ligne de lessons.crypto_row (contexte du générateur), le symbole au nom du labo (paire
-OKX « XXX-USDT ») et le régime de BTC (context.regime, regime*) sur ses bougies journalières, comme
+Crypto (crypto_row) : la ligne de lessons.crypto_row (contexte du générateur), ramenée au créneau du labo qui
+précède le plan (heure et window_utc : 00, 04… 20 h UTC), le symbole au nom du labo (paire OKX « XXX-USDT ») et le
+régime de BTC (context.regime, regime*) sur ses bougies journalières, comme
 generator.crypto_day ; BTC indisponible : les règles sur le régime ne s'appliquent pas, comme sans SPY.
 Champs du labo absents en direct (traités comme « non vérifiés », COALESCE … 0) : universe_reason,
 universe_rank, dollar_volume et gap_open_pct (de toute façon interdits dans les règles), sector (vide
@@ -119,6 +121,16 @@ def needs_index(rule: dict) -> bool:
                for leaf in V.leaves_of(rule["cond"]))
 
 
+DAILY_FIELDS = {"context.rvol", "context.day_change_pct"}  # lus sur les bougies journalières du plan
+
+
+def needs_daily(rule: dict) -> bool:
+    """La règle lit le volume relatif ou la variation de la veille (bougies journalières du symbole)."""
+    from app.lab import validator as V
+
+    return any(leaf.get("field") in DAILY_FIELDS for leaf in V.leaves_of(rule["cond"]))
+
+
 def _verdict(champ: dict, index_daily, make_row, index_name: str = "SPY") -> dict:
     """Verdict d'un plan sur la ligne que construit `make_row` ; jamais d'exception (plan gardé en cas de souci).
     Indice indisponible (panne propre au direct) : les règles sur le régime ne s'appliquent pas, plutôt
@@ -171,6 +183,12 @@ def crypto_row(plan: dict, daily: list[dict] | None, index_daily: list[dict] | N
 
     row = L.crypto_row(plan, daily, now)
     row["symbol"] = lab_symbol(row["symbol"])
+    # Le labo crypto ne planifie qu'aux créneaux CRYPTO_HOURS_UTC (00, 04… 20 h UTC) : le plan du direct est ramené
+    # au créneau qui le précède (même jour UTC), sinon une règle sur hour_utc ou context.window_utc ne le reconnaît pas.
+    utc = now.astimezone(timezone.utc)
+    slot = utc.replace(hour=max(h for h in G.CRYPTO_HOURS_UTC if h <= utc.hour), minute=0, second=0, microsecond=0)
+    row["planned_at"] = int(slot.timestamp())
+    row["context"]["window_utc"] = slot.strftime("%H:%M")
     if index_daily:
         day = date.fromisoformat(row["day"])
         row["context"]["regime"] = U.regime(index_daily, CO.utc_midnight(day), G.ANNUAL_DAYS["crypto"])
@@ -213,13 +231,22 @@ async def plan_verdict(plan: dict, daily: list[dict] | None, now: datetime, s=No
     """Verdict du champion pour un plan hors scanner (`!plan`, `!prends`, API, crypto) avec les mêmes fonctions que
     le scanner ; None si aucune règle du champion ne touche le marché du plan (rien à évaluer) ou pour un plan
     vendeur (le labo ne mesure que des trades longs, comme les leçons : ses règles ne disent rien d'un short).
-    Mêmes sémantiques en cas de donnée manquante : plan gardé, une ligne de journal. Jamais d'exception."""
+    Mêmes sémantiques en cas de donnée manquante : plan gardé, une ligne de journal. Jamais d'exception.
+    Bougies journalières indisponibles (panne propre au direct) : les règles sur rvol et day_change_pct ne
+    s'appliquent pas, comme celles sur le régime sans indice (une règle « ne garder que » sur un champ inconnu
+    écarterait le plan pour une raison fausse)."""
     try:
         champ = champ or current()
         market = plan.get("market")
         rules = M.market_rules(champ["regles"], market)
         if not rules or market not in INDEX_DIRECT or plan.get("side") != "long":
             return None
+        if not daily:
+            kept = [r for r in rules if not needs_daily(r)]
+            if len(kept) != len(rules):
+                _warn_once("journalier", "Méthode du labo : bougies journalières du plan indisponibles, règles sur "
+                                         "rvol et day_change_pct non appliquées")
+                rules = kept
         champ = champ | {"regles": rules}
         index = await index_daily(market, now) if any(needs_index(r) for r in rules) else None
         if market == "stock":
