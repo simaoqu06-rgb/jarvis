@@ -2,6 +2,7 @@
 sans la séance du direct recalculée (W2), révisions du coût sans fausse alerte (W4, W7), rattrapage du rejeu et du
 direct séparés dans !labo (W6), commande de secours de DEPLOY.md (W5)."""
 import sqlite3
+from datetime import datetime, timezone
 
 import pytest
 
@@ -62,3 +63,30 @@ def test_archive_sur_disque_plein_dit_disque_plein(tmp_path, monkeypatch):
         AUD.step(db)
     assert [r[1] for r in db.conn.execute("PRAGMA database_list")] == ["main"]   # archive détachée
     assert not db.conn.in_transaction and not db.keys(AUD.JOB).get(f"strats:stock:d{AUD.declaration('stock')}")
+
+
+def test_fichier_d_archive_vide_n_est_pas_un_audit(tmp_path, monkeypatch):
+    """Archivage en échec : le fichier reste à 0 octet ; il était publié comme « Audit » (section de !strategies, route
+    en 200) alors qu'il n'archive rien."""
+    from fastapi.testclient import TestClient
+
+    from app import main
+
+    path = tmp_path / "lab.db"
+    monkeypatch.setenv("JARVIS_LAB_DB", str(path))
+    monkeypatch.setenv("JARVIS_LAB_API_KEY", "cle")
+    db = LabDB(str(path))
+    _anciennes(db)
+    with monkeypatch.context() as m:
+        _disque_plein(m)
+        with pytest.raises(sqlite3.OperationalError):
+            AUD.step(db)
+    archive = AUD.archive_path(db.path, AUD.declaration("stock"))
+    assert archive.exists() and archive.stat().st_size == 0
+    assert AUD.report(db.conn) is None
+    assert AUD.refresh(db, datetime(2026, 10, 11, 3, tzinfo=timezone.utc), 3600) == 0  # pas de cache
+    assert AUD.cached(db.conn) is None and AUD.text(AUD.cached(db.conn)) is None
+    client = TestClient(main.app)
+    assert client.get("/api/lab/strategies/audit", headers={"X-Lab-Key": "cle"}).status_code == 404
+    AUD.step(db)                                                    # place libérée : l'archivage passe
+    assert AUD.report(db.conn)["archives"][archive.name]["tables"]

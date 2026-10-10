@@ -267,7 +267,9 @@ def report(conn: sqlite3.Connection, uri: bool = False) -> dict | None:
         _attach(conn, path, uri)
         try:
             tables = {r[0] for r in conn.execute(f"SELECT name FROM {ALIAS}.sqlite_master WHERE type = 'table'")}
-            info = ([dict(zip(("le", "cle", "tables", "remplace", "declaration", "lignes", "note"), r)) for r in
+            if not tables:  # fichier vide (archivage en échec, disque plein…) : pas une archive, pas de section « Audit »
+                continue
+            info =([dict(zip(("le", "cle", "tables", "remplace", "declaration", "lignes", "note"), r)) for r in
                      conn.execute(f"SELECT * FROM {ALIAS}.archive_info ORDER BY archived_at")]
                     if "archive_info" in tables else [])
             out["archives"][path.name] = {"tables": sorted(tables), "archivages": info, "note": note(decl)}
