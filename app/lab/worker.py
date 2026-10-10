@@ -40,7 +40,8 @@ Toutes les ~10 min :
 15. 2e tour d'avis (C1, audit.py) : en tête de chaque passage, avant le grade, le Labo 2, le rejeu et le rattrapage, les lignes
    qu'une nouvelle déclaration va réécrire (stratégies, Killmode complet, n° 9) sont copiées une fois dans le
    fichier d'archive de data/archives/ ; en échec, rien ne les réécrit dans ce passage (rattrapage, étapes
-   killmode_complet et potentiel_plus10 sautées ; le direct et le rejeu n'écrivent que des jours neufs). L'étape
+   killmode_complet et potentiel_plus10 sautées ; le direct et le rejeu n'écrivent que des jours neufs), et l'échec
+   est noté (progress lab/archive_audit, alerte de !labo) jusqu'au passage qui réussit. L'étape
    « audit » met en cache l'audit apparié ancien → nouveau (pour audit, jamais pour décider).
 16. Garde du Labo 1 (deuxième tour d'avis du 10 octobre 2026) : au démarrage, l'empreinte du comportement v1
    (empreinte.v1_guard, ≈ 1 s) est comparée à V1_FINGERPRINT. Écart ou calcul en échec : rejeu et direct du Labo 1
@@ -465,6 +466,18 @@ async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, tra
         hold = True
         report["archive_audit"] = f"échec : {type(exc).__name__}"
         log.warning("Labo : archive d'audit en échec, rien n'est réécrit ce passage : %s: %s", type(exc).__name__, exc)
+        try:  # état lu par !labo et /api/lab/status (status.archive_line) ; un disque plein peut aussi refuser cette écriture
+            since = (db.get("lab", "archive_audit") or {}).get("depuis") or now.isoformat(timespec="seconds")
+            db.set("lab", "archive_audit", {"etat": "echec", "raison": f"{type(exc).__name__}: {exc}"[:300],
+                                            "depuis": since})
+        except Exception:
+            pass
+    else:
+        try:  # échec d'un passage précédent réglé : l'alerte de !labo s'en va
+            if db.get("lab", "archive_audit"):
+                db.conn.execute("DELETE FROM progress WHERE job = 'lab' AND key = 'archive_audit'")
+        except Exception:
+            pass
     pause = stock_pause(now, collect)
     if pause:
         report["paused"]["stock"] = pause

@@ -90,3 +90,61 @@ def test_fichier_d_archive_vide_n_est_pas_un_audit(tmp_path, monkeypatch):
     assert client.get("/api/lab/strategies/audit", headers={"X-Lab-Key": "cle"}).status_code == 404
     AUD.step(db)                                                    # place libérée : l'archivage passe
     assert AUD.report(db.conn)["archives"][archive.name]["tables"]
+
+
+# --- W1 : archive d'audit en échec, dite dans !labo -------------------------------------------------------------------
+
+def _passage_calme(monkeypatch):
+    """Passage du worker sans réseau : grade, direct, Labo 2, rejeu et rattrapage neutralisés."""
+    from app.lab import worker as W
+
+    async def nothing(*a, **k):
+        return {}
+
+    monkeypatch.setattr(W.GRADE, "step", lambda db_, now: {})
+    monkeypatch.setattr(W, "lab2", nothing)
+    monkeypatch.setattr(W.R, "replay", nothing)
+    monkeypatch.setattr(W.R, "run_live_day", nothing)
+    monkeypatch.setattr(W.RAT, "step", nothing)
+    monkeypatch.setattr(W.alpaca, "configured", lambda: True)
+    return W
+
+
+async def test_archive_en_echec_dite_dans_labo_jusqu_au_passage_qui_reussit(tmp_path, monkeypatch):
+    """review/skep-cxd (S2) : archive en échec à chaque passage, le rattrapage n° 10, Killmode complet, la n° 9 et le
+    recalcul du direct s'arrêtaient sans rien dans !labo ni /api/lab/status (le journal seul le disait)."""
+    from datetime import timedelta
+
+    from app.lab import status as STATUS
+    from app.lab import strategies as ST
+
+    W = _passage_calme(monkeypatch)
+    path = str(tmp_path / "lab.db")
+    db = LabDB(path)
+    _anciennes(db)
+    night = datetime(2026, 10, 11, 3, tzinfo=timezone.utc)            # dimanche : « nuit », séance US fermée
+    with monkeypatch.context() as m:
+        _disque_plein(m)
+        for i in range(2):                                            # deux passages en échec : « depuis » le premier
+            report = await W.tick(db, night + timedelta(minutes=10 * i), collect=True)
+    assert report["archive_audit"] == "échec : OperationalError" and "rattrapage" not in report
+    st = STATUS.status(path)
+    assert st["archive_audit"] == {"etat": "echec", "raison": "OperationalError: database or disk is full",
+                                   "depuis": "2026-10-11T03:00:00+00:00"}
+    alert = (f"⚠️ Archive d'audit en échec depuis le 11/10/2026 à 03:00 UTC (OperationalError: database or disk is "
+             f"full) : rattrapage de la n° {ST.LATEST_DECLARATION}, Killmode complet, n° 9 et recalcul du direct à "
+             "l'arrêt, rien n'est réécrit (docker compose logs jarvis-lab)")
+    assert alert in STATUS.text(st).splitlines()
+    report = await W.tick(db, night + timedelta(minutes=30), collect=True)   # place libérée : l'archivage passe
+    assert report["archive_audit"] and "rattrapage" in report
+    st = STATUS.status(path)
+    assert st["archive_audit"] is None and "Archive d'audit" not in STATUS.text(st)
+
+
+def test_etat_d_archive_illisible_ou_sans_echec():
+    from app.lab import status as STATUS
+
+    assert STATUS.archive_line(None) is None and STATUS.archive_line({"etat": "faite"}) is None
+    assert STATUS.archive_line({"etat": "echec", "raison": "OSError: x", "depuis": "pas une date"}) == (
+        "⚠️ Archive d'audit en échec (OSError: x) : rattrapage, Killmode complet, n° 9 et recalcul du direct à l'arrêt, "
+        "rien n'est réécrit (docker compose logs jarvis-lab)")

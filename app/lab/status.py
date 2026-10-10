@@ -12,10 +12,11 @@ révision du code (trades.code_rev) pour voir quand une même version mélange p
 Deuxième tour d'avis du 10 octobre : garde du Labo 1 (garde_v1, empreinte v1 calculée au démarrage du worker ; en
 pause, une alerte en tête de !labo) et recalcul ponctuel des séances du direct d'avant une rupture (recalcul_v1 ;
 une séance « non recalculable » est dite).
+Relecture de la fusion (W1) : archive d'audit en échec (archive_line), alerte en tête de !labo tant qu'elle dure.
 """
 import json
 import sqlite3
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from app.lab import heartbeat
@@ -128,6 +129,8 @@ def status(path: str | None = None) -> dict:
         out["live_start"] = json.loads(live_start[0]) if live_start else None
         guard = conn.execute("SELECT value FROM progress WHERE job = 'lab' AND key = 'garde_v1'").fetchone()
         out["garde_v1"] = json.loads(guard[0]) if guard else None
+        arch = conn.execute("SELECT value FROM progress WHERE job = 'lab' AND key = 'archive_audit'").fetchone()
+        out["archive_audit"] = json.loads(arch[0]) if arch else None  # relecture W1 : archive d'audit en échec
         out["recalcul_v1"] = {k: v for k, v in _progress(conn, "recalcul").items() if not k.startswith("attempts:")}
         out["labo2"] = headline(conn)
         from app.trading import visibilite as VIS  # import tardif, comme runner
@@ -198,6 +201,21 @@ def declaration_line(n: dict | None) -> str | None:
     return f"⏳ {head} : " + ", ".join(parts)
 
 
+def archive_line(arch: dict | None, numero: int | None = None) -> str | None:
+    """Relecture W1 : archive d'audit en échec (worker, progress lab/archive_audit) ; tant qu'elle n'est pas faite, rien
+    de ce qu'une nouvelle déclaration réécrit n'avance. None si rien n'est en échec."""
+    if not arch or arch.get("etat") != "echec":
+        return None
+    try:
+        when = datetime.fromisoformat(arch["depuis"]).astimezone(timezone.utc)
+        since = when.strftime(" depuis le %d/%m/%Y à %H:%M UTC")
+    except (KeyError, TypeError, ValueError):
+        since = ""
+    rattrapage = f"rattrapage de la n° {numero}" if numero else "rattrapage"
+    return (f"⚠️ Archive d'audit en échec{since} ({arch.get('raison') or 'raison inconnue'}) : {rattrapage}, Killmode "
+            "complet, n° 9 et recalcul du direct à l'arrêt, rien n'est réécrit (docker compose logs jarvis-lab)")
+
+
 def headline(conn: sqlite3.Connection) -> dict:
     """Chiffres clés du Labo 2 (cache des statistiques, fiches, règles) ; vide sur une base du Labo 1."""
     from app.lab import stats as STATS
@@ -254,6 +272,9 @@ def text(st: dict) -> str:
     pause = E.guard_text(st.get("garde_v1"))
     if pause:  # garde du Labo 1 : rien de ce qui suit n'avance côté v1
         lines.append(f"{pause} : rejeu et direct arrêtés, aucune ligne v1 écrite ; Labo 2, rattrapage et grade continuent")
+    arch = archive_line(st.get("archive_audit"), (st.get("n10") or {}).get("numero"))
+    if arch:  # relecture W1 : sans elle, le rattrapage arrêté n'avait aucune cause visible
+        lines.append(arch)
     for market in ("stock", "crypto"):
         r = st["replay"].get(market) or {}
         t = st["trades"].get(market) or {}

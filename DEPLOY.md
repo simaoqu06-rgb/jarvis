@@ -157,7 +157,9 @@ Quand une déclaration change la façon de mesurer (n° 10 : simulateur révisio
 négociés), le labo réécrit ses anciennes lignes. Avant toute réécriture, le worker les copie **automatiquement**,
 une seule fois, dans `data/archives/labo2-avant-n10.db` (à côté de `lab.db`) : tables `strat_trades`, `kill_complet`
 et `plus10_trades`, plus `archive_info` (heure, ce qui est remplacé, lignes par table). Si la copie échoue (disque
-plein…), le worker ne réécrit rien et le dit dans `docker compose logs jarvis-lab` (« archive d'audit en échec »).
+plein…), le worker ne réécrit rien (rattrapage, Killmode complet, n° 9 et recalcul du direct attendent) et le dit en
+tête de `!labo` et dans `/api/lab/status` (« ⚠️ Archive d'audit en échec depuis … (raison) »), avec le détail dans
+`docker compose logs jarvis-lab`. Il réessaie à chaque passage : une fois la place libérée, l'alerte s'en va seule.
 L'archive sert seulement à l'audit (`!strategies`, section « Audit », et `GET /api/lab/strategies/audit`) : rien
 ne la lit pour décider. Le fichier fait à peu près la taille des lignes remplacées ; `data/` n'est jamais effacé
 par le ménage.
