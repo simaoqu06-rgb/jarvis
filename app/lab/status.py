@@ -7,6 +7,10 @@ confiance, fiches catalyseurs, règles en attente et testées.
 Avis du 10 octobre (I2, I4) : jours sautés (skipped:<D>, retirés des jours faits), jours calculés sans quelques
 symboles que la source n'a pas donnés (missing_symbols), valeurs de l'univers sans trade (absent), et trades par
 révision du code (trades.code_rev) pour voir quand une même version mélange plusieurs codes.
+
+Deuxième tour d'avis du 10 octobre : garde du Labo 1 (garde_v1, empreinte v1 calculée au démarrage du worker ; en
+pause, une alerte en tête de !labo) et recalcul ponctuel des séances du direct d'avant une rupture (recalcul_v1 ;
+une séance « non recalculable » est dite).
 """
 import json
 import sqlite3
@@ -112,6 +116,9 @@ def status(path: str | None = None) -> dict:
         out["method_version"] = out["methode"]["champion"]["version"]
         live_start = conn.execute("SELECT value FROM progress WHERE job = 'lab' AND key = 'live_start'").fetchone()
         out["live_start"] = json.loads(live_start[0]) if live_start else None
+        guard = conn.execute("SELECT value FROM progress WHERE job = 'lab' AND key = 'garde_v1'").fetchone()
+        out["garde_v1"] = json.loads(guard[0]) if guard else None
+        out["recalcul_v1"] = {k: v for k, v in _progress(conn, "recalcul").items() if not k.startswith("attempts:")}
         out["labo2"] = headline(conn)
         from app.trading import visibilite as VIS  # import tardif, comme runner
 
@@ -189,6 +196,11 @@ def text(st: dict) -> str:
     if not st["exists"]:
         return "🧪 **Labo** : pas encore démarré (aucune base). `docker compose up -d` lance le service jarvis-lab."
     lines = [f"🧪 **Labo de performance** · méthode {st.get('method_version') or 'n/d'} · base {st['db_size_mb']:g} Mo"]
+    from app.lab import empreinte as E  # import tardif, comme stats
+
+    pause = E.guard_text(st.get("garde_v1"))
+    if pause:  # garde du Labo 1 : rien de ce qui suit n'avance côté v1
+        lines.append(f"{pause} : rejeu et direct arrêtés, aucune ligne v1 écrite ; Labo 2, rattrapage et grade continuent")
     for market in ("stock", "crypto"):
         r = st["replay"].get(market) or {}
         t = st["trades"].get(market) or {}
@@ -200,6 +212,10 @@ def text(st: dict) -> str:
         if len(revs) > 1:  # I2 : une même version calculée par plusieurs codes
             lines.append(f"⚠️ Méthode {version} calculée par {len(revs)} révisions du code : "
                          + ", ".join(f"{rev} {n} trades" for rev, n in revs.items()))
+    for r in (st.get("recalcul_v1") or {}).values():
+        if isinstance(r, dict) and r.get("etat") == "non_recalculable":
+            lines.append(f"⚠️ Séance du direct {MARKET_FR.get(r.get('marche'), r.get('marche'))} du {_date_fr(r['jour'])} "
+                         f"non recalculable ({r.get('raison')}) : ses trades restent ceux d'avant {r.get('avant')}")
     l2 = st.get("labo2") or {}
     stt = l2.get("stats")
     if stt and stt.get("esperance_r") is not None:
