@@ -830,6 +830,8 @@ async def test_prends_un_kill_garde_sa_taille_de_20_euros(paths, monkeypatch):
         return p
 
     monkeypatch.setattr(bot.trading, "build_plan", build_plan)
+    # KILL du jour noté par Killmode (sans lui, `kill` est refusé : test_prends_kill_refuse_hors_actions_ou_sans_kill)
+    monkeypatch.setattr(K, "kill_today", lambda symbol, now=None: {"stop": 104.49, "targets": [108.5, 110.5, 112.5]})
     txt = await bot.handle("!prends ACME 106.6 stop 104.49 kill")
     t = scheduler.book.trades[0]
     s = t["sizing"]
@@ -850,6 +852,32 @@ async def test_prends_un_kill_garde_sa_taille_de_20_euros(paths, monkeypatch):
     assert "rouvert" in txt and t["status"] == "open" and t["killmode"] and "sizing_regle" not in t
     assert t["sizing"]["hors_grade"] and t["sizing"]["risk_amount_eur"] == 20.0 and t["sizing"]["quantity"] == 8
     assert "taille du KILL, hors grade" in txt
+
+
+async def test_prends_kill_refuse_hors_actions_ou_sans_kill(paths, monkeypatch):
+    """Scénario 2 de GPT : `kill` sur une crypto imposait 1 BTC entier (870 € de risque enregistrés) ; `kill` sans
+    KILL du jour était accepté puis mesuré nulle part. Les deux sont refusés, carnet vide."""
+    from app import scheduler
+
+    monkeypatch.setattr(scheduler, "book", T.Book(None))
+    asked = []
+
+    async def build_plan(*a, **kw):
+        raise AssertionError("aucun plan ne doit être calculé")
+
+    monkeypatch.setattr(bot.trading, "build_plan", build_plan)
+    monkeypatch.setattr(K, "kill_today", lambda symbol, now=None: asked.append(symbol))
+    txt = await bot.handle("!prends BTC 60000 stop 59000 kill")
+    assert "Killmode ne couvre que les actions US" in txt and "`!prends BTC 60000 stop 59000`" in txt
+    assert "ajoute `action` : `!prends BTC 60000 stop 59000 action kill`" in txt  # BTC est aussi un ETF
+    assert scheduler.book.trades == [] and asked == []
+    txt = await bot.handle("!prends ETH 2500 stop 2450 crypto kill")
+    assert "Killmode ne couvre que les actions US" in txt and "action kill" not in txt
+    txt = await bot.handle("!prends AAPL 230 stop 226 kill")
+    assert "Pas de KILL de Killmode aujourd'hui pour AAPL" in txt and "`!prends AAPL 230 stop 226` sans `kill`" in txt
+    assert scheduler.book.trades == [] and asked == ["AAPL"]
+    await bot.handle("!prends BTC 60000 stop 59000 action kill")  # l'action BTC : cherche son KILL du jour
+    assert asked == ["AAPL", "BTC"] and scheduler.book.trades == []
 
 
 def test_rouvre_un_go_confirme_reste_avec_jarvis():

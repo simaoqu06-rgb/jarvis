@@ -451,21 +451,62 @@ def rule_fr(rule: dict) -> str:
     return f"{verb} {cond_fr(rule['cond'])}{where}"
 
 
+def _kept_mean(windows: list[dict]) -> float | None:
+    """Espérance des trades gardés sur les périodes de test (moyenne des fenêtres pondérée par leurs trades gardés) ;
+    None si une fenêtre ne la donne pas (règle testée avant la colonne)."""
+    total = n = 0.0
+    for w in windows:
+        e, kept = w.get("esperance_apres_r"), (w.get("trades_test") or 0) - (w.get("touches") or 0)
+        if e is None or kept <= 0:
+            return None
+        total += e * kept
+        n += kept
+    return total / n if n else None
+
+
+def days_fr(m: dict) -> str | None:
+    """Catégorie des jours de test (validator.day_categories, avis de GPT du 10 octobre 2026) : « Jours de test : 70
+    historiques jamais lus (rejeu), 5 du direct. » ; sans jour du direct, la règle n'est validée que sur l'historique
+    et c'est le challenger, jugé sur le direct seul, qui décidera. None pour une règle testée avant ce compte."""
+    cats = m.get("jours_par_categorie")
+    if not cats:
+        return None
+    direct = cats.get("prospectif") or 0
+    if m.get("frontiere") is None:  # règle d'avant la frontière : ses jours ont pu être vus
+        head = (f"Jours de test : {cats.get('historique_exploratoire') or 0} jours qui ont pu être lus avant la règle "
+                "(sans frontière)")
+    else:
+        head = (f"Jours de test : {cats.get('historique_non_consulte') or 0} historiques jamais lus (rejeu), "
+                f"{direct} du direct")
+    return head + (" ; validée sur l'historique seulement : le challenger en direct décidera." if not direct
+                   or m.get("frontiere") is None else ".")
+
+
 def proof_fr(rule: dict) -> str:
-    """Preuve chiffrée d'une règle validée, en une phrase (mesures du validateur, périodes de test)."""
+    """Preuve chiffrée d'une règle validée (mesures du validateur, périodes de test) : écart RELATIF en R du labo
+    (avant commission IBKR à 20 € pour les actions : le challenger, lui, juge à 20 €), espérance des trades gardés
+    quand le validateur l'a notée, et catégorie des jours de test."""
     m = rule.get("mesures") or {}
     canon = concrete(rule) or {"kind": rule["regle"]["kind"], "cond": rule["regle"]["cond"],
                                "markets": rule["regle"].get("markets")}
     touched = m.get("touches_test") or 0
     gain = m.get("gain_total_r") or 0.0
     mean_touched = -gain / touched if touched else None
-    n_win = len(m.get("fenetres") or [])
+    windows = m.get("fenetres") or []
+    n_win = len(windows)
     who = f"les trades où {cond_fr(canon['cond'])}" if canon["kind"] == "exclude" else \
         f"les trades hors de « {cond_fr(canon['cond'])} »"
     verb = "les exclure" if canon["kind"] == "exclude" else "ne garder que les autres"
-    return (f"{who[0].upper()}{who[1:]} font {fr(mean_touched)} en moyenne sur {touched} trades ; {verb} donne "
+    kept = _kept_mean(windows)
+    stock = "stock" in (canon.get("markets") or ["stock"])
+    text = (f"{who[0].upper()}{who[1:]} font {fr(mean_touched)} en moyenne sur {touched} trades ; {verb} donne "
             f"{fr(m.get('amelioration_moyenne_r'))} par trade sur {n_win} périodes de test "
             f"(meilleur dans {m.get('fenetres_meilleures', 0)} sur {n_win}).")
+    if kept is not None:  # l'écart est relatif : « moins mauvais » n'est pas « gagnant »
+        text += (f" Écart relatif : les trades gardés font encore {fr(kept)} (R du labo"
+                 + (", avant commission IBKR à 20 €" if stock else "") + ").")
+    days = days_fr(m)
+    return text + (f" {days}" if days else "")
 
 
 # --- Worker : décisions, challenger, bascule --------------------------------------------------

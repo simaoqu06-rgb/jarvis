@@ -49,9 +49,16 @@ elle garde son état. Une leçon confirmée avant les paliers est rejugée une f
   la retenter), toujours mesurée pour l'affichage, mais ne revient jamais ;
 - invalide : un champ de la condition est presque toujours absent des trades (elle redevient « à
   confirmer » si le champ apparaît, seulement s'il reste de la place au carnet).
-Une leçon favorable confirmée dont les trades perdent encore en absolu (espérance ≤ 0) est un effet
-relatif, pas un signal d'achat : elle est marquée « relative : moins mauvais que la moyenne, perd encore
-X R » partout où elle s'affiche.
+Une leçon favorable (confirmée ou à confirmer) dont les trades perdent encore en absolu (espérance ≤ 0) est
+un effet relatif, pas un signal d'achat : elle est marquée « relative : moins mauvais que la moyenne, perd
+encore X R » partout où elle s'affiche. Les trades d'actions concernés sont aussi comptés à la mise de Simão
+(method.compared_r : 20 €, commission IBKR, comme le challenger et le grade ; crypto : R du labo, frais OKX déjà
+comptés) : la plus basse des deux espérances décide, et le texte dit « à 20 € » quand c'est elle (scénario 3 de
+GPT, 10 octobre 2026 : une leçon à +0,05 R du labo qui perd à 20 € n'est pas un gain pour son compte).
+Catégorie des jours (avis de GPT du 10 octobre 2026) : la mesure compte ses jours de rejeu (historique jamais vu
+par la leçon : univers reconstruit, prix ajustés) et ses jours du direct. Tant qu'elle a moins de MIN_DAYS jours
+du direct, une confirmée est dite « (historique) » dans !lecons et dans chaque plan du direct. Aucun jour du direct
+n'est exigé pour confirmer : les leçons ne décident rien, et le rejeu s'arrête au bloc scellé.
 
 Le carnet reste court : au plus MAX_ACTIVE leçons actives (à confirmer + confirmées) ; au-delà, la
 plus faible des « à confirmer » est retirée pour faire place. C'est ce qui empêche JARVIS de se perdre.
@@ -282,9 +289,14 @@ def _mean(s: float, n: int) -> float | None:
     return s / n if n else None
 
 
-def measure(conn, lesson: dict, version: str) -> dict:
+def measure(conn, lesson: dict, version: str, r20_cache: dict | None = None) -> dict:
     """Mesures d'une leçon : trades concernés contre l'ensemble (trades déclenchés de la version,
-    gardés par le champion, marchés de la leçon)."""
+    gardés par le champion, marchés de la leçon). Jours de la mesure par origine (jours_rejeu, jours_direct :
+    rejeu historique jamais vu ou direct). Trades d'actions concernés aussi au R de la mise de Simão
+    (method.compared_r : 20 €, frais IBKR, comme le challenger et le grade ; crypto : R du labo), seulement pour
+    eux (le coût reste celui du grade) ; `r20_cache` : {id du trade: R}, partagé par les leçons d'un passage."""
+    from app.lab import method as M  # import tardif : method importe le validateur, comme ce module
+
     canon = {"cond": lesson["cond"], "markets": lesson["markets"]}
     missing = V.missing_share(conn, canon, version)
     absent = [f for f, share in missing.items() if share >= V.DEFAULTS["missing_max"]]
@@ -292,10 +304,12 @@ def measure(conn, lesson: dict, version: str) -> dict:
         return {"invalide": f"champ presque toujours absent des trades : {', '.join(absent)}"}
     expr, params = V.compile_cond(lesson["cond"])
     kept, kparams = V.champion_filter(conn)
-    sql = (f"SELECT t.day, t.r_net, t.tp1_hit, COALESCE({expr}, 0) FROM trades t LEFT JOIN regimes r "
-           "ON r.market = t.market AND r.day = t.day WHERE t.method_version = ? AND t.triggered = 1 "
-           f"AND t.r_net IS NOT NULL AND {kept}")
-    args = [*params, version, *kparams]
+    # Le détail du simulateur n'est lu que pour les trades d'actions concernés (les seuls comptés à 20 €).
+    sql = (f"SELECT t.id, t.day, t.origin, t.market, t.r_net, t.tp1_hit, COALESCE({expr}, 0), "
+           f"CASE WHEN t.market = 'stock' AND COALESCE({expr}, 0) THEN t.result END FROM trades t "
+           "LEFT JOIN regimes r ON r.market = t.market AND r.day = t.day WHERE t.method_version = ? "
+           f"AND t.triggered = 1 AND t.r_net IS NOT NULL AND {kept}")
+    args = [*params, *params, version, *kparams]
     seen = _seen(conn, lesson)
     if seen is not None:  # hors échantillon : jours que la leçon n'a pas pu voir
         cond, cparams = unseen_sql(seen)
@@ -306,19 +320,31 @@ def measure(conn, lesson: dict, version: str) -> dict:
         args += lesson["markets"]
     day_sums: dict[str, list] = {}
     tp_all = tp_hit = 0
-    for day, r, tp1, hit in conn.execute(sql, args):
+    live_days, r20 = set(), [0.0, 0, 0]  # [ΣR comparé des concernés, n, dont actions]
+    cache = {} if r20_cache is None else r20_cache
+    for tid, day, origin, market, r, tp1, hit, result in conn.execute(sql, args):
         d = day_sums.setdefault(day, [0.0, 0, 0.0, 0])
         d[0] += r
         d[1] += 1
         tp_all += tp1 or 0
+        if origin == "live":
+            live_days.add(day)
         if hit:
             d[2] += r
             d[3] += 1
             tp_hit += tp1 or 0
+            if market == "stock" and tid not in cache:
+                cache[tid] = M.compared_r(market, result, r)
+            r20[0] += cache[tid] if market == "stock" else r
+            r20[1] += 1
+            r20[2] += market == "stock"
     n_all = sum(v[1] for v in day_sums.values())
     n_hit = sum(v[3] for v in day_sums.values())
     return summary(day_sums) | {
         "tp1": round(tp_hit / n_hit, 4) if n_hit else None, "tp1_ensemble": round(tp_all / n_all, 4) if n_all else None,
+        # Espérance des concernés à la mise de Simão, s'il y a des actions (crypto en R du labo, comme le grade).
+        "esperance_20e_r": round(r20[0] / r20[1], 4) if r20[2] else None,
+        "jours_rejeu": len(set(day_sums) - live_days), "jours_direct": len(live_days),
         "version": version, "apres_trade": lesson.get("apres_trade"), "vu_jusqu": seen}
 
 
@@ -395,11 +421,11 @@ def measure_all(db: LabDB, only_new: bool = False) -> int:
     if not version:
         return 0
     sql = "SELECT id FROM lessons WHERE status <> 'retiree'" + (" AND measured_at IS NULL" if only_new else "")
-    n = 0
+    n, r20 = 0, {}  # R à 20 € des trades d'actions, calculé une fois par passage pour toutes les leçons
     for (lid,) in db.conn.execute(sql).fetchall():
         lesson = get(db.conn, lid)
         try:
-            m = measure(db.conn, lesson, version)
+            m = measure(db.conn, lesson, version, r20)
         except sqlite3.Error as exc:
             log.warning("Labo : leçon %d non mesurée (%s)", lid, exc)
             continue
@@ -480,17 +506,33 @@ def _pct(x) -> str:
     return f"{x:.0%}" if x is not None else "n/d"
 
 
-def relative(sens: str, esperance: float | None) -> str | None:
+def relative(sens: str, esperance: float | None, esperance_20e: float | None = None) -> str | None:
     """Leçon favorable dont les trades concernés ne gagnent pas en absolu : un effet relatif, pas un signal
-    d'achat (« relative : moins mauvais que la moyenne, perd encore 0,15 R ») ; None sinon."""
-    if sens != "favorable" or esperance is None or esperance > 0:
+    d'achat (« relative : moins mauvais que la moyenne, perd encore 0,15 R ») ; None sinon. `esperance_20e` :
+    la même à la mise de Simão (actions) ; la plus basse des deux décide (« … perd encore 0,12 R à 20 € »)."""
+    if sens != "favorable":
         return None
-    lost = f"perd encore {abs(esperance):.2f} R".replace(".", ",") if esperance < 0 else "ne gagne rien"
+    at20 = esperance_20e is not None and (esperance is None or esperance_20e < esperance)
+    worst = esperance_20e if at20 else esperance
+    if worst is None or worst > 0:
+        return None
+    unit = " à 20 €" if at20 else ""
+    lost = f"perd encore {abs(worst):.2f} R{unit}".replace(".", ",") if worst < 0 else f"ne gagne rien{unit}"
     return f"relative : moins mauvais que la moyenne, {lost}"
 
 
+def historical(jours_direct) -> bool:
+    """Leçon mesurée surtout sur le rejeu : moins de MIN_DAYS jours du direct (inconnu : rien à dire)."""
+    return jours_direct is not None and jours_direct < MIN_DAYS
+
+
+def _r(x) -> str:
+    return f"{x:+.2f} R".replace(".", ",") if x is not None else "n/d"
+
+
 def proof(lesson: dict) -> str:
-    """Preuve chiffrée en clair (« 42 trades : +0,31 R contre +0,05 R, TP1 61 % contre 44 % »)."""
+    """Preuve chiffrée en clair (« 42 trades jamais vus par la leçon (30 j de rejeu, 5 j du direct) : +0,31 R
+    contre +0,05 R (à 20 € : +0,12 R), TP1 61 % contre 44 % »)."""
     m = lesson.get("mesures") or {}
     if m.get("invalide"):
         return m["invalide"]
@@ -498,14 +540,25 @@ def proof(lesson: dict) -> str:
         return "pas encore mesurée"
     if not m.get("n"):
         return "aucun trade concerné depuis la leçon pour l'instant"
-    fmt = lambda x: f"{x:+.2f} R".replace(".", ",") if x is not None else "n/d"  # noqa: E731
-    rel = relative(lesson["sens"], m.get("esperance_r")) if lesson.get("etat") == "confirmee" else None
-    return (f"{m['n']} trades depuis la leçon : {fmt(m.get('esperance_r'))} contre {fmt(m.get('esperance_ensemble_r'))}, "
+    rel = relative(lesson["sens"], m.get("esperance_r"), m.get("esperance_20e_r")) \
+        if lesson.get("etat") in ACTIVE else None
+    if m.get("jours_rejeu") is None:  # mesure d'avant le compte par origine
+        who = f"{m['n']} trades jamais vus par la leçon"
+    elif m.get("vu_jusqu") is None:  # leçon sans frontière : ses jours ont pu être vus
+        who = (f"{m['n']} trades ({m['jours_rejeu']} j de rejeu, "
+               f"{m.get('jours_direct') or 0} j du direct, leçon sans frontière)")
+    else:
+        who = (f"{m['n']} trades jamais vus par la leçon ({m['jours_rejeu']} j de rejeu, "
+               f"{m.get('jours_direct') or 0} j du direct)")
+    at20 = f" (à 20 € : {_r(m['esperance_20e_r'])})" if m.get("esperance_20e_r") is not None else ""
+    return (f"{who} : {_r(m.get('esperance_r'))} contre {_r(m.get('esperance_ensemble_r'))}{at20}, "
             f"TP1 {_pct(m.get('tp1'))} contre {_pct(m.get('tp1_ensemble'))}" + (f" · {rel}" if rel else ""))
 
 
 def line(lesson: dict) -> str:
     icon = {"confirmee": "✅", "a_confirmer": "🔎", "dementie": "❌", "invalide": "⚠️", "retiree": "🗄️"}[lesson["etat"]]
+    if lesson["etat"] == "confirmee" and historical((lesson.get("mesures") or {}).get("jours_direct")):
+        icon += " (historique)"  # confirmée surtout sur le rejeu : pas encore prouvée sur des jours du direct
     sens = "👍" if lesson["sens"] == "favorable" else "👎"
     return f"{icon} {sens} **#{lesson['id']}** {lesson['texte']} · {proof(lesson)}"
 
@@ -529,6 +582,9 @@ def text(conn, limit_denied: int = 5) -> str:
         if group:
             lines.append(f"__{title}__")
             lines += [line(x) for x in group]
+    if any(x["etat"] == "confirmee" and historical((x.get("mesures") or {}).get("jours_direct")) for x in lessons):
+        lines.append(f"-# (historique) : confirmée sur le rejeu (jours jamais vus par la leçon, mais historiques), "
+                     f"moins de {MIN_DAYS} jours du direct.")
     return "\n".join(lines)
 
 
@@ -555,7 +611,7 @@ def write_live(db: LabDB) -> bool:
     if db.path == ":memory:":
         return False
     data = {"lecons": [{"id": x["id"], "texte": x["texte"], "sens": x["sens"], "cond": x["cond"],
-                        "markets": x["markets"], "esperance_r": (x["mesures"] or {}).get("esperance_r")}
+                        "markets": x["markets"]} | {k: (x["mesures"] or {}).get(k) for k in LIVE_METRICS}
                        for x in list_lessons(db.conn, "confirmee")]}
     path = live_path(db.path)
     try:
@@ -567,6 +623,8 @@ def write_live(db: LabDB) -> bool:
     return True
 
 
+# Mesures recopiées dans le fichier du direct : étiquettes « relative » (à 20 €) et « (historique) » des plans.
+LIVE_METRICS = ("esperance_r", "esperance_20e_r", "jours_direct")
 _cache: dict = {"key": None, "data": []}
 _warned: set[str] = set()
 _index: dict = {"day": None, "bars": None}
@@ -590,7 +648,7 @@ def current() -> list[dict]:
             for x in data.get("lecons") or []:
                 V.compile_cond(x["cond"])  # condition illisible : erreur ici, pas pendant un plan
                 items.append({"id": x["id"], "texte": x["texte"], "sens": _sens(x["sens"]), "cond": x["cond"],
-                              "markets": x.get("markets"), "esperance_r": x.get("esperance_r")})
+                              "markets": x.get("markets")} | {k: x.get(k) for k in LIVE_METRICS})
             _cache.update(key=key, data=items)
             _warned.discard("lecture")
         return _cache["data"]
@@ -638,8 +696,11 @@ def adjustment(matched: list[dict]) -> dict | None:
     adj = max(-ADJ_MAX, min(ADJ_MAX, raw))
 
     def text(x: dict) -> str:
-        rel = relative(x["sens"], x.get("esperance_r"))
-        return f"{'+' if x['sens'] == 'favorable' else '−'}{ADJ_PER:g} #{x['id']} {x['texte']}" + (f" ({rel})" if rel else "")
+        tags = ["historique"] if historical(x.get("jours_direct")) else []  # confirmée surtout sur le rejeu
+        rel = relative(x["sens"], x.get("esperance_r"), x.get("esperance_20e_r"))
+        tags += [rel] if rel else []
+        return (f"{'+' if x['sens'] == 'favorable' else '−'}{ADJ_PER:g} #{x['id']} {x['texte']}"
+                + (f" ({' ; '.join(tags)})" if tags else ""))
     return {"ajustement": round(adj, 2), "lignes": [text(x) for x in matched]}
 
 

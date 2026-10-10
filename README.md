@@ -140,7 +140,10 @@ chaque côté et un intervalle qui exclut 0 ; « JARVIS a raison » seulement si
 labo (pente > 0). Les sorties sont au prix suivi (stop franchi en gap : à l'ouverture ; objectif : franchi
 d'un pas) ou au tien avec `!sortie`. Ce R net sert aussi à l'arrêt de la journée à −3 R, aux trades réels
 de `!grade` et au journal du cockpit. Un GO confirmé pris avec `!prends NVDA 132.5 go` garde le stop et les
-objectifs du scanner et compte avec JARVIS. Le même principe s'applique aux Claude qui travaillent sur JARVIS
+objectifs du scanner et compte avec JARVIS. La taille est un désaccord à part : un trade pris à ta règle de 20 €
+quand JARVIS propose 0 % (ou à un risque demandé au-delà de ce qu'il propose) forme un troisième groupe, « taille
+à ta règle », jugé sur la même règle (30 trades sur 20 jours, IC qui exclut 0) ; un GO pris sous un grade F reste
+d'accord avec la note, pas avec la taille. Le même principe s'applique aux Claude qui travaillent sur JARVIS
 ([CLAUDE.md](CLAUDE.md)).
 
 ## Scanner avant l'ouverture US
@@ -287,8 +290,10 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
 - **La nuit** : le worker valide les règles (Labo 2).
 - **Le matin (8 h - 9 h, heure de Paris)** : un seul message privé groupé (`app/lab/morning.py`) avec
   chaque règle validée, sa preuve chiffrée (« Les trades où rvol > 5 font −0,40 R en moyenne sur 212
-  trades ; les exclure donne +0,15 R par trade sur 3 périodes de test ») et son « pourquoi », plus le
-  nombre d'idées écartées depuis la veille. Boutons Approuver / Refuser par règle, ou `!oui N` /
+  trades ; les exclure donne +0,15 R par trade sur 3 périodes de test », écart relatif en R du labo,
+  avec ce que font encore les trades gardés, puis « Jours de test : 70 historiques jamais lus (rejeu),
+  5 du direct » ; sans jour du direct : « validée sur l'historique seulement : le challenger en direct
+  décidera ») et son « pourquoi », plus le nombre d'idées écartées depuis la veille. Boutons Approuver / Refuser par règle, ou `!oui N` /
   `!non N` (mêmes propositions que les réglages, même cockpit). Rien de validé : pas de message.
   Jamais hors de 8 h - 9 h ; manqué, il repart le lendemain ; jamais deux le même jour, même après un
   redémarrage (état dans `data/lab_morning.json`, marqué avant l'envoi). **Rodage** :
@@ -304,7 +309,10 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
   que l'effet tient ; **démentie**, c'est définitif (encore mesurée, jamais reconfirmée). Les confirmées
   (`data/lab_lessons.json`) s'affichent dans les plans en direct (ligne « Leçons du labo », avec la note
   qu'elles donneraient) **sans toucher au verdict** : GO / NO GO reste calculé sur la note brute. Une
-  leçon « favorable » dont les trades perdent encore est dite « relative ». La routine relit le carnet
+  leçon « favorable » dont les trades perdent encore est dite « relative » ; en actions, l'espérance est
+  aussi comptée à 20 € (commission IBKR) et la plus basse décide (« perd encore 0,12 R à 20 € »). La preuve
+  dit ses jours de rejeu et du direct ; une confirmée qui a moins de 20 jours du direct est dite
+  « (historique) », dans `!lecons` et dans les plans. La routine relit le carnet
   (dans `GET /api/lab/brief`) avant d'analyser ; Simão le lit avec `!lecons`.
 - **Approuvée** : la règle crée la version suivante (v2 = v1 + ses filtres), d'abord **challenger**.
   Les trades restent journalisés une seule fois (version de génération v1) ; champion et challenger
@@ -364,9 +372,14 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
   - Taille, une seule règle : risque = min(`JARVIS_CAPITAL` (€) × % proposé, `JARVIS_RISK_EUR` = 20 €),
     20 € sans capital connu, converti au change BCE du jour, en actions entières (« 💰 Risque 20 €
     (23,0 $) : 46 actions »). Grade à 0 % : JARVIS ne propose pas de taille ; ta règle de 20 € est
-    affichée à part, « hors avis de JARVIS » (plans, GO confirmés, potentiel +10, Killmode). Un
-    risque demandé explicitement (`risk_pct`) remplace le % du grade et est signalé hors budget
-    s'il engage plus que ce que propose JARVIS.
+    affichée à part, « hors avis de JARVIS » (plans, GO confirmés, potentiel +10, Killmode), dans la
+    ligne d'ordre même des MP automatiques (« **46 actions à ta règle de 20 €** (hors avis de
+    JARVIS) »). Quand ce 0 % vient de l'arrêt de la journée ou du budget de risque ouvert plein, les
+    MP automatiques (GO confirmé, potentiel +10) ne chiffrent aucune quantité (« pas de taille :
+    arrêt de la journée (−3,3 R) ») : choix par défaut, `JARVIS_MP_TAILLE_APRES_ARRET=oui` pour
+    revenir à ta règle de 20 €. Un risque demandé explicitement (`risk_pct`) remplace le % du grade
+    et est signalé hors budget s'il engage plus que ce que propose JARVIS (ligne 💰 : « risque
+    demandé, hors budget »).
   - Changements : baisse immédiate ; hausse après au moins 150 nouveaux trades sur 5 nouveaux jours,
     et une hausse de **lettre** attend ton accord (proposition Approuver / Refuser en privé, `!oui N`) ;
     à partir de C, une baisse de 20 R depuis le sommet ramène tout de suite en D (coupe-circuit) ; une
@@ -450,12 +463,13 @@ trade terminé, comparé à une sortie au moment du conseil (ligne « Bilan des 
 | `!avis NVDA` | avis de JARVIS : entrer long, entrer short ou attendre, pourquoi, ce qui invaliderait, et ce que le labo a mesuré |
 | `!prends NVDA` | calcule le plan et suit le trade (TP/SL annoncés, cockpit) ; `!prends NVDA 132.5 stop 128` = ton entrée et ton stop réels |
 | `!prends NVDA 132.5 go` | suit le GO confirmé du jour avec son stop et ses objectifs (pas recalculés) ; sans GO confirmé ce jour, rien n'est suivi |
+| `!prends ACME 106.6 kill` | suit le KILL de Killmode du jour (sa taille de 20 €, sa gestion) ; refusé pour une crypto ou sans KILL noté ce jour (`action` force l'action d'un ticker lu comme crypto, ex. l'ETF BTC) |
 | `!sortie NVDA 131.2` | ta sortie réelle : clôture le trade suivi à ce prix, ou corrige le prix de sa dernière sortie s'il est déjà terminé |
 | `!positions` | trades suivis : sortir, alléger ou garder, avec les faits (aussi envoyé seul 30 min avant la clôture US) |
 | `!position NVDA 132.5` | même conseil pour une position prise hors de JARVIS (`short`, `stop 128` en plus) |
 | `!scan` | scanner tout de suite |
 | `!bilan` | bilan du forward-test |
-| `!desaccords` | trades pris contre l'avis de JARVIS (NO GO) comparés aux plans GO : qui avait raison |
+| `!desaccords` | trades pris contre l'avis de JARVIS (NO GO) comparés aux plans GO, et trades pris à ta règle de taille quand JARVIS propose 0 % : qui avait raison |
 | `!propositions` | réglages proposés qui attendent ta réponse |
 | `!oui 3` / `!non 3` | approuver ou refuser la proposition 3 (ou les boutons) |
 | `!regle` | réglages actuels |

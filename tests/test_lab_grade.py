@@ -591,6 +591,48 @@ def test_risque_demande_hors_budget(monkeypatch):
     assert p["sizing"] is None and "sizing_regle" not in p and not p["grade"].get("hors_budget")
 
 
+def test_ligne_taille_dit_risque_demande_hors_budget(monkeypatch):
+    """Scénario 1 de GPT : un risque demandé au-delà de ce que propose JARVIS est dit sur la ligne 💰 même (pas
+    « hors avis » : JARVIS peut proposer plus de 0 %, mais moins que demandé)."""
+    monkeypatch.setattr(GR, "current", lambda: DATA)
+    monkeypatch.setenv("JARVIS_CAPITAL", "1000")
+    p = plan(10.0, 9.5)
+    T.apply_grade(p, None, 3.0, NOW, trades=[trade(risk=1.0) for _ in range(3)], usd_per_eur=1.15)
+    assert T.sizing_lines(p) == ["💰 Risque 20 € (23,0 $) : 46 actions pour 460 $ · risque demandé, hors budget"]
+    p = plan(10.0, 9.5)
+    T.apply_grade(p, None, None, NOW, trades=[], usd_per_eur=1.15)
+    assert T.sizing_lines(p) == ["💰 Risque 20 € (23,0 $) : 46 actions pour 460 $"]
+
+
+def test_ligne_taille_sous_grade_perime(monkeypatch):
+    """Grade périmé : JARVIS ne propose pas de taille, et la ligne 💰 dit la vraie raison (pas « grade A : 0 % »)."""
+    monkeypatch.setattr(GR, "current", lambda: DATA | {"verifie_le": "2026-10-07T13:00:00+00:00"})
+    monkeypatch.delenv("JARVIS_CAPITAL", raising=False)
+    p = plan(10.0, 9.5)
+    T.apply_grade(p, None, None, NOW, trades=[], usd_per_eur=1.15)
+    assert p["sizing"] is None and p["sizing_regle"]["quantity"] == 46
+    assert T.sizing_lines(p) == ["💰 JARVIS ne propose pas de taille (0 % : grade périmé (dernier passage du labo il y "
+                                 "a 7 h)). Ta règle de 20 € : 46 actions pour 460 $ (exception, hors avis de JARVIS)"]
+
+
+def test_regle_de_simao_en_crypto_sous_un_grade_a_0_arrondie_vers_le_bas(monkeypatch):
+    """Scénario 2 de GPT : la crypto garde une quantité fractionnaire (jamais « actions entières »), arrondie vers le
+    bas à 6 décimales (jamais plus de risque que la règle), affichée sans notation scientifique."""
+    monkeypatch.setattr(GR, "current", lambda: DATA)  # crypto F- : 0 %
+    monkeypatch.delenv("JARVIS_CAPITAL", raising=False)
+    p = plan(3.0, 2.7, market="crypto")
+    T.apply_grade(p, None, None, NOW, trades=[], usd_per_eur=1.15)
+    rule = p["sizing_regle"]
+    assert p["sizing"] is None and rule["hors_grade"] and rule["quantity"] == 76.666666  # 23 / 0,3, pas 76.666667
+    assert T.sizing_lines(p) == ["💰 JARVIS ne propose pas de taille (grade F- : 0 %). Ta règle de 20 € : taille "
+                                 "76.6666 pour 230 $ (exception, hors avis de JARVIS)"]
+    pepe = plan(0.0000124, 0.0000118, market="crypto")
+    T.apply_grade(pepe, None, None, NOW, trades=[], usd_per_eur=1.15)
+    assert pepe["sizing_regle"]["quantity"] == 38333333.333333
+    assert "Ta règle de 20 € : taille 38 333 333 pour " in T.sizing_lines(pepe)[0]
+    assert T.crypto_qty(0.023) == "0.023" and T.crypto_qty(37096774.193548) == "37 096 774"
+
+
 # --- Fail-closed et péremption (R1) ----------------------------------------------------------------
 
 @pytest.mark.parametrize("data", [

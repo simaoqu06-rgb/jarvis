@@ -18,7 +18,7 @@ qu'aux comptes listés dans JARVIS_DISCORD_OWNER_ID et ignore tout le reste sans
   !scan                 scanner pré-ouverture tout de suite
   !confirmations        GO du scanner confirmés ou pas après l'ouverture, et ce que ça rapporte
   !bilan                bilan du forward-test sur le compte fictif
-  !desaccords           trades pris contre l'avis de JARVIS (plans NO GO) comparés aux autres
+  !desaccords           trades pris contre l'avis de JARVIS (plans NO GO, taille à ta règle sous 0 %) comparés aux autres
   !propositions         réglages que JARVIS propose et qui attendent ta réponse
   !oui 3 / !non 3       approuver ou refuser la proposition 3 (ou les boutons sous le message)
   !regle                réglages actuels
@@ -210,6 +210,23 @@ def parse_trade(args: list[str]) -> dict:
             "targets": targets or None} | ({"killmode": True} if "kill" in words else {}) | go
 
 
+def kill_refused(req: dict, words: list[str]) -> str:
+    """`!prends … kill` refusé : Killmode ne couvre que les actions US, et seulement un KILL noté aujourd'hui (sinon le
+    trade aurait la taille d'un KILL, 1 action au moins, et ne serait mesuré nulle part)."""
+    sym = req["symbol"]
+    price = f"{req['entry']:g}" if req["entry"] is not None else "<ton prix>"
+    stop = f" stop {req['stop']:g}" if req["stop"] is not None else ""
+    plain = f"`!prends {sym} {price}{stop}`"
+    if req["market"] != "stock":
+        text = (f"Killmode ne couvre que les actions US : `kill` refusé pour {sym} (crypto), rien n'est suivi. "
+                f"Pour la crypto, retire `kill` : {plain}.")
+        if "crypto" not in words:  # ticker lu comme une crypto : ce peut être une action du même nom (ex. l'ETF BTC)
+            text += f" Si c'est l'action {sym}, ajoute `action` : `!prends {sym} {price}{stop} action kill`."
+        return text
+    return (f"Pas de KILL de Killmode aujourd'hui pour {sym} : `kill` refusé, rien n'est suivi. {plain} sans `kill` "
+            "pour le suivre sur un plan recalculé.")
+
+
 GO_STATUS_FR = {"attente": "en attente du repli", "repli": "repli vu, reprise du VWAP pas encore confirmée",
                 "annulé": "annulé", "expiré": "expiré à 11 h 30 New York"}
 
@@ -338,7 +355,9 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
                     f"`!prends {a['symbol']} {req['entry']:g}{' short' if req['side'] == 'short' else ''}` pour que JARVIS la suive.")
         if cmd == "prends":
             req = parse_trade(args)
-            kill = killmode.kill_today(req["symbol"]) if req.get("killmode") else None
+            kill = killmode.kill_today(req["symbol"]) if req.get("killmode") and req["market"] == "stock" else None
+            if req.get("killmode") and kill is None:  # scénario 2 de GPT : jamais la taille ni la gestion d'un KILL
+                return kill_refused(req, [a.lower() for a in args[1:]])
             if kill:  # stop et objectifs du KILL du jour quand ils manquent : la gestion que son journal mesure
                 req["stop"] = req["stop"] if req["stop"] is not None else kill["stop"]
                 req["targets"] = req["targets"] or kill["targets"]

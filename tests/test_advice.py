@@ -80,6 +80,39 @@ def test_mesure_du_labo_lit_la_table_des_trades(tmp_path):
     assert A.lab_measure("stock", "NVDA", str(tmp_path / "absente.db")) is None
 
 
+def test_avis_go_meilleur_que_no_go_dit_l_ecart_relatif_et_l_esperance_absolue():
+    """Scénario 3 de GPT : « le GO fait mieux que le NO GO » est un écart relatif ; le texte dit de combien,
+    l'espérance absolue du GO et son unité (R du labo, avant commission IBKR à 20 € en actions)."""
+    m = {"version": "v1", "symbole": {"GO": {"n": 4, "r": 0.3, "wins": 2}},
+         "marche": {"GO": {"n": 500, "r": 0.12, "wins": 260}, "NO GO": {"n": 900, "r": -0.15, "wins": 300}}}
+    text = "\n".join(A.measure_lines(m, "NVDA", "stock"))
+    assert "(méthode v1, plans longs rejoués, R du labo, avant commission IBKR à 20 €)" in text
+    assert ("Le GO fait mieux que le NO GO de +0.27 R par trade dans le labo (écart relatif) ; le GO gagne +0.12 R "
+            "en moyenne (R du labo, avant commission IBKR à 20 €) : la note départage sur ce marché.") in text
+    assert "a de la valeur" not in text and "pas encore prouvé" not in text
+    # GO meilleur mais encore perdant : moins mauvais, pas gagnant.
+    m["marche"]["GO"]["r"] = -0.02
+    text = "\n".join(A.measure_lines(m, "BTC", "crypto"))
+    assert "mais le GO perd encore -0.02 R en moyenne (R du labo, frais OKX compris) : moins mauvais, pas gagnant." in text
+
+
+def test_mesure_du_labo_filtre_version_de_generation_et_rejeu(tmp_path):
+    """Le libellé dit « méthode v1, plans longs rejoués » : ni le direct ni une autre version n'y entrent."""
+    path = tmp_path / "lab.db"
+    db = lab_db.LabDB(str(path))
+    db.conn.execute("INSERT INTO method_versions (version, created_at, settings) VALUES "
+                    "('v0', '2025-01-01T00:00:00+00:00', '{}'), ('v1', '2026-01-01T00:00:00+00:00', '{}')")
+    for i, (origin, version, decision, r) in enumerate([("replay", "v1", "GO", 1.0), ("replay", "v1", "NO GO", -1.0),
+                                                         ("live", "v1", "GO", -3.0), ("replay", "v0", "GO", -3.0)]):
+        db.conn.execute("INSERT INTO trades (origin, method_version, market, symbol, side, day, planned_at, triggered, "
+                        "r_net, decision) VALUES (?, ?, 'stock', 'NVDA', 'long', '2026-01-02', ?, 1, ?, ?)",
+                        (origin, version, i, r, decision))
+    db.conn.commit()
+    m = A.lab_measure("stock", "NVDA", str(path))
+    assert m["version"] == "v1" and m["marche"] == {"GO": {"n": 1, "r": 1.0, "wins": 1},
+                                                     "NO GO": {"n": 1, "r": -1.0, "wins": 0}}
+
+
 def test_garder_quand_la_tendance_porte_vers_l_objectif():
     closes = [100 + 0.2 * i for i in range(300)]
     price = closes[-1]
