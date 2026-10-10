@@ -262,6 +262,24 @@ def _gaps_text(replay: dict, live: dict | None) -> str:
     return "".join(f" · {p}" for p in parts)
 
 
+def _jours(n: int) -> str:
+    return f"{n} jour{'s' if n > 1 else ''}"
+
+
+def _rattrapage_text(left: dict) -> str:
+    """Relecture W6 : jours du rejeu à rattraper et jours du direct en attente de calcul, à part. En actions, chaque
+    jour du direct passe par le rattrapage (journalier de la séance suivante) : « rattrapage : 1 jours actions » à côté
+    de « n° 10 : complète » se contredisaient à la lecture."""
+    replay = {m: (left.get(m) or {}).get("replay", 0) for m in ("stock", "crypto")}
+    live = {m: (left.get(m) or {}).get("live", 0) for m in ("stock", "crypto")}
+    out = ""
+    if any(replay.values()):
+        out += f" · rattrapage : {_jours(replay['stock'])} actions, {_jours(replay['crypto'])} crypto"
+    if any(live.values()):
+        out += " · direct en attente de calcul : " + ", ".join(f"{_jours(n)} {MARKET_FR[m]}" for m, n in live.items() if n)
+    return out
+
+
 def text(st: dict) -> str:
     """Résumé en quelques lignes pour Discord."""
     if not st["exists"]:
@@ -306,10 +324,8 @@ def text(st: dict) -> str:
                      f"en attente, {regles.get('validee', 0) + regles.get('rejetee', 0)} testées")
     v2 = st.get("labo_v2")
     if v2 and (v2.get("lignes") or any(sum(r.values()) for r in (v2.get("rattrapage") or {}).values())):
-        left = {m: sum(r.values()) for m, r in (v2.get("rattrapage") or {}).items()}
         lines.append(f"Labo v2 : {sum((v2.get('lignes') or {}).values())} lignes de stratégies (`!strategies`)"
-                     + (f" · rattrapage : {left.get('stock', 0)} jours actions, {left.get('crypto', 0)} jours crypto"
-                        if any(left.values()) else ""))
+                     + _rattrapage_text(v2.get("rattrapage") or {}))
     if st.get("n10"):  # 2e tour d'avis (C4)
         lines.append(declaration_line(st["n10"]))
     if st.get("archive_actus"):

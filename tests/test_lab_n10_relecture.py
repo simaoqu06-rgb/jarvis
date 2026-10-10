@@ -214,3 +214,40 @@ def test_lignes_sans_revision_du_cout_ne_font_pas_d_alerte():
     assert SS._revisions_text("stock", {"code": {"a": 1}, "cout": {"inconnue": 1}}) == (
         "ℹ️ 1 ligne actions sans révision du coût (écrites avant son suivi)")
     assert SS._revisions_text("stock", {"code": {"a": 1}, "cout": {"b": 1}}) is None
+
+
+# --- W6 : !labo, rattrapage du rejeu et direct en attente séparés -------------------------------------------------------
+
+def test_labo_separe_rattrapage_et_direct_en_attente(tmp_path):
+    """skeptic-invariants-textes/status_n10.py : rejeu fini, un jour du direct d'actions attend son calcul (journalier
+    du 09/10 en base, curseur au 08/10) ; !labo disait « rattrapage : 1 jours actions » à côté de « n° 10 : complète »."""
+    from datetime import date
+
+    from app.lab import collector as CO
+    from app.lab import rattrapage as RAT
+    from app.lab import status as STATUS
+    from app.lab import strategies as ST
+
+    path = str(tmp_path / "lab.db")
+    db = LabDB(path)
+    job = ST.progress_job("stock")
+    db.set("lab", "live_start", "2026-10-05")
+    db.set("live:stock", "last_day", "2026-10-09")
+    db.set(job, "rattrapage:live", "2026-10-08")
+    db.set("replay:stock", "start", "2026-01-05")
+    db.set("replay:stock", "last_day", "2026-10-02")
+    db.set(job, "rattrapage:replay", "2026-10-02")
+    db.put_bars("stock", "SPY", 1440, [{"t": CO.ny_midnight(date(2026, 10, 9)), "o": 1, "h": 1, "l": 1, "c": 1}])
+    for day in ("2026-10-07", "2026-10-08"):
+        db.replace_strat("live", "stock", day, [_row("AAA")])
+    assert RAT.remaining(db.conn, "stock") == {"replay": 0, "live": 1}
+    st = STATUS.status(path)
+    assert st["n10"]["complete"]
+    lines = STATUS.text(st).splitlines()
+    assert "Labo v2 : 2 lignes de stratégies (`!strategies`) · direct en attente de calcul : 1 jour actions" in lines
+    assert not any("rattrapage :" in line for line in lines)
+    assert f"n° {ST.LATEST_DECLARATION} : complète (stratégies, n° 9 et Killmode complet re-mesurés)" in lines
+    db.set("replay:stock", "last_day", "2026-10-09")                 # cinq séances du rejeu à rattraper aussi
+    lines = STATUS.text(STATUS.status(path)).splitlines()
+    assert ("Labo v2 : 2 lignes de stratégies (`!strategies`) · rattrapage : 5 jours actions, 0 jour crypto · direct "
+            "en attente de calcul : 1 jour actions") in lines
