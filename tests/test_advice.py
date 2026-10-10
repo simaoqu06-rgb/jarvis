@@ -118,7 +118,11 @@ def test_avis_go_meilleur_que_no_go_dit_l_ecart_relatif_et_l_esperance_absolue()
     # GO meilleur mais encore perdant : moins mauvais, pas gagnant.
     m["marche"]["GO"]["r"] = -0.02
     text = "\n".join(A.measure_lines(m, "BTC", "crypto"))
-    assert "mais le GO perd encore -0.02 R en moyenne (R du labo, frais OKX compris) : moins mauvais, pas gagnant." in text
+    assert "mais le GO fait encore -0.02 R en moyenne (R du labo, frais OKX compris) : moins mauvais, pas gagnant." in text
+    assert "perd encore" not in text
+    m["marche"]["GO"]["r"] = 0.0  # nul : ni « perd » ni gagnant
+    text = "\n".join(A.measure_lines(m, "BTC", "crypto"))
+    assert "mais le GO fait encore +0.00 R en moyenne (R du labo, frais OKX compris) : moins mauvais, pas gagnant." in text
 
 
 def test_mesure_du_labo_filtre_version_de_generation_et_rejeu(tmp_path):

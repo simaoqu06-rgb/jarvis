@@ -166,7 +166,9 @@ def measure_lines(m: dict | None, symbol: str, market: str | None = None) -> lis
             lines.append(f"-# {gap} ; le GO gagne {_fr(go['r'])} R en moyenne ({unit}) : la note départage sur ce "
                          "marché.")
         else:
-            lines.append(f"-# {gap}, mais le GO perd encore {_fr(go['r'])} R en moyenne ({unit}) : moins mauvais, "
+            # « fait encore -0.02 R » : juste pour un GO négatif comme nul (« perd encore -0.02 R » était une double
+            # négation, et « perd encore +0.00 R » faux).
+            lines.append(f"-# {gap}, mais le GO fait encore {_fr(go['r'])} R en moyenne ({unit}) : moins mauvais, "
                          "pas gagnant.")
     else:
         lines.append("-# La note GO/NO GO n'a pas encore prouvé qu'elle gagne (GO pas nettement meilleur que NO GO) : "
