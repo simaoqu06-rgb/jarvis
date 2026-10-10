@@ -49,7 +49,9 @@ V1_CODE = (
 # Labo v2 : le code du Labo 1 (v1 rejouée, plans des GO), les stratégies et le rattrapage.
 STRAT_CODE = V1_CODE + (
     ("lab/strategies.py", None),
-    ("lab/rattrapage.py", ("DAILY_LOOKBACK_DAYS", "_v1", "stock_rows", "crypto_rows")),
+    ("lab/rattrapage.py", ("DAILY_LOOKBACK_DAYS", "STOCK_BATCH", "SPLIT_TOL", "v1_trades", "_v1", "_factor",
+                           "operation", "_daily", "_lost", "_too_many", "stock_rows", "crypto_rows")),
+    ("lab/plus10.py", ("OP_RATIO", "scale")),  # n° 10 : opérations sur titre, journalier remis à l'échelle
 )
 STATS_FILES = ("lab/*.py", "trading/killmode.py")
 COST_PRICES = (0.5, 0.9999, 1.0, 2.5, 4.99, 5.0, 7.5, 19.99, 20.0, 150.0)

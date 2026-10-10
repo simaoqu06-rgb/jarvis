@@ -66,6 +66,30 @@ def test_revision_du_code_calculee_une_fois_a_l_import(monkeypatch):
     assert E.code_rev() == v1 and E.code_rev("strat") == strat     # rien n'est relu ni recalculé
 
 
+def test_revision_strat_suit_tout_le_code_du_rattrapage():
+    """Relecture : la n° 10 a ajouté au rattrapage (seule source des lignes v2 des actions) _factor, operation et
+    plus10.OP_RATIO / scale sans les suivre ; changer le seuil des opérations sur titre ne changeait pas code_rev."""
+    import ast
+
+    tracked = {rel: set(names or ()) for rel, names in E.STRAT_CODE}
+    tree = ast.parse((E.APP / "lab/rattrapage.py").read_text(encoding="utf-8"))
+    top = {n.name: n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    top |= {t.id: n for n in tree.body if isinstance(n, ast.Assign) for t in n.targets if isinstance(t, ast.Name)}
+    seen, todo, plus10 = set(), ["stock_rows", "crypto_rows"], set()
+    while todo:
+        name = todo.pop()
+        if name in seen or name == "log":
+            continue
+        seen.add(name)
+        for node in ast.walk(top[name]):
+            if isinstance(node, ast.Name) and node.id in top:
+                todo.append(node.id)
+            elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "P10":
+                plus10.add(node.attr)
+    assert seen - {"log"} <= tracked["lab/rattrapage.py"], seen - tracked["lab/rattrapage.py"]
+    assert plus10 and plus10 <= tracked["lab/plus10.py"], plus10
+
+
 def test_revision_suit_le_code_utile_pas_les_commentaires(tmp_path, monkeypatch):
     for rel, _ in E.STRAT_CODE:
         (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
