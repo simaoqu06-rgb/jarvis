@@ -396,6 +396,14 @@ def test_base_des_prix_dans_l_empreinte(monkeypatch):
     assert KC.cost_fingerprint() != before          # des lignes calculées sur une autre base seraient recalculées
 
 
+def test_revision_du_simulateur_dans_l_empreinte(monkeypatch):
+    """Relecture : la n° 10 (simulateur en révision 2) ne recalculait Killmode complet que parce que cost_variants
+    avait pris de nouvelles clés ; une révision suivante du simulateur seule laissait les anciennes séances compter."""
+    before = KC.cost_fingerprint()
+    monkeypatch.setattr(KC.ST, "SIM_REV", KC.ST.SIM_REV + 1)
+    assert KC.cost_fingerprint() != before
+
+
 async def test_seances_recalculees_quand_le_cout_change(kill_db, monkeypatch):
     assert await KC.step(kill_db, 60) == 1
     before = KC.report(kill_db.conn, 148)
