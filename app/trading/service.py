@@ -452,11 +452,16 @@ def score_lines(p: dict) -> list[str]:
                      if parts[k]["score"] is not None)
     lines = [f"{icon} **{sc['decision']} · note {sc['composite']:g}/10** ({sub})"
              + (f" · {' ; '.join(sc['reasons'])}" if sc["reasons"] else "")]
+    note = SC.slope_note(p.get("market", "stock"))
+    if note:
+        lines.append(f"-# {note[0].upper()}{note[1:]} : GO = règle de sélection figée, pas une prédiction")
     for k, label in (("technique", "Technique"), ("catalyst", "Catalyseur"), ("risk", "Risque")):
         lines.append(f"-# {label} : {' ; '.join(parts[k]['reasons'])}")
     if sc.get("lecons"):
         les = sc["lecons"]
-        lines.append(f"-# Leçons du labo ({les['ajustement']:+g} sur la note) : {' ; '.join(les['lignes'])}")
+        with_lessons = sc.get("composite_lecons")
+        lines.append(f"-# Leçons du labo (affichées, sans effet sur le verdict) : {' ; '.join(les['lignes'])}"
+                     + (f" · note avec leçons {with_lessons:g}" if with_lessons is not None else ""))
     cat = p.get("catalyst") or {}
     marks = {"positive": "🟢", "negative": "🔴", "dilution": "🟠", "neutre": "⚪"}
     for n in cat.get("news", [])[:3]:

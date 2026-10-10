@@ -2,11 +2,15 @@
 
 - Une règle validée (validator.py) et approuvée par Simão crée la version suivante : v2 = v1 + ses
   filtres. Elle est d'abord CHALLENGER : le labo compare, sur les trades en direct journalisés depuis sa
-  création, ce que garde le challenger et ce que garde le champion (mêmes plans, filtres différents ;
-  rien n'est journalisé deux fois). Quand le challenger a au moins `challenger_min_trades` trades
-  déclenchés et fait mieux en R net moyen par trade, sans perdre de capture du potentiel +10 (même
-  tolérance que le validateur), il devient champion ; après `challenger_max_trades` sans faire mieux,
-  il est retiré. Seuils dans lab_config (validator.DEFAULTS).
+  création et sur les seuls marchés de ses nouvelles règles, ce que garde le challenger et ce que garde
+  le champion (mêmes plans, filtres différents ; rien n'est journalisé deux fois). R comparé : pour les
+  actions, celui de la mise de Simão (r_20e) ; écart et z en grappes par jour (validator.pooled_z).
+  Jugé seulement à des regards fixes (`challenger_looks_days`, en jours de trades distincts) : écart
+  ≥ challenger_min_gain, z ≥ challenger_min_z (Bonferroni sur 3 regards), aucun marché touché en recul,
+  capture du potentiel +10 tenue, au moins challenger_min_trades trades. Promouvable, il n'est PAS mis
+  en place seul : une proposition « promouvoir vX » attend l'accord de Simão (même circuit que les
+  règles) ; sans réponse, il reste mesuré et le regard suivant remplace la proposition. Pas assez net
+  au dernier regard, il est retiré. Seuils dans lab_config (validator.DEFAULTS).
 - Une règle refusée est rangée dans la mémoire des échecs (« refusée par Simão ») : jamais reproposée.
 - Le champion est écrit dans un petit fichier JSON (lab_champion.json, à côté de la base) que JARVIS
   en direct lit : ses filtres s'y appliquent avec EXACTEMENT le même code SQL que le labo (kept_sql,
@@ -33,6 +37,7 @@ CHAMPION_FILE = "lab_champion.json"
 DECISIONS = ("approuvee", "refusee")
 REFUSED_REASON = "refusée par Simão"
 TYPES_MAX = 500
+MARKET_FR = {"stock": "actions", "crypto": "crypto"}
 
 
 # --- Filtres : le même SQL au labo et en direct ----------------------------------------------
@@ -163,25 +168,74 @@ def next_version(conn) -> str:
     return f"v{max(nums, default=1) + 1}"
 
 
+def new_rules(champ: dict, chall: dict) -> list[dict]:
+    have = {x["empreinte"] for x in champ["regles"]}
+    return [r for r in chall["regles"] if r["empreinte"] not in have]
+
+
+def touched_markets(champ: dict, chall: dict) -> list[str] | None:
+    """Marchés des nouvelles règles du challenger ; None : tous (une nouvelle règle sans `markets`)."""
+    new = new_rules(champ, chall)
+    if not new or any(not r.get("markets") for r in new):
+        return None
+    return sorted({m for r in new for m in r["markets"]})
+
+
+def compared_r(market: str, result: str | None, r_net: float) -> float:
+    """R comparé : pour les actions, celui de la mise de Simão (r_20e, frais IBKR réels) quand le résultat
+    du simulateur le permet ; sinon le R net du labo."""
+    if market != "stock" or not result:
+        return r_net
+    from app.lab import strategies as ST  # import tardif : strategies tire killmode
+
+    try:
+        r = ST.cost_variants("stock", json.loads(result))["r_20e"]
+    except (ValueError, KeyError, TypeError):
+        r = None
+    return r_net if r is None else r
+
+
+def measure_days(day_sums: dict) -> dict:
+    """Écart challenger - champion et son z, en grappes par jour ({jour: [ΣR champion, n, ΣR challenger, n]},
+    l'estimateur du validateur pour des ensembles emboîtés)."""
+    z, delta = V.pooled_z(day_sums)
+    return {"jours": len(day_sums), "z": None if z is None else round(z, 3),
+            "delta_r": None if delta is None else round(delta, 4)}
+
+
 def compare(conn, champ: dict, chall: dict, cfg: dict | None = None) -> dict:
     """Champion contre challenger sur les trades EN DIRECT journalisés depuis la création du challenger
-    (même version de génération, mêmes plans) : trades déclenchés gardés, R net moyen, capture du potentiel +10."""
+    (même version de génération, mêmes plans), sur les seuls marchés de ses nouvelles règles : trades
+    déclenchés gardés, R moyen (actions : à la mise de Simão), écart et z par jour, capture du potentiel +10."""
     cfg = cfg or V.config(conn)
     base = base_of(chall, conn)
     ce, cp = kept_sql(champ["regles"])
     he, hp = kept_sql(chall["regles"])
     since = int(chall.get("debut_ts") or 0)
+    markets = touched_markets(champ, chall)
+    where, wp = (f" AND t.market IN ({', '.join('?' * len(markets))})", markets) if markets else ("", [])
     rows = conn.execute(
-        f"SELECT t.day, t.market, t.symbol, t.triggered, t.r_net, t.tp1_hit, {ce}, {he} FROM trades t "
+        f"SELECT t.day, t.market, t.symbol, t.triggered, t.r_net, t.tp1_hit, t.result, {ce}, {he} FROM trades t "
         "LEFT JOIN regimes r ON r.market = t.market AND r.day = t.day "
-        "WHERE t.method_version = ? AND t.origin = 'live' AND t.planned_at >= ?", (*cp, *hp, base, since)).fetchall()
+        f"WHERE t.method_version = ? AND t.origin = 'live' AND t.planned_at >= ?{where}",
+        (*cp, *hp, base, since, *wp)).fetchall()
     acc = {"champion": [0, 0.0], "challenger": [0, 0.0]}
     first_day = None
     caught: dict[str, set] = {"champion": set(), "challenger": set()}
-    for day, market, symbol, trig, r, tp1, keep_c, keep_h in rows:
+    by_market: dict[str, dict] = {}
+    for day, market, symbol, trig, r, tp1, result, keep_c, keep_h in rows:
         first_day = day if first_day is None or day < first_day else first_day
+        if not keep_c or not trig or r is None:
+            continue
+        r = compared_r(market, result, r)
+        d = by_market.setdefault(market, {}).setdefault(day, [0.0, 0, 0.0, 0])
+        d[0] += r
+        d[1] += 1
+        if keep_h:
+            d[2] += r
+            d[3] += 1
         for name, kept in (("champion", keep_c), ("challenger", keep_h)):
-            if not kept or not trig or r is None:
+            if not kept:
                 continue
             acc[name][0] += 1
             acc[name][1] += r
@@ -191,7 +245,7 @@ def compare(conn, champ: dict, chall: dict, cfg: dict | None = None) -> dict:
     if first_day:
         movers = {tuple(m) for m in conn.execute(
             "SELECT market, day, symbol FROM day_moves WHERE up_pct >= ? AND day >= ?", (STATS.MOVE_PCT, first_day))}
-    out = {"base": base, "depuis_ts": since, "trades_lignes": len(rows)}
+    out = {"base": base, "depuis_ts": since, "trades_lignes": len(rows), "marches": markets}
     for name in ("champion", "challenger"):
         n, total = acc[name]
         out[name] = {"version": (champ if name == "champion" else chall)["version"], "declenches": n,
@@ -201,23 +255,63 @@ def compare(conn, champ: dict, chall: dict, cfg: dict | None = None) -> dict:
     allowed = before * cfg["max_capture_drop"] if before >= 10 else 1
     out["capture_ok"] = before - after <= allowed + 1e-9
     out["baisse_capture_permise"] = allowed
-    ec, eh = out["champion"]["esperance_r"], out["challenger"]["esperance_r"]
-    # Marge minimale : la comparaison est refaite à chaque passage entre 100 et 300 trades, une
-    # simple avance d'un cheveu passerait trop souvent par hasard.
-    out["meilleur"] = ec is not None and eh is not None and eh - ec >= cfg["challenger_min_gain"]
+    day_sums: dict = {}
+    for days in by_market.values():
+        for day, v in days.items():
+            day_sums[day] = [a + b for a, b in zip(day_sums.get(day, [0.0, 0, 0.0, 0]), v)]
+    out.update(measure_days(day_sums))
+    out["par_marche"] = {m: measure_days(days) for m, days in sorted(by_market.items())}
+    out["meilleur"] = out["delta_r"] is not None and out["delta_r"] >= cfg["challenger_min_gain"]
     return out
 
 
-def verdict(cmp: dict, cfg: dict, now: datetime | None = None) -> str:
-    """« promouvoir », « retirer » ou « attendre ». Un challenger qui ne garde presque aucun trade
-    n'atteindrait jamais la limite : il est aussi retiré après `challenger_max_days` jours."""
-    n = cmp["challenger"]["declenches"]
-    if n >= cfg["challenger_min_trades"] and cmp["meilleur"] and cmp["capture_ok"]:
-        return "promouvoir"
-    if n >= cfg["challenger_max_trades"]:
-        return "retirer"
+def looks(cfg: dict) -> list[int]:
+    return sorted(int(k) for k in cfg["challenger_looks_days"])
+
+
+def look_reached(cmp: dict, cfg: dict, done: int = 0) -> int | None:
+    """Regard fixe (en jours de trades) atteint et pas encore fait, le plus avancé si plusieurs ; None
+    entre deux regards."""
+    passed = [k for k in looks(cfg) if done < k <= cmp["jours"]]
+    return passed[-1] if passed else None
+
+
+def next_look(cfg: dict, done: int = 0) -> int | None:
+    return next((k for k in looks(cfg) if k > done), None)
+
+
+def promotion_fails(cmp: dict, cfg: dict) -> list[str]:
+    """Conditions de promotion non tenues (vide : promouvable)."""
+    fails = []
+    n, delta, z = cmp["challenger"]["declenches"], cmp["delta_r"], cmp["z"]
+    if n < cfg["challenger_min_trades"]:
+        fails.append(f"{n} trades gardés (minimum {cfg['challenger_min_trades']})")
+    if delta is None or delta < cfg["challenger_min_gain"]:
+        fails.append(f"écart {fr(delta, 3)} par trade (minimum {fr(cfg['challenger_min_gain'])})")
+    if z is None or z < cfg["challenger_min_z"]:
+        fails.append(f"z = {'n/d' if z is None else f'{z:.2f}'} (seuil {cfg['challenger_min_z']:.2f})".replace(".", ","))
+    for m, x in cmp["par_marche"].items():
+        if x["delta_r"] is not None and x["delta_r"] < 0:
+            fails.append(f"{MARKET_FR.get(m, m)} : {fr(x['delta_r'], 3)} par trade")
+    if not cmp["capture_ok"]:
+        fails.append(f"capture du potentiel +10 en baisse ({cmp['champion']['capture']} → "
+                     f"{cmp['challenger']['capture']})")
+    return fails
+
+
+def verdict(cmp: dict, cfg: dict, now: datetime | None = None, done: int = 0, pending: bool = False) -> str:
+    """« promouvoir » (proposé à Simão), « retirer » ou « attendre ». Jugé seulement aux regards fixes
+    `challenger_looks_days` (jours de trades distincts ; `done` : dernier regard fait) : promouvable si
+    écart ≥ challenger_min_gain, z ≥ challenger_min_z, aucun marché touché en recul, capture tenue et
+    au moins challenger_min_trades trades ; sinon retrait au dernier regard. Entre deux regards :
+    « attendre ». Filet : retrait après `challenger_max_days` jours, sauf promotion en attente de Simão."""
+    look = look_reached(cmp, cfg, done)
+    if look is not None:
+        if not promotion_fails(cmp, cfg):
+            return "promouvoir"
+        return "retirer" if look >= looks(cfg)[-1] else "attendre"
     since = cmp.get("depuis_ts") or 0
-    if now is not None and since and now.timestamp() - since >= cfg["challenger_max_days"] * 86400:
+    if not pending and now is not None and since and now.timestamp() - since >= cfg["challenger_max_days"] * 86400:
         return "retirer"
     return "attendre"
 
@@ -315,6 +409,16 @@ def enqueue_decision(db_file: str, rule_hash: str, decision: str, proposal_id: i
     return target
 
 
+def enqueue_promotion(db_file: str, promo_id: str, approve: bool, proposal_id: int | None = None) -> Path:
+    """Serveur web : décision de Simão sur la promotion du challenger proposée à un regard (« v2-20 »)."""
+    if not re.fullmatch(r"v\d+-\d+", promo_id or ""):
+        raise ValueError("promotion illisible")
+    target = queue_root(db_file) / "decisions" / f"promotion-{promo_id}.json"
+    _write_atomic(target, {"promotion": promo_id, "decision": "approuvee" if approve else "refusee",
+                           "proposition": proposal_id, "le": now_iso()})
+    return target
+
+
 def enqueue_types(db_file: str, items: list[dict]) -> Path:
     """Serveur web : dépose des types de catalyseurs à enregistrer (lus par le worker)."""
     target = queue_root(db_file) / "types" / f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}.json"
@@ -322,8 +426,9 @@ def enqueue_types(db_file: str, items: list[dict]) -> Path:
     return target
 
 
-def ingest_decisions(db: LabDB) -> int:
-    """Approbations et refus déposés par le serveur web. Refus : mémoire des échecs (jamais reproposée)."""
+def ingest_decisions(db: LabDB, now: datetime | None = None) -> int:
+    """Approbations et refus déposés par le serveur web. Refus : mémoire des échecs (jamais reproposée).
+    Décisions sur une promotion du challenger : decide_promotion."""
     q = queue_root(db.path) / "decisions"
     if not q.exists():
         return 0
@@ -331,8 +436,10 @@ def ingest_decisions(db: LabDB) -> int:
     for f in sorted(q.glob("*.json")):
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
-            rule = V.get_rule(db.conn, data["empreinte"])
-            if rule is None:
+            rule = None if "promotion" in data else V.get_rule(db.conn, data["empreinte"])
+            if "promotion" in data:
+                n += decide_promotion(db, data, now)
+            elif rule is None:
                 log.warning("Labo : décision sur une règle inconnue (%s), ignorée", f.name)
             elif rule.get("decision"):
                 log.info("Labo : règle %s déjà décidée (%s)", rule["empreinte"][:10], rule["decision"])
@@ -450,8 +557,83 @@ def _names(rules: list[dict]) -> str:
     return ", ".join(f"« {r['nom']} »" for r in rules) or "aucun filtre"
 
 
+def _progress(conn, key: str):
+    """Valeur du job « methode » de la table progress (lecture seule possible) ; None si absente."""
+    try:
+        row = conn.execute("SELECT value FROM progress WHERE job = 'methode' AND key = ?", (key,)).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return json.loads(row[0]) if row else None
+
+
+def pending_promotion(conn, version: str | None = None) -> dict | None:
+    """Promotion proposée à Simão, en attente de sa réponse (une à la fois : celle du dernier regard)."""
+    p = _progress(conn, "promotion")
+    return p if p and (version is None or p.get("version") == version) else None
+
+
+def num_fr(x: float | None) -> str:
+    return "n/d" if x is None else f"{x:.2f}".replace(".", ",")
+
+
+def _where(cmp: dict) -> str:
+    return f" ({', '.join(MARKET_FR.get(m, m) for m in cmp['marches'])})" if cmp.get("marches") else ""
+
+
+def absolute_fr(h: dict) -> str:
+    """L'espérance absolue des trades gardés compte aussi : un filtre peut seulement perdre moins."""
+    e = h.get("esperance_r")
+    return " Filtre moins perdant, méthode toujours perdante." if e is not None and e <= 0 else ""
+
+
+def promotion_text(cmp: dict, cfg: dict, champ: dict, chall: dict, look: int) -> str:
+    c, h, n_looks = cmp["champion"], cmp["challenger"], looks(cfg)
+    return (f"{chall['version']} = {champ['version']} + {_names(new_rules(champ, chall))}. En direct sur {cmp['jours']} "
+            f"jours de trades{_where(cmp)} : {fr(cmp['delta_r'], 3)} par trade de mieux que {champ['version']} "
+            f"(z = {num_fr(cmp['z'])}, seuil {num_fr(cfg['challenger_min_z'])}) ; {fr(h['esperance_r'], 3)} par trade sur "
+            f"{h['declenches']} trades gardés, contre {fr(c['esperance_r'], 3)} sur {c['declenches']} ; potentiel +10 "
+            f"capturé {h['capture']} fois (contre {c['capture']}).{absolute_fr(h)} "
+            f"Regard {n_looks.index(look) + 1} sur {len(n_looks)}.")
+
+
+def _promote(db: LabDB, champ: dict, chall: dict, cmp: dict, now: datetime) -> str:
+    new, (c, h) = new_rules(champ, chall), (cmp["champion"], cmp["challenger"])
+    stamp = now.isoformat(timespec="seconds")
+    db.conn.execute("UPDATE method_versions SET role = 'ancienne', decided_at = ? WHERE version = ?",
+                    (stamp, champ["version"]))
+    db.conn.execute("UPDATE method_versions SET role = 'champion', decided_at = ?, note = ? WHERE version = ?",
+                    (stamp, json.dumps(cmp, ensure_ascii=False), chall["version"]))
+    for r in new:
+        db.conn.execute("UPDATE rules SET decision = 'adoptee' WHERE hash = ?", (r["empreinte"],))
+    db.set("methode", "promotion", None)
+    text = (f"🧪 Méthode {chall['version']} en place : {_names(new)} s'applique désormais aux plans de JARVIS "
+            f"(promotion approuvée par Simão). En direct sur {cmp['jours']} jours de trades{_where(cmp)} : "
+            f"{fr(h['esperance_r'], 3)} par trade sur {h['declenches']} trades, contre {fr(c['esperance_r'], 3)} sur "
+            f"{c['declenches']} pour {champ['version']} ; potentiel +10 capturé {h['capture']} fois "
+            f"(contre {c['capture']}).{absolute_fr(h)}")
+    event(db, "bascule", chall["version"], text, cmp, now)
+    return text
+
+
+def _retire(db: LabDB, champ: dict, chall: dict, cmp: dict, now: datetime, why: str) -> str:
+    new, (c, h) = new_rules(champ, chall), (cmp["champion"], cmp["challenger"])
+    db.conn.execute("UPDATE method_versions SET role = 'retiree', decided_at = ?, note = ? WHERE version = ?",
+                    (now.isoformat(timespec="seconds"), json.dumps(cmp, ensure_ascii=False), chall["version"]))
+    for r in new:
+        db.conn.execute("UPDATE rules SET decision = 'retiree' WHERE hash = ?", (r["empreinte"],))
+    db.set("methode", "promotion", None)
+    text = (f"🧪 Méthode {chall['version']} retirée : {why} ({fr(h['esperance_r'], 3)} par trade contre "
+            f"{fr(c['esperance_r'], 3)} pour {champ['version']}, {cmp['jours']} jours de trades en direct). "
+            f"{champ['version']} reste en place ; {_names(new)} rejoint les idées écartées.")
+    event(db, "retrait", chall["version"], text, cmp, now)
+    return text
+
+
 def judge_challenger(db: LabDB, now: datetime | None = None, cfg: dict | None = None) -> str | None:
-    """Bascule automatique ou retrait du challenger ; renvoie le verdict appliqué (ou None)."""
+    """Regards fixes sur le challenger. « promouvoir » ne bascule rien : la promotion attend l'accord de
+    Simão (proposition « promouvoir vX », decide_promotion) et le challenger reste mesuré ; le regard
+    suivant la remplace. « retirer » le retire. Renvoie le verdict d'un regard ou d'un retrait, None
+    entre deux regards."""
     now = now or datetime.now(timezone.utc)
     cfg = cfg or V.config(db.conn)
     chall = challenger(db.conn)
@@ -459,36 +641,51 @@ def judge_challenger(db: LabDB, now: datetime | None = None, cfg: dict | None = 
         return None
     champ = champion(db.conn)
     cmp = compare(db.conn, champ, chall, cfg)
-    v = verdict(cmp, cfg, now)
-    if v == "attendre":
+    key = f"regard:{chall['version']}"
+    done = db.get("methode", key, 0)
+    pending = pending_promotion(db.conn, chall["version"])
+    look = look_reached(cmp, cfg, done)
+    v = verdict(cmp, cfg, now, done, pending is not None)
+    if look is None and v == "attendre":
         return None
-    new = [r for r in chall["regles"] if r["empreinte"] not in {x["empreinte"] for x in champ["regles"]}]
-    c, h = cmp["champion"], cmp["challenger"]
-    stamp = now.isoformat(timespec="seconds")
     with db.transaction():
+        if look is not None:
+            db.set("methode", key, look)
         if v == "promouvoir":
-            db.conn.execute("UPDATE method_versions SET role = 'ancienne', decided_at = ? WHERE version = ?",
-                            (stamp, champ["version"]))
-            db.conn.execute("UPDATE method_versions SET role = 'champion', decided_at = ?, note = ? WHERE version = ?",
-                            (stamp, json.dumps(cmp, ensure_ascii=False), chall["version"]))
-            for r in new:
-                db.conn.execute("UPDATE rules SET decision = 'adoptee' WHERE hash = ?", (r["empreinte"],))
-            text = (f"🧪 Méthode {chall['version']} en place : {_names(new)} s'applique désormais aux plans de JARVIS. "
-                    f"En direct depuis sa création : {fr(h['esperance_r'], 3)} par trade sur {h['declenches']} trades, "
-                    f"contre {fr(c['esperance_r'], 3)} sur {c['declenches']} pour {champ['version']} ; "
-                    f"potentiel +10 capturé {h['capture']} fois (contre {c['capture']}).")
-        else:
-            db.conn.execute("UPDATE method_versions SET role = 'retiree', decided_at = ?, note = ? WHERE version = ?",
-                            (stamp, json.dumps(cmp, ensure_ascii=False), chall["version"]))
-            for r in new:
-                db.conn.execute("UPDATE rules SET decision = 'retiree' WHERE hash = ?", (r["empreinte"],))
-            why = "sans faire mieux" if not cmp["meilleur"] else "en perdant de la capture du potentiel +10"
-            text = (f"🧪 Méthode {chall['version']} retirée : après {h['declenches']} trades en direct {why} "
-                    f"({fr(h['esperance_r'], 3)} par trade contre {fr(c['esperance_r'], 3)} pour {champ['version']}). "
-                    f"{champ['version']} reste en place ; {_names(new)} rejoint les idées écartées.")
-        event(db, "bascule" if v == "promouvoir" else "retrait", chall["version"], text, cmp, now)
-    log.info("Labo : %s", text)
+            promo = {"id": f"{chall['version']}-{look}", "version": chall["version"], "champion": champ["version"],
+                     "regard": look, "le": now.isoformat(timespec="seconds"),
+                     "texte": promotion_text(cmp, cfg, champ, chall, look)}
+            db.set("methode", "promotion", promo)
+            log.info("Labo : promotion de %s proposée à Simão : %s", chall["version"], promo["texte"])
+        elif v == "retirer":
+            why = (f"pas assez net au dernier regard ({look} jours de trades) : " + " ; ".join(promotion_fails(cmp, cfg))
+                   if look is not None else f"{cfg['challenger_max_days']} jours sans atteindre le dernier regard")
+            log.info("Labo : %s", _retire(db, champ, chall, cmp, now, why))
+        elif pending:
+            db.set("methode", "promotion", None)  # le regard suivant n'est plus assez net : proposition retirée
     return v
+
+
+def decide_promotion(db: LabDB, data: dict, now: datetime | None = None) -> int:
+    """Réponse de Simão à la promotion proposée : appliquée seulement si c'est toujours la promotion en
+    attente (un regard suivant l'a peut-être remplacée). Approuvée : le challenger devient champion ;
+    refusée : il est retiré."""
+    now = now or datetime.now(timezone.utc)
+    if data.get("decision") not in DECISIONS:
+        raise ValueError(f"décision {data.get('decision')} illisible")
+    pending, chall = pending_promotion(db.conn), challenger(db.conn)
+    if not pending or pending["id"] != data["promotion"] or not chall or chall["version"] != pending["version"]:
+        log.info("Labo : décision sur la promotion %s dépassée, ignorée", data["promotion"])
+        return 0
+    champ = champion(db.conn)
+    cmp = compare(db.conn, champ, chall)
+    with db.transaction():
+        if data["decision"] == "approuvee":
+            text = _promote(db, champ, chall, cmp, now)
+        else:
+            text = _retire(db, champ, chall, cmp, now, "promotion refusée par Simão")
+    log.info("Labo : %s", text)
+    return 1
 
 
 def champion_path(db_file: str | None = None) -> Path:
@@ -500,7 +697,22 @@ def champion_payload(conn) -> dict:
     champ = champion(conn)
     chall = challenger(conn)
     return {"version": champ["version"], "base": base_of(champ, conn), "regles": champ["regles"],
-            "challenger": chall["version"] if chall else None}
+            "challenger": chall["version"] if chall else None,
+            "promotion": pending_promotion(conn, chall["version"]) if chall else None}
+
+
+def sync_proposals(proposals, data: dict | None = None) -> list[dict]:
+    """Serveur : la promotion en attente (lab_champion.json) devient une proposition « promouvoir vX » ;
+    celle d'un regard dépassé est remplacée. Renvoie les nouvelles propositions (à envoyer en privé)."""
+    if data is None:
+        try:
+            data = json.loads(champion_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+    promo = data.get("promotion")
+    p = promo and proposals.propose_promotion(promo)
+    proposals.retire_promotion({promo["id"]} if promo else set())
+    return [p] if p else []
 
 
 def write_champion(db: LabDB) -> bool:
@@ -524,7 +736,7 @@ def step(db: LabDB, now: datetime | None = None) -> dict:
     est isolée : une erreur n'empêche pas les suivantes."""
     now = now or datetime.now(timezone.utc)
     report: dict = {}
-    for name, fn in (("decisions", lambda: ingest_decisions(db)), ("types", lambda: ingest_types(db)),
+    for name, fn in (("decisions", lambda: ingest_decisions(db, now)), ("types", lambda: ingest_types(db)),
                      ("challenger", lambda: (c := ensure_challenger(db, now)) and c["version"]),
                      ("bascule", lambda: judge_challenger(db, now)), ("fichier", lambda: write_champion(db))):
         try:
@@ -545,10 +757,13 @@ def state(conn, cfg: dict | None = None) -> dict:
     if chall:
         cfg = cfg or V.config(conn)
         cmp = compare(conn, champ, chall, cfg)
+        done = _progress(conn, f"regard:{chall['version']}") or 0
         out["challenger"] = {"version": chall["version"], "depuis": chall["creee_le"],
                              "regles": [{"nom": r["nom"], "regle": rule_fr(r)} for r in chall["regles"]],
                              "comparaison": cmp, "objectif": cfg["challenger_min_trades"],
-                             "limite": cfg["challenger_max_trades"]}
+                             "limite": cfg["challenger_max_trades"], "regards": looks(cfg), "regard_fait": done,
+                             "prochain_regard": next_look(cfg, done), "seuil_z": cfg["challenger_min_z"],
+                             "promotion": pending_promotion(conn, chall["version"])}
     return out
 
 
@@ -558,8 +773,12 @@ def state_line(st: dict) -> str:
     ch = st.get("challenger")
     if ch:
         cmp = ch["comparaison"]
-        line += (f" · challenger {ch['version']} : {cmp['challenger']['declenches']}/{ch['objectif']} trades en direct, "
-                 f"{fr(cmp['challenger']['esperance_r'], 3)} contre {fr(cmp['champion']['esperance_r'], 3)}")
+        nxt = ch.get("prochain_regard")
+        line += (f" · challenger {ch['version']} : {cmp['jours']} jours de trades en direct"
+                 + (f" (prochain regard à {nxt})" if nxt else "")
+                 + f", {fr(cmp['challenger']['esperance_r'], 3)} contre {fr(cmp['champion']['esperance_r'], 3)}, "
+                 f"z {num_fr(cmp['z'])} (seuil {num_fr(ch['seuil_z'])})"
+                 + (" · promotion proposée à Simão" if ch.get("promotion") else ""))
     else:
         line += " · pas de challenger"
     return line

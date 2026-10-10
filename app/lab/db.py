@@ -182,7 +182,7 @@ STRAT_MIGRATIONS = (("r_emperor", "REAL"), ("r_emperor_alerte", "REAL"), ("r_emp
                     ("confirmation", "TEXT"), ("r_3c", "REAL"), ("r_20e", "REAL"))
 MIGRATIONS = {
     "rules": (("pourquoi", "TEXT"), ("council", "TEXT"), ("soiree", "TEXT"), ("decision", "TEXT"),
-              ("decided_at", "TEXT")),
+              ("decided_at", "TEXT"), ("seen_until", "TEXT")),
     "lessons": (("base_trade_id", "INTEGER"), ("seen_until", "TEXT")),
     "method_versions": (("base", "TEXT"), ("rules", "TEXT"), ("role", "TEXT"), ("started_ts", "INTEGER"),
                         ("decided_at", "TEXT"), ("note", "TEXT")),

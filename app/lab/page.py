@@ -130,13 +130,19 @@ def render(st: dict, proposals: list[dict], rules: list[dict], morning: dict | N
     ch = meth.get("challenger")
     if ch:
         cmp = ch["comparaison"]
-        n = cmp["challenger"]["declenches"]
+        n, last = cmp["jours"], ch["regards"][-1]
+        nxt = f'prochain regard à {ch["prochain_regard"]} jours' if ch.get("prochain_regard") else "regards faits"
         rows = "".join(f'<li>{_e(r["nom"])} : <span class="muted">{_e(r["regle"])}</span></li>' for r in ch["regles"])
         block += (f'<div><b>Challenger : {_e(ch["version"])}</b> <span class="small muted">depuis {_e(ch["depuis"])}</span>'
-                  f'<div class="bar"><span style="width:{min(100, 100 * n / max(1, ch["objectif"]))}%"></span></div>'
-                  f'<div class="small">{n}/{ch["objectif"]} trades en direct · {_r(cmp["challenger"]["esperance_r"])} '
-                  f'contre {_r(cmp["champion"]["esperance_r"])} pour {_e(champ.get("version"))} · potentiel +10 '
-                  f'{cmp["challenger"]["capture"]} contre {cmp["champion"]["capture"]}</div><ul class="small">{rows}</ul></div>')
+                  f'<div class="bar"><span style="width:{min(100, 100 * n / max(1, last))}%"></span></div>'
+                  f'<div class="small">{n} jours de trades en direct ({nxt}) · écart {_r(cmp["delta_r"])} par trade, '
+                  f'z {_e(M.num_fr(cmp["z"]))} (seuil {_e(M.num_fr(ch["seuil_z"]))}) · {_r(cmp["challenger"]["esperance_r"])} '
+                  f'sur {cmp["challenger"]["declenches"]} trades contre {_r(cmp["champion"]["esperance_r"])} pour '
+                  f'{_e(champ.get("version"))} · potentiel +10 {cmp["challenger"]["capture"]} contre '
+                  f'{cmp["champion"]["capture"]}</div>'
+                  + ('<div class="small"><b>Promotion proposée à Simão</b>, en attente de sa réponse</div>'
+                     if ch.get("promotion") else "")
+                  + f'<ul class="small">{rows}</ul></div>')
     else:
         block += '<div class="small muted">Pas de challenger en essai.</div>'
     parts.append(f'<div class="card"><h2>Méthode</h2><div class="grid">{block}</div></div>')

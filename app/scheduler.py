@@ -15,6 +15,7 @@ from app import alerts, config
 from app.config import env_float
 from app.core.outbox import Outbox
 from app.lab import grade as lab_grade
+from app.lab import method as lab_method
 from app.lab import morning as lab_morning
 from app.notify import bot, discord
 from app.sources import alpaca, twelvedata
@@ -440,6 +441,13 @@ async def tick_lab(now: datetime | None = None) -> dict | None:
             bot.offer(p)
         elif enabled():
             outbox.add(f"🏅 {PR.text(p)}\n-# À approuver ou refuser dans le cockpit.", "labo", key=f"grade:{p['id']}")
+            _kick_outbox()
+    # Méthode : le challenger fait nettement mieux à un regard fixe ; il n'est mis en place qu'avec l'accord de Simão.
+    for p in lab_method.sync_proposals(proposals):
+        if bot.enabled():
+            bot.offer(p)
+        elif enabled():
+            outbox.add(f"🧪 {PR.text(p)}\n-# À approuver ou refuser dans le cockpit.", "labo", key=f"promotion:{p['id']}")
             _kick_outbox()
     return digest
 

@@ -7,11 +7,21 @@ Trois sous-notes, chacune avec ses raisons en une ligne :
   récents ou imminents, augmentation de capital ;
 - risque (30 %) : distance du stop en ATR, mur proche (TP1 trop près), espérance rejouée sur
   l'historique.
-Sans catalyseur évaluable (crypto, Finnhub muet), la note se calcule sur les deux autres.
+Sans catalyseur (crypto, et le labo qui note ses actions avec cat=None), la note se calcule sur les deux
+autres. Action dont Finnhub n'a pas répondu (hors scanner : !plan, !avis, API) : catalyseur neutre 5,0 avec
+son poids (« catalyseur non vérifié »), pour qu'une panne ne monte pas la note.
 
-Veto : résultats trimestriels imminents, R/R trop bas. Le R/R n'est pas suivi à la lettre :
-un R/R jusqu'à `rr_tolerance` sous le minimum passe si la note dépasse go_min + 0,5.
+Veto : résultats trimestriels imminents ou date des résultats non vérifiée (calendrier Finnhub muet), R/R
+trop bas. Le R/R n'est pas suivi à la lettre : un R/R jusqu'à `rr_tolerance` sous le minimum passe si la note
+dépasse go_min + 0,5.
+
+Le GO n'est pas une prédiction : le labo ne trouve pas la note prédictive (pente nulle ou négative en R par
+point, stats.calibration). C'est une règle de sélection figée, la population que mesure la déclaration n° 7
+(confirmation des GO) ; la changer changerait ce qui est mesuré. Les leçons confirmées du labo s'affichent à
+côté (« note avec leçons ») sans toucher au verdict, à la note ni au tri.
 """
+import time
+
 from app.trading import indicators as I
 
 CORE = ("trend_daily", "ema200_4h", "stoch_rsi", "vwap", "pivot", "volume")
@@ -119,15 +129,17 @@ def risk(plan: dict, daily: list[dict] | None, s) -> tuple[float, list[str]]:
 
 def evaluate(plan: dict, daily: list[dict] | None, cat: dict | None, s, lessons: dict | None = None) -> dict:
     """Note composite, sous-notes et verdict GO / NO GO avec ses raisons. `lessons` : ajustement des
-    leçons confirmées du labo (app/lab/lessons.adjustment), en direct seulement, appliqué avant le verdict."""
+    leçons confirmées du labo (app/lab/lessons.adjustment), en direct seulement : affiché à part
+    (`composite_lecons`), sans effet sur la note, les vetos ni le verdict."""
     tech, tech_r = technique(plan, daily, s)
     cata, cata_r = catalyst(cat, plan["side"], s) if plan["market"] == "stock" else (None, ["non évalué pour la crypto"])
+    if plan["market"] == "stock" and cat is not None and cata is None:  # Finnhub muet : neutre, pas de renormalisation
+        cata, cata_r = 5.0, ["catalyseur non vérifié" + (f" ({'; '.join(cat['errors'])})" if cat.get("errors") else "")]
     rsk, rsk_r = risk(plan, daily, s)
     w = s["weights"]
     parts = [(tech, w["technique"]), (rsk, w["risk"])] + ([(cata, w["catalyst"])] if cata is not None else [])
     composite = round(sum(v * k for v, k in parts) / sum(k for _, k in parts), 1)
-    if lessons:
-        composite = _clamp(composite + lessons["ajustement"])
+    adjusted = _clamp(composite + lessons["ajustement"]) if lessons else None
     vetoes, notes = [], []
     rr = plan_rr(plan)
     if rr < s["rr_min"]:
@@ -138,6 +150,9 @@ def evaluate(plan: dict, daily: list[dict] | None, cat: dict | None, s, lessons:
     hours = (cat or {}).get("hours_to_earnings")
     if plan["market"] == "stock" and hours is not None and s["earnings_veto_hours"] and hours <= s["earnings_veto_hours"]:
         vetoes.append(f"résultats trimestriels dans {hours:.0f} h")
+    # cat=None (le labo : generator, live) : rien à vérifier ; un catalyseur lu sans calendrier, si.
+    if plan["market"] == "stock" and cat is not None and s["earnings_veto_hours"] and not cat.get("earnings_known", True):
+        vetoes.append("date des résultats non vérifiée (Finnhub sans réponse)")
     if composite < s["go_min"]:
         vetoes.append(f"note {composite:g} sous {s['go_min']:g}")
     out = {
@@ -151,4 +166,48 @@ def evaluate(plan: dict, daily: list[dict] | None, cat: dict | None, s, lessons:
     }
     if lessons:
         out["lecons"] = lessons
+        out["composite_lecons"] = adjusted
     return out
+
+
+# --- Note non prédictive : la pente mesurée au labo, à côté de chaque GO affiché -------------------
+
+SLOPE_TTL = 600.0
+_slopes: dict = {"key": None, "at": 0.0, "data": {}}
+
+
+def lab_slopes() -> dict:
+    """Pente de la note en R par point, par marché, lue dans le cache des statistiques du labo
+    (stats.calibration, écrit par le worker) ; relue au plus toutes les SLOPE_TTL s. {} sans labo."""
+    from app.lab import db as lab_db  # import tardif : le labo importe ce module
+
+    key, now = lab_db.db_path(), time.monotonic()
+    if _slopes["key"] == key and now - _slopes["at"] < SLOPE_TTL:
+        return _slopes["data"]
+    data = {}
+    try:
+        conn = lab_db.open_readonly(key)
+        if conn is not None:
+            try:
+                row = conn.execute(
+                    "SELECT json_extract(data, '$.marches.stock.calibration_note.pente_r_par_point'), "
+                    "json_extract(data, '$.marches.crypto.calibration_note.pente_r_par_point') "
+                    "FROM stats_cache WHERE key = 'courant'").fetchone()
+            finally:
+                conn.close()
+            if row:
+                data = {m: v for m, v in zip(("stock", "crypto"), row) if v is not None}
+    except Exception:  # base ancienne ou illisible : rien à dire
+        data = {}
+    _slopes.update(key=key, at=now, data=data)
+    return data
+
+
+def slope_note(market: str) -> str | None:
+    """« note non prédictive au labo (pente −0,020 R/pt, actions) » quand la pente mesurée est ≤ 0 ;
+    None si elle est positive ou pas encore mesurée."""
+    slope = lab_slopes().get(market)
+    if slope is None or slope > 0:
+        return None
+    value = f"{slope:+.3f}".replace(".", ",").replace("-", "−")
+    return f"note non prédictive au labo (pente {value} R/pt, {'actions' if market == 'stock' else 'crypto'})"

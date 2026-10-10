@@ -1,5 +1,6 @@
 """Labo 3 : filtres partagés labo / direct, décisions, challenger, bascule et retrait (hors ligne)."""
 import json
+import random
 import sqlite3
 from datetime import date, datetime, timezone
 
@@ -9,6 +10,8 @@ from app.lab import method as M
 from app.lab import summary as SUM
 from app.lab import validator as V
 from app.lab.db import LabDB, generation_version, open_readonly
+from app.trading import proposals as PR
+from app.trading.settings import Settings
 from tests.lab_fixtures import insert_validated, synthetic_trades, validated_metrics
 
 NOW = datetime(2026, 10, 7, 6, 5, tzinfo=timezone.utc)
@@ -198,9 +201,9 @@ def test_types_de_catalyseurs_par_la_file(db):
 
 # --- Challenger en direct : bascule, retrait --------------------------------------------------
 
-def challenger_ready(db, live_effect, n_days=8, per_day=30, seed=21):
+def challenger_ready(db, live_effect, n_days=20, per_day=30, seed=21, markets=None):
     synthetic_trades(db, n_days=5, per_day=4, seed=1)  # historique (rejeu)
-    h = insert_validated(db, "signal tendu", SIGNAL)
+    h = insert_validated(db, "signal tendu", SIGNAL, markets=markets)
     M.enqueue_decision(db.path, h, "approuvee")
     M.ingest_decisions(db)
     M.ensure_challenger(db, NOW)
@@ -223,19 +226,33 @@ def test_comparaison_sur_le_direct_seulement(db):
     live_trig = db.conn.execute("SELECT COUNT(*) FROM trades WHERE origin = 'live' AND triggered = 1").fetchone()[0]
     assert cmp["champion"]["declenches"] == live_trig
     assert 0 < cmp["challenger"]["declenches"] < live_trig
-    assert M.verdict(cmp, V.config(db.conn)) == "attendre"  # moins de 100 trades
+    assert cmp["jours"] == 2 and M.verdict(cmp, V.config(db.conn)) == "attendre"  # avant le 1er regard (20 jours)
 
 
-def test_bascule_automatique(db):
+def test_bascule_apres_accord_de_simao(db):
+    """Ex-test_bascule_automatique : au 1er regard (20 jours), la promotion est PROPOSÉE ; rien ne bascule
+    avant l'accord de Simão."""
     h = challenger_ready(db, losers)
     assert M.judge_challenger(db, NOW) == "promouvoir"
-    assert M.champion(db.conn)["version"] == "v2" and M.challenger(db.conn) is None
-    assert V.get_rule(db.conn, h)["decision"] == "adoptee"
-    ev = M.events(db.conn)
-    assert len(ev) == 1 and ev[0]["texte"].startswith("🧪 Méthode v2 en place : « signal tendu »")
+    assert M.champion(db.conn)["version"] == "v1" and M.challenger(db.conn)["version"] == "v2"
+    promo = M.pending_promotion(db.conn)
+    assert promo["id"] == "v2-20" and promo["regard"] == 20
+    assert promo["texte"].startswith("v2 = v1 + « signal tendu ». En direct sur 20 jours de trades : +0,")
+    assert "Regard 1 sur 3." in promo["texte"] and not M.events(db.conn)
+    assert M.judge_challenger(db, NOW) is None  # entre deux regards : rien
     assert M.write_champion(db)
     data = json.loads(M.champion_path(db.path).read_text())
-    assert data["version"] == "v2" and data["regles"][0]["cond"] == SIGNAL
+    assert data["version"] == "v1" and data["regles"] == [] and data["promotion"]["id"] == "v2-20"
+    M.enqueue_promotion(db.path, "v2-20", True, 7)
+    assert M.ingest_decisions(db, NOW) == 1
+    assert M.champion(db.conn)["version"] == "v2" and M.challenger(db.conn) is None
+    assert V.get_rule(db.conn, h)["decision"] == "adoptee" and M.pending_promotion(db.conn) is None
+    ev = M.events(db.conn)
+    assert len(ev) == 1 and ev[0]["texte"].startswith("🧪 Méthode v2 en place : « signal tendu »")
+    assert "(promotion approuvée par Simão)" in ev[0]["texte"]
+    assert M.write_champion(db)
+    data = json.loads(M.champion_path(db.path).read_text())
+    assert data["version"] == "v2" and data["regles"][0]["cond"] == SIGNAL and data["promotion"] is None
     assert not M.write_champion(db)  # inchangé : pas réécrit
     # Une nouvelle idée se teste désormais sur les trades que garde v2.
     rows = V.load_rows(db.conn, V.parse({"exclude": {"field": "context.rvol", "op": ">", "value": 4}}), "v1")
@@ -244,11 +261,16 @@ def test_bascule_automatique(db):
 
 
 def test_retrait_si_pas_mieux(db):
-    h = challenger_ready(db, winners, n_days=15, per_day=40)
-    assert M.judge_challenger(db, NOW) == "retirer"
+    h = challenger_ready(db, winners, per_day=20)
+    assert M.judge_challenger(db, NOW) == "attendre"  # 1er regard pas assez net : on continue de mesurer
+    assert M.challenger(db.conn)["version"] == "v2" and db.get("methode", "regard:v2") == 20
+    assert M.judge_challenger(db, NOW) is None and not M.events(db.conn)
+    synthetic_trades(db, n_days=40, per_day=20, seed=22, origin="live", first=date(2026, 11, 5), effect=winners)
+    assert M.judge_challenger(db, NOW) == "retirer"  # 40 puis 60 jours d'un coup : jugé une fois, au dernier
     assert M.champion(db.conn)["version"] == "v1" and M.challenger(db.conn) is None
     assert V.get_rule(db.conn, h)["decision"] == "retiree"
-    assert "retirée" in M.events(db.conn)[0]["texte"]
+    text = M.events(db.conn)[0]["texte"]
+    assert text.startswith("🧪 Méthode v2 retirée : pas assez net au dernier regard (60 jours de trades) : écart −0,")
     assert M.ensure_challenger(db, NOW) is None  # pas de nouvel essai de la même règle
 
 
@@ -261,7 +283,9 @@ def test_capture_du_potentiel_protegee(db):
         db.conn.execute("INSERT OR IGNORE INTO day_moves (market, day, symbol, up_pct) VALUES (?, ?, ?, 12)", (m, d, s))
     cmp = M.compare(db.conn, M.champion(db.conn), M.challenger(db.conn))
     assert cmp["champion"]["capture"] - cmp["challenger"]["capture"] >= 2 and not cmp["capture_ok"]
-    assert M.judge_challenger(db, NOW) is None
+    assert cmp["z"] > 3 and M.promotion_fails(cmp, V.config(db.conn)) == [
+        f"capture du potentiel +10 en baisse ({cmp['champion']['capture']} → {cmp['challenger']['capture']})"]
+    assert M.judge_challenger(db, NOW) == "attendre" and M.pending_promotion(db.conn) is None
 
 
 def test_challenger_complete_le_meme_matin(db):
@@ -288,6 +312,8 @@ def test_approbation_attend_la_fin_du_challenger(db):
 def test_v3_herite_des_filtres_du_champion(db):
     challenger_ready(db, losers)
     M.judge_challenger(db, NOW)
+    M.enqueue_promotion(db.path, "v2-20", True)
+    M.ingest_decisions(db, NOW)
     b = insert_validated(db, "b", {"field": "context.rvol", "op": ">", "value": 4})
     M.enqueue_decision(db.path, b, "approuvee")
     M.ingest_decisions(db)
@@ -306,8 +332,10 @@ def test_etat_lisible_pour_labo_et_cockpit(db):
     challenger_ready(db, losers, n_days=2, per_day=10)
     st = M.state(db.conn)
     assert st["champion"]["version"] == "v1" and st["challenger"]["version"] == "v2"
+    assert st["challenger"]["prochain_regard"] == 20 and st["challenger"]["promotion"] is None
     line = M.state_line(st)
-    assert "challenger v2" in line and "/100 trades en direct" in line
+    assert "challenger v2 : 2 jours de trades en direct (prochain regard à 20), " in line
+    assert line.endswith("(seuil 2,13)") and "trades en direct" in line
 
 
 def test_resume_du_soir_garde_le_nom_de_la_version_de_generation(db):
@@ -335,13 +363,175 @@ def test_passage_du_worker_inclut_la_methode(db):
     assert json.loads(M.champion_path(db.path).read_text())["challenger"] == "v2"
 
 
+def cmp_at(jours, delta=0.05, z=3.0, n=400, capture_ok=True, par_marche=None):
+    return {"depuis_ts": int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()), "jours": jours, "delta_r": delta,
+            "z": z, "capture_ok": capture_ok, "champion": {"declenches": 500, "esperance_r": 0.10, "capture": 3},
+            "challenger": {"declenches": n, "esperance_r": 0.10 + delta, "capture": 3},
+            "par_marche": par_marche or {"stock": {"jours": jours, "delta_r": delta, "z": z}}}
+
+
 def test_bascule_exige_une_marge_et_retrait_apres_delai():
-    from datetime import datetime, timezone
     cfg = dict(V.DEFAULTS)
-    base = {"depuis_ts": int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()), "capture_ok": True,
-            "champion": {"declenches": 150, "esperance_r": 0.10}}
-    juste = base | {"challenger": {"declenches": 150, "esperance_r": 0.105}, "meilleur": False}
-    assert M.verdict(juste, cfg, datetime(2026, 1, 20, tzinfo=timezone.utc)) == "attendre"
-    lent = base | {"challenger": {"declenches": 12, "esperance_r": 0.3}, "meilleur": True}
-    assert M.verdict(lent, cfg, datetime(2026, 2, 1, tzinfo=timezone.utc)) == "attendre"
-    assert M.verdict(lent, cfg, datetime(2026, 4, 2, tzinfo=timezone.utc)) == "retirer"
+    assert round(cfg["challenger_min_z"], 2) == 2.13 and cfg["challenger_max_days"] >= 100
+    t = datetime(2026, 1, 30, tzinfo=timezone.utc)
+    assert M.verdict(cmp_at(20), cfg, t) == "promouvoir"
+    assert M.verdict(cmp_at(20, delta=0.01), cfg, t) == "attendre"              # marge sous +0,02
+    assert M.verdict(cmp_at(20, delta=0.04, z=2.0), cfg, t) == "attendre"       # marge tenue, z sous 2,13
+    assert M.verdict(cmp_at(20, n=80), cfg, t) == "attendre"                    # moins de 100 trades gardés
+    assert M.verdict(cmp_at(20, capture_ok=False), cfg, t) == "attendre"
+    assert M.verdict(cmp_at(25), cfg, t, done=20) == "attendre"                 # entre deux regards
+    assert M.verdict(cmp_at(41), cfg, t, done=20) == "promouvoir"               # 2e regard
+    assert M.verdict(cmp_at(60, z=2.0), cfg, t, done=40) == "retirer"           # dernier regard pas assez net
+    assert M.verdict(cmp_at(300, n=5000, z=2.0), cfg, t, done=60) == "attendre"  # regards faits : plus jugé
+    lent = cmp_at(12)
+    assert M.verdict(lent, cfg, datetime(2026, 3, 1, tzinfo=timezone.utc)) == "attendre"
+    assert M.verdict(lent, cfg, datetime(2026, 4, 12, tzinfo=timezone.utc)) == "retirer"  # filet : 100 jours
+    assert M.verdict(lent, cfg, datetime(2026, 4, 12, tzinfo=timezone.utc), pending=True) == "attendre"
+
+
+def test_moins_de_20_jours_attendre_meme_avec_300_trades(db):
+    challenger_ready(db, losers, n_days=8, per_day=60)
+    cmp = M.compare(db.conn, M.champion(db.conn), M.challenger(db.conn))
+    assert cmp["challenger"]["declenches"] >= 300 and cmp["jours"] == 8 and cmp["z"] > 3
+    assert M.verdict(cmp, V.config(db.conn), NOW) == "attendre"
+    assert M.judge_challenger(db, NOW) is None and M.challenger(db.conn)["version"] == "v2"
+
+
+def test_marche_touche_en_recul_bloque_la_promotion(db):
+    challenger_ready(db, losers, per_day=40)
+    synthetic_trades(db, n_days=20, per_day=10, seed=23, market="crypto", origin="live", first=date(2026, 10, 8),
+                     effect=winners)
+    cmp = M.compare(db.conn, M.champion(db.conn), M.challenger(db.conn))
+    assert cmp["marches"] is None and set(cmp["par_marche"]) == {"stock", "crypto"}
+    assert cmp["delta_r"] >= 0.02 and cmp["z"] >= 2.13 and cmp["par_marche"]["crypto"]["delta_r"] < 0
+    fails = M.promotion_fails(cmp, V.config(db.conn))
+    assert len(fails) == 1 and fails[0].startswith("crypto : −0,")
+    assert M.judge_challenger(db, NOW) == "attendre"
+
+
+def test_regle_actions_mesuree_sur_les_actions_seulement(db):
+    challenger_ready(db, losers, markets=["stock"])
+    synthetic_trades(db, n_days=20, per_day=30, seed=24, market="crypto", origin="live", first=date(2026, 10, 8),
+                     effect=winners)
+    cmp = M.compare(db.conn, M.champion(db.conn), M.challenger(db.conn))
+    stock = db.conn.execute("SELECT COUNT(*), SUM(r_net) FROM trades WHERE origin = 'live' AND triggered = 1 "
+                            "AND market = 'stock'").fetchone()
+    kept = db.conn.execute("SELECT COUNT(*), SUM(r_net) FROM trades WHERE origin = 'live' AND triggered = 1 "
+                           "AND market = 'stock' AND json_extract(context, '$.signal') <= 0.8").fetchone()
+    assert cmp["marches"] == ["stock"] and list(cmp["par_marche"]) == ["stock"] and cmp["jours"] == 20
+    assert cmp["champion"]["declenches"] == stock[0] and cmp["challenger"]["declenches"] == kept[0]
+    assert cmp["delta_r"] == pytest.approx(kept[1] / kept[0] - stock[1] / stock[0], abs=1e-4)
+    assert cmp["delta_r"] == cmp["par_marche"]["stock"]["delta_r"]
+
+
+def test_actions_comparees_a_la_mise_de_simao(db):
+    from app.lab import strategies as ST
+
+    res = {"triggered": True, "fill_price": 100.0, "order_prices": {"entry": 100.0, "stop": 98.0, "targets": [104.0]},
+           "exits": [{"part": 1.0, "price": 104.0, "reason": "tp1"}]}
+    r20 = ST.cost_variants("stock", res)["r_20e"]
+    assert r20 is not None and r20 < 1.95
+    assert M.compared_r("stock", json.dumps(res), 1.95) == r20
+    assert M.compared_r("crypto", json.dumps(res), 1.95) == 1.95 and M.compared_r("stock", "{}", 0.4) == 0.4
+    challenger_ready(db, losers, n_days=3, per_day=10)
+    before = M.compare(db.conn, M.champion(db.conn), M.challenger(db.conn))["champion"]
+    tid, r = db.conn.execute("SELECT id, r_net FROM trades WHERE origin = 'live' AND triggered = 1 LIMIT 1").fetchone()
+    db.conn.execute("UPDATE trades SET result = ? WHERE id = ?", (json.dumps(res), tid))
+    after = M.compare(db.conn, M.champion(db.conn), M.challenger(db.conn))["champion"]
+    n = before["declenches"]
+    assert after["esperance_r"] * n == pytest.approx(before["esperance_r"] * n + r20 - r, abs=1e-3)
+
+
+def null_challenger_promoted(rnd: random.Random, cfgs: list[dict], per_day=120, n_days=60, removed=0.1) -> list[bool]:
+    """Challenger nul : 10 % des trades retirés au hasard, mêmes regards et même code que le worker."""
+    day_sums, done, kept, out = {}, [0] * len(cfgs), 0, [False] * len(cfgs)
+    for day in range(n_days):
+        d = [0.0, 0, 0.0, 0]
+        for _ in range(per_day):
+            r = max(-1.5, min(3.0, rnd.gauss(0, 1)))
+            d[0] += r
+            d[1] += 1
+            if rnd.random() >= removed:
+                d[2] += r
+                d[3] += 1
+        day_sums[day] = d
+        kept += d[3]
+        if day + 1 not in M.looks(cfgs[0]):
+            continue
+        cmp = M.measure_days(day_sums) | {"depuis_ts": 0, "capture_ok": True, "challenger": {"declenches": kept}}
+        cmp["par_marche"] = {"stock": M.measure_days(day_sums)}
+        for i, cfg in enumerate(cfgs):
+            if done[i] is None:
+                continue
+            v = M.verdict(cmp, cfg, None, done[i])
+            out[i] = out[i] or v == "promouvoir"
+            done[i] = None if v != "attendre" else day + 1
+    return out
+
+
+def test_challenger_nul_rarement_promu():
+    cfg = dict(V.DEFAULTS)
+    sans_marge = cfg | {"challenger_min_gain": 0.0}  # le z et les regards fixes seuls
+    rnd = random.Random(2026)
+    runs = [null_challenger_promoted(rnd, [cfg, sans_marge]) for _ in range(200)]
+    assert sum(r[0] for r in runs) / 200 <= 0.07
+    assert sum(r[1] for r in runs) / 200 <= 0.07
+
+
+def test_promotion_proposee_a_simao_par_le_circuit_des_propositions(db, tmp_path, monkeypatch):
+    monkeypatch.setenv("JARVIS_LAB_DB", db.path)
+    monkeypatch.delenv("JARVIS_LAB_CHAMPION", raising=False)
+    challenger_ready(db, losers)
+    report = M.step(db, NOW)
+    assert report["bascule"] == "promouvoir" and M.champion(db.conn)["version"] == "v1"
+    props = PR.Proposals(str(tmp_path / "p.json"), Settings(None))
+    [p] = M.sync_proposals(props)
+    assert (p["kind"], p["value"], p["current"], p["promotion"]) == ("promotion", "v2", "v1", "v2-20")
+    assert PR.text(p).startswith(f"**Proposition {p['id']}** : mettre en place la méthode **v2** à la place de v1")
+    assert p["why"] == M.pending_promotion(db.conn)["texte"] and M.sync_proposals(props) == []
+    assert M.state_line(M.state(db.conn)).endswith("· promotion proposée à Simão")
+    props.decide(p["id"], True)
+    assert PR.decision_text(p).startswith(f"✅ Proposition {p['id']} approuvée : la méthode v2 se met en place")
+    assert [f.name for f in (M.queue_root(db.path) / "decisions").glob("*.json")] == ["promotion-v2-20.json"]
+    assert M.champion(db.conn)["version"] == "v1"  # rien avant le passage du worker
+    assert M.step(db, NOW)["decisions"] == 1
+    assert M.champion(db.conn)["version"] == "v2" and M.sync_proposals(props) == []
+    assert props.get(p["id"])["status"] == "approved"
+    with pytest.raises(ValueError):
+        M.enqueue_promotion(db.path, "../v2", True)
+
+
+def test_promotion_refusee_retire_le_challenger(db):
+    h = challenger_ready(db, losers)
+    M.judge_challenger(db, NOW)
+    M.enqueue_promotion(db.path, "v2-20", False)
+    assert M.ingest_decisions(db, NOW) == 1
+    assert M.champion(db.conn)["version"] == "v1" and M.challenger(db.conn) is None
+    assert V.get_rule(db.conn, h)["decision"] == "retiree" and M.pending_promotion(db.conn) is None
+    assert M.events(db.conn)[0]["texte"].startswith("🧪 Méthode v2 retirée : promotion refusée par Simão (")
+
+
+def test_regard_suivant_remplace_la_promotion_sans_reponse(db):
+    challenger_ready(db, losers, per_day=20)
+    assert M.judge_challenger(db, NOW) == "promouvoir"
+    props = PR.Proposals(None, Settings(None))
+    [p] = M.sync_proposals(props, M.champion_payload(db.conn))
+    # Pas de réponse ; le challenger reste mesuré et fait moins bien ensuite.
+    synthetic_trades(db, n_days=20, per_day=20, seed=25, origin="live", first=date(2026, 11, 5), effect=winners)
+    assert M.judge_challenger(db, NOW) == "attendre" and M.pending_promotion(db.conn) is None
+    assert M.sync_proposals(props, M.champion_payload(db.conn)) == [] and props.get(p["id"])["status"] == "replaced"
+    M.enqueue_promotion(db.path, "v2-20", True)  # réponse arrivée trop tard : ignorée
+    assert M.ingest_decisions(db, NOW) == 0 and M.champion(db.conn)["version"] == "v1"
+    assert M.challenger(db.conn)["version"] == "v2"
+
+
+def test_promotion_qui_perd_encore_le_dit():
+    cmp = cmp_at(20, delta=0.05) | {"marches": ["stock"]}
+    cmp["challenger"]["esperance_r"], cmp["champion"]["esperance_r"] = -0.12, -0.17
+    champ = {"version": "v1", "regles": []}
+    chall = {"version": "v2", "regles": [{"empreinte": "a" * 64, "nom": "signal tendu"}]}
+    text = M.promotion_text(cmp, dict(V.DEFAULTS), champ, chall, 20)
+    assert text == ("v2 = v1 + « signal tendu ». En direct sur 20 jours de trades (actions) : +0,050 R par trade de "
+                    "mieux que v1 (z = 3,00, seuil 2,13) ; −0,120 R par trade sur 400 trades gardés, contre −0,170 R sur "
+                    "500 ; potentiel +10 capturé 3 fois (contre 3). Filtre moins perdant, méthode toujours perdante. "
+                    "Regard 1 sur 3.")

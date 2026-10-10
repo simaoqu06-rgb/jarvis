@@ -11,7 +11,7 @@ Toutes les ~10 min :
    résumé du soir (après 22 h 30 à Paris). Budgets par période dans LAB2_BUDGET : gros la nuit et
    le week-end, minimes pendant la séance.
 4. Labo 3 (étape « methode ») : décisions de Simão et types de catalyseurs déposés par le serveur,
-   challenger, bascule automatique ou retrait, fichier du champion lu par JARVIS en direct.
+   challenger, regards fixes (promotion proposée à Simão) ou retrait, fichier du champion lu par JARVIS en direct.
 5. Carnet des leçons (étape « lecons », lessons.py) : leçons déposées par la routine du soir,
    re-mesurées quand les trades changent, fichier des leçons confirmées lu par JARVIS en direct.
 6. Grade de JARVIS (étape « grade », grade.py) : avis du council et décisions de Simão, grade de

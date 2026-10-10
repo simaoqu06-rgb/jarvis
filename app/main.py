@@ -838,7 +838,7 @@ def cockpit_lab(request: Request):
             rules = []
         finally:
             conn.close()
-    proposals = [p for p in reversed(PR.proposals.items) if p.get("kind") in ("labo", "grade")]
+    proposals = [p for p in reversed(PR.proposals.items) if p.get("kind") in ("labo", "grade", "promotion")]
     return HTMLResponse(lab_page.render(st, proposals, rules, lab_morning.shared_state().latest(), lab_morning.dm_on(),
                                         lab_grade.current()))
 

@@ -253,6 +253,9 @@ def text(result: dict) -> str:
     if go:
         lines.append("-# Chaque GO est relu toutes les 5 min, de 15 min après l'ouverture à 11 h 30 New York : "
                      "✅ confirmé (ordre exact) ou ❌ annulé, en MP. `!confirmations` pour le bilan.")
+    note = T.SC.slope_note("stock") if picks else None
+    if note:
+        lines.append(f"-# {note[0].upper()}{note[1:]} : le GO est une règle de sélection figée, pas une prédiction.")
     lines.append("-# Données Alpaca (pré-ouverture, bougies avec 16 min de retard) et Finnhub. "
                  "`!plan TICKER` pour un plan à jour en temps réel.")
     return "\n".join(lines)

@@ -2,7 +2,8 @@
 
 Une leçon n'est pas une règle : elle ne filtre aucun trade. C'est une observation chiffrée (« cassure
 de pivot avec RVOL > 3 : TP1 plus souvent atteint ») que le serveur re-mesure sans tokens sur les
-trades du labo, et qui ne pèse sur la note des plans en direct qu'une fois confirmée.
+trades du labo, et qui ne s'affiche dans les plans en direct qu'une fois confirmée (sans toucher à leur
+verdict).
 
 Format (POST /api/lab/lessons, mis en file, lu par le worker) :
 
@@ -28,39 +29,61 @@ que les jours postérieurs. Un jour réécrit, rejoué ou recalculé après la l
 que soit son id. Le direct crypto réécrit les créneaux du jour en cours : ce jour-là entier est exclu.
 Leçons d'avant seen_until : dernier jour des trades d'id ≤ base_trade_id, et pour le direct au moins le
 jour UTC de la création (un jour crypto réécrit depuis a perdu ses anciens id).
+Jugement par paliers (avis de GPT et vérification du 10 octobre 2026 : une leçon re-mesurée à chaque
+passage finit par être confirmée par hasard). Une leçon n'est jugée qu'en franchissant un palier de trades
+concernés, n = MIN_N · 2^p (30, 60, 120, 240…), jamais deux fois au même palier (dernier palier jugé gardé
+dans ses mesures, « palier_juge »), et sur au moins MIN_DAYS jours (sur moins de jours, le z en grappes est
+trop instable : une leçon nulle était confirmée dans ~5 % des cas au seul premier palier). Entre deux paliers
+elle garde son état. Une leçon confirmée avant les paliers est rejugée une fois selon cette règle.
 - à confirmer : moins de MIN_N trades concernés, ou effet pas encore net ;
-- confirmée : z ≥ CONFIRM_Z dans le sens annoncé, écart ≥ MIN_EFFECT R, et même sens sur les deux
-  moitiés (un effet qui n'existe que sur une période n'est pas une leçon) ;
-- démentie : z ≤ DENY_Z (effet inverse), ou NULL_N trades concernés sans effet (|z| < 1). Une leçon
-  démentie reste au carnet (mémoire des échecs : ne pas la retenter) et peut revenir si les trades
-  suivants lui donnent raison ;
-- invalide : un champ de la condition est presque toujours absent des trades.
+- confirmée : au palier p, z ≥ confirm_z(id, p, jours) dans le sens annoncé, écart ≥ MIN_EFFECT R, et même
+  sens sur les deux moitiés (un effet qui n'existe que sur une période n'est pas une leçon). confirm_z dépense
+  l'alpha de la leçon n° id (validator.trial_level(id), les id ne sont jamais réutilisés) sur ses paliers,
+  6/(π²·(p+1)²) chacun, en loi de Student à jours − 1 degrés de liberté, jamais sous CONFIRM_Z : la somme sur
+  toutes les leçons et tous les paliers reste ≤ alpha (simulation : leçon nulle, 30 trades par jour dont 20 %
+  concernés, un regard par jour pendant 250 jours : confirmée au moins une fois dans ~0,4 % des cas, contre
+  ~10 % avec l'ancien seuil fixe). Une confirmée le reste tant que z (dans le sens annoncé) reste au-dessus
+  de DENY_Z ;
+- démentie : au palier, z ≤ DENY_Z (effet inverse) ou NULL_N trades concernés sans effet (|z| < 1) ; ou
+  confirmée retombée à z ≤ DENY_Z. Définitif : une démentie reste au carnet (mémoire des échecs : ne pas
+  la retenter), toujours mesurée pour l'affichage, mais ne revient jamais ;
+- invalide : un champ de la condition est presque toujours absent des trades (elle redevient « à
+  confirmer » si le champ apparaît, seulement s'il reste de la place au carnet).
+Une leçon favorable confirmée dont les trades perdent encore en absolu (espérance ≤ 0) est un effet
+relatif, pas un signal d'achat : elle est marquée « relative : moins mauvais que la moyenne, perd encore
+X R » partout où elle s'affiche.
 
 Le carnet reste court : au plus MAX_ACTIVE leçons actives (à confirmer + confirmées) ; au-delà, la
 plus faible des « à confirmer » est retirée pour faire place. C'est ce qui empêche JARVIS de se perdre.
 
 En direct (app/trading/service.build_plan) : le worker écrit les leçons confirmées dans
-lab_lessons.json ; chaque leçon confirmée qui correspond au plan ajoute (favorable) ou retire
-(défavorable) ADJ_PER point à la note, au plus ADJ_MAX en tout, avec une ligne « Leçons du labo »
-dans le plan. La condition s'évalue avec le SQL du labo sur la même ligne que les filtres du
-champion (live.stock_row). Champ inconnu en direct : leçon non appliquée. Une erreur ici ne casse
-jamais un plan. Le labo, lui, note ses plans sans les leçons (rien ne se mesure sur lui-même).
+lab_lessons.json ; chaque leçon confirmée qui correspond au plan s'affiche dans une ligne « Leçons du
+labo » avec ±ADJ_PER point chacune (ADJ_MAX en tout) et la « note avec leçons » qui en résulte. C'est un
+affichage : verdict, note, compte fictif, « contre l'avis de JARVIS » et tri du scanner restent sur la note
+brute, seule mesurable (la note n'a pas prouvé qu'elle prédit, voir score.py). La condition s'évalue avec le
+SQL du labo sur la même ligne que les filtres du champion (live.stock_row). Champ inconnu en direct : leçon
+non appliquée. Une erreur ici ne casse jamais un plan. Le labo, lui, note ses plans sans les leçons (rien ne
+se mesure sur lui-même).
 """
 import hashlib
 import json
 import logging
+import math
 import os
 import sqlite3
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from statistics import NormalDist
 
+from app.lab import stats as STATS
 from app.lab import validator as V
 from app.lab.db import LabDB, db_path, now_iso
 
 log = logging.getLogger(__name__)
 MIN_N = 30
+MIN_DAYS = 20  # z en grappes par jour : sur moins de jours, sa variance est trop mal estimée pour juger
 CONFIRM_Z = 2.5
 MIN_EFFECT = 0.05
 DENY_Z = -1.0
@@ -294,6 +317,21 @@ def measure(conn, lesson: dict, version: str) -> dict:
             tp_hit += tp1 or 0
     n_all = sum(v[1] for v in day_sums.values())
     n_hit = sum(v[3] for v in day_sums.values())
+    return summary(day_sums) | {
+        "tp1": round(tp_hit / n_hit, 4) if n_hit else None, "tp1_ensemble": round(tp_all / n_all, 4) if n_all else None,
+        "version": version, "apres_trade": lesson.get("apres_trade"), "vu_jusqu": seen}
+
+
+def palier(n: int) -> int | None:
+    """Palier de jugement : p pour MIN_N·2^p ≤ n < MIN_N·2^(p+1) ; None sous MIN_N."""
+    return (n // MIN_N).bit_length() - 1 if n >= MIN_N else None
+
+
+def summary(day_sums: dict) -> dict:
+    """Écart, z en grappes par jour, moitiés chronologiques et palier depuis les sommes par jour
+    [ΣR ensemble, n, ΣR concernés, n concernés] (fonction pure, reprise par les simulations)."""
+    n_all = sum(v[1] for v in day_sums.values())
+    n_hit = sum(v[3] for v in day_sums.values())
     s_all = sum(v[0] for v in day_sums.values())
     s_hit = sum(v[2] for v in day_sums.values())
     z, delta = V.pooled_z(day_sums)
@@ -307,19 +345,41 @@ def measure(conn, lesson: dict, version: str) -> dict:
     return {"n": n_hit, "n_total": n_all, "jours": len(days),
             "esperance_r": round(m_hit, 4) if m_hit is not None else None,
             "esperance_ensemble_r": round(m_all, 4) if m_all is not None else None,
-            "tp1": round(tp_hit / n_hit, 4) if n_hit else None, "tp1_ensemble": round(tp_all / n_all, 4) if n_all else None,
             "ecart_r": round(delta, 4) if delta is not None else None, "z": round(z, 3) if z is not None else None,
-            "moities": halves, "version": version, "apres_trade": lesson.get("apres_trade"), "vu_jusqu": seen}
+            "moities": halves, "palier": palier(n_hit)}
 
 
-def judge(m: dict, sens: str) -> str:
+def confirm_z(essai: int, level_palier: int, jours: int | None = None) -> float:
+    """z exigé pour confirmer la leçon n° `essai` à son palier `level_palier` : dépense de
+    6/(π²·(p+1)²) de validator.trial_level(essai) (somme sur les paliers ≤ trial_level, somme sur les
+    leçons ≤ alpha), quantile de Student à `jours` − 1 degrés de liberté (convention du labo, déclaration
+    n° 8, D4 ; loi normale sans `jours`), jamais sous CONFIRM_Z."""
+    level = V.trial_level(essai) * 6 / (math.pi ** 2 * (level_palier + 1) ** 2)
+    q = STATS.t_quantile(1 - level, jours - 1) if jours else -NormalDist().inv_cdf(level)
+    return max(CONFIRM_Z, q)
+
+
+def due(m: dict, palier_juge: int | None) -> bool:
+    """La mesure franchit-elle un palier pas encore jugé, sur au moins MIN_DAYS jours ?"""
+    level = m.get("palier")
+    return (level is not None and (m.get("jours") or 0) >= MIN_DAYS
+            and (palier_juge is None or level > palier_juge))
+
+
+def judge(m: dict, sens: str, essai: int = 1, etat: str | None = None, palier_juge: int | None = None) -> str:
+    """État d'une leçon après une mesure. `essai` : son id ; `etat` : son état d'avant ; `palier_juge` :
+    dernier palier déjà jugé (aucun nouveau jugement tant que la mesure ne le dépasse pas)."""
     if m.get("invalide"):
         return "invalide"
+    if etat == "dementie":
+        return "dementie"  # définitif : toujours mesurée pour l'affichage, jamais remontée
     s = SENS[sens]
     z, delta = m.get("z"), m.get("ecart_r")
-    if m["n"] < MIN_N or z is None or delta is None:
+    if etat == "confirmee":  # hystérésis : confirmée tant que l'effet ne s'inverse pas
+        return "dementie" if z is not None and s * z <= DENY_Z else "confirmee"
+    if z is None or delta is None or not due(m, palier_juge):
         return "a_confirmer"
-    if (s * z >= CONFIRM_Z and s * delta >= MIN_EFFECT
+    if (s * z >= confirm_z(essai, m["palier"], m["jours"]) and s * delta >= MIN_EFFECT
             and all(h is not None and s * h > 0 for h in m["moities"])):
         return "confirmee"
     if s * z <= DENY_Z or (m["n"] >= NULL_N and abs(z) < 1):
@@ -328,7 +388,9 @@ def judge(m: dict, sens: str) -> str:
 
 
 def measure_all(db: LabDB, only_new: bool = False) -> int:
-    """Re-mesure les leçons (toutes, sauf retirées ; `only_new` : seulement celles jamais mesurées)."""
+    """Re-mesure les leçons (toutes, sauf retirées ; `only_new` : seulement celles jamais mesurées). Les
+    démenties restent mesurées (affichage) sans jamais revenir ; une invalide ne redevient active que s'il
+    reste de la place au carnet (MAX_ACTIVE)."""
     version = V.current_version(db.conn)
     if not version:
         return 0
@@ -341,7 +403,16 @@ def measure_all(db: LabDB, only_new: bool = False) -> int:
         except sqlite3.Error as exc:
             log.warning("Labo : leçon %d non mesurée (%s)", lid, exc)
             continue
-        status = judge(m, lesson["sens"])
+        judged = (lesson["mesures"] or {}).get("palier_juge")
+        etat = lesson["etat"]
+        if etat == "confirmee" and "palier_juge" not in (lesson["mesures"] or {}):
+            etat = "a_confirmer"  # confirmée avant les paliers (seuil fixe, regardée à chaque passage) : rejugée
+        status = judge(m, lesson["sens"], lid, etat, judged)
+        if lesson["etat"] not in ACTIVE and status in ACTIVE and active_count(db.conn) >= MAX_ACTIVE:
+            status = lesson["etat"]  # carnet plein : une invalide qui redevient lisible attend une place
+        if m.get("z") is not None and m.get("ecart_r") is not None and due(m, judged):
+            judged = m["palier"]
+        m["palier_juge"] = judged
         db.conn.execute("UPDATE lessons SET status = ?, metrics = ?, measured_at = ? WHERE id = ?",
                         (status, json.dumps(m, ensure_ascii=False), now_iso(), lid))
         if status != lesson["etat"]:
@@ -406,6 +477,15 @@ def _pct(x) -> str:
     return f"{x:.0%}" if x is not None else "n/d"
 
 
+def relative(sens: str, esperance: float | None) -> str | None:
+    """Leçon favorable dont les trades concernés ne gagnent pas en absolu : un effet relatif, pas un signal
+    d'achat (« relative : moins mauvais que la moyenne, perd encore 0,15 R ») ; None sinon."""
+    if sens != "favorable" or esperance is None or esperance > 0:
+        return None
+    lost = f"perd encore {abs(esperance):.2f} R".replace(".", ",") if esperance < 0 else "ne gagne rien"
+    return f"relative : moins mauvais que la moyenne, {lost}"
+
+
 def proof(lesson: dict) -> str:
     """Preuve chiffrée en clair (« 42 trades : +0,31 R contre +0,05 R, TP1 61 % contre 44 % »)."""
     m = lesson.get("mesures") or {}
@@ -416,8 +496,9 @@ def proof(lesson: dict) -> str:
     if not m.get("n"):
         return "aucun trade concerné depuis la leçon pour l'instant"
     fmt = lambda x: f"{x:+.2f} R".replace(".", ",") if x is not None else "n/d"  # noqa: E731
+    rel = relative(lesson["sens"], m.get("esperance_r")) if lesson.get("etat") == "confirmee" else None
     return (f"{m['n']} trades depuis la leçon : {fmt(m.get('esperance_r'))} contre {fmt(m.get('esperance_ensemble_r'))}, "
-            f"TP1 {_pct(m.get('tp1'))} contre {_pct(m.get('tp1_ensemble'))}")
+            f"TP1 {_pct(m.get('tp1'))} contre {_pct(m.get('tp1_ensemble'))}" + (f" · {rel}" if rel else ""))
 
 
 def line(lesson: dict) -> str:
@@ -438,7 +519,8 @@ def text(conn, limit_denied: int = 5) -> str:
     if not lessons:
         return head + "\nAucune leçon pour l'instant : la routine du soir les écrit au fil des séances."
     lines = [head]
-    for status, title, cap in (("confirmee", "Confirmées (elles comptent dans la note des plans)", MAX_ACTIVE),
+    for status, title, cap in (("confirmee", "Confirmées (affichées dans les plans, sans effet sur le verdict)",
+                                MAX_ACTIVE),
                                ("a_confirmer", "À confirmer", MAX_ACTIVE), ("dementie", "Démenties récentes", limit_denied)):
         group = [x for x in lessons if x["etat"] == status][:cap]
         if group:
@@ -470,7 +552,8 @@ def write_live(db: LabDB) -> bool:
     if db.path == ":memory:":
         return False
     data = {"lecons": [{"id": x["id"], "texte": x["texte"], "sens": x["sens"], "cond": x["cond"],
-                        "markets": x["markets"]} for x in list_lessons(db.conn, "confirmee")]}
+                        "markets": x["markets"], "esperance_r": (x["mesures"] or {}).get("esperance_r")}
+                       for x in list_lessons(db.conn, "confirmee")]}
     path = live_path(db.path)
     try:
         if json.loads(path.read_text(encoding="utf-8")).get("lecons") == data["lecons"]:
@@ -504,7 +587,7 @@ def current() -> list[dict]:
             for x in data.get("lecons") or []:
                 V.compile_cond(x["cond"])  # condition illisible : erreur ici, pas pendant un plan
                 items.append({"id": x["id"], "texte": x["texte"], "sens": _sens(x["sens"]), "cond": x["cond"],
-                              "markets": x.get("markets")})
+                              "markets": x.get("markets"), "esperance_r": x.get("esperance_r")})
             _cache.update(key=key, data=items)
             _warned.discard("lecture")
         return _cache["data"]
@@ -545,13 +628,16 @@ def match(lessons: list[dict], row: dict) -> list[dict]:
 
 
 def adjustment(matched: list[dict]) -> dict | None:
-    """Points ajoutés à la note et lignes du plan ; None sans leçon concernée."""
+    """Points de la « note avec leçons » (affichage seulement) et lignes du plan ; None sans leçon concernée."""
     if not matched:
         return None
     raw = sum(ADJ_PER * SENS[x["sens"]] for x in matched)
     adj = max(-ADJ_MAX, min(ADJ_MAX, raw))
-    return {"ajustement": round(adj, 2),
-            "lignes": [f"{'+' if x['sens'] == 'favorable' else '−'}{ADJ_PER:g} #{x['id']} {x['texte']}" for x in matched]}
+
+    def text(x: dict) -> str:
+        rel = relative(x["sens"], x.get("esperance_r"))
+        return f"{'+' if x['sens'] == 'favorable' else '−'}{ADJ_PER:g} #{x['id']} {x['texte']}" + (f" ({rel})" if rel else "")
+    return {"ajustement": round(adj, 2), "lignes": [text(x) for x in matched]}
 
 
 def crypto_row(plan: dict, daily: list[dict] | None, now: datetime) -> dict:
@@ -582,8 +668,9 @@ async def _index_daily(now: datetime) -> list[dict] | None:
 
 
 async def apply(plan: dict, daily: list[dict] | None, cat: dict | None, now: datetime, s=None) -> dict | None:
-    """Ajuste la note d'un plan en direct avec les leçons confirmées qui le concernent (plan modifié
-    sur place). Renvoie l'ajustement, ou None. Jamais d'exception : en cas de souci, plan inchangé."""
+    """Ajoute au plan en direct les leçons confirmées qui le concernent et la « note avec leçons » (plan
+    modifié sur place ; note, verdict et tri inchangés). Renvoie l'ajustement, ou None. Jamais d'exception :
+    en cas de souci, plan inchangé."""
     try:
         lessons = [x for x in current() if not x.get("markets") or plan["market"] in x["markets"]]
         if not lessons or plan["side"] != "long":  # le labo ne mesure que des trades longs

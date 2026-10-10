@@ -304,7 +304,7 @@ Killmode a deux parties, mesurées chacune là où elle peut l'être sans voir l
 Les jours déjà traités sont recalculés par le rattrapage (`progress_job` change avec le numéro).
 
 **Council** (Sceptique, Pragmatique, Critique : GO modifié). Sceptique : « setup complet » ne veut pas dire
-« setup gagnant » ; la note composite de v1, qui compte déjà le catalyseur, n'a rien prédit (GO ≈ NO GO ≈
+« setup gagnant » ; la note composite de v1, sans sa part catalyseur, n'a rien prédit (GO ≈ NO GO ≈
 −0,24 R), donc Killmode est une hypothèse à mesurer, pas un avantage acquis. Pragmatique : une seule stratégie
 de plus (7 essais), qui réutilise bougies, simulateur et témoin ; le rattrapage refait les jours déjà traités,
 comme à la n° 4. Critique : la tonalité des actus est lue par mots-clés et l'univers du labo compte peu de

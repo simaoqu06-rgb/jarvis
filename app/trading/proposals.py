@@ -14,6 +14,11 @@ comme challenger ; refusée, elle rejoint la mémoire des échecs et n'est jamai
 Grade de JARVIS (app/lab/grade.py) : une hausse de lettre du grade (qui augmente le risque proposé)
 arrive ici aussi (kind « grade », envoyée tout de suite en privé avec ses boutons). La décision est
 déposée dans la file du labo (data/lab_queue/grade/) ; le worker l'applique si la hausse tient encore.
+
+Promotion du challenger (app/lab/method.py) : à un regard fixe où il fait nettement mieux, le labo ne
+bascule pas seul ; il propose « mettre en place vX » (kind « promotion », envoyée tout de suite en privé
+avec ses boutons). La décision est déposée dans data/lab_queue/decisions/ ; approuvée, le worker met vX
+en place si c'est toujours la promotion du dernier regard ; refusée, vX est retirée.
 """
 import json
 import logging
@@ -97,6 +102,35 @@ class Proposals:
             self.save()
         return n
 
+    def promotion(self, promo_id: str) -> dict | None:
+        return next((p for p in self.items if p.get("kind") == "promotion" and p.get("promotion") == promo_id), None)
+
+    def propose_promotion(self, promo: dict) -> dict | None:
+        """Promotion du challenger proposée à un regard ; None si déjà proposée. Celle d'un regard
+        précédent est remplacée."""
+        if self.promotion(promo["id"]):
+            return None
+        for p in self.pending("promotion"):
+            p["status"] = "replaced"
+        item = {"id": max((p["id"] for p in self.items), default=0) + 1, "kind": "promotion", "key": "méthode",
+                "value": promo["version"], "current": promo["champion"], "why": promo["texte"],
+                "promotion": promo["id"], "status": "pending",
+                "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "decided_at": None}
+        self.items.append(item)
+        self.save()
+        return item
+
+    def retire_promotion(self, live_ids: set[str]) -> int:
+        """Promotions en attente que le labo ne propose plus (regard suivant, challenger retiré) : remplacées."""
+        n = 0
+        for p in self.pending("promotion"):
+            if p.get("promotion") not in live_ids:
+                p["status"] = "replaced"
+                n += 1
+        if n:
+            self.save()
+        return n
+
     def propose(self, key: str, value, why: str) -> dict | None:
         """Ajoute une proposition ; None si elle ne changerait rien, attend déjà, ou a été refusée."""
         if self.settings.get(key) == value:
@@ -136,6 +170,14 @@ class Proposals:
                 lab_grade.enqueue_decision(lab_db.db_path(), p["hausse"], approve, pid)
             except OSError as exc:
                 raise ValueError(f"file du labo inaccessible ({exc}), proposition {pid} toujours en attente")
+        elif p.get("kind") == "promotion":
+            from app.lab import db as lab_db
+            from app.lab import method as lab_method
+
+            try:
+                lab_method.enqueue_promotion(lab_db.db_path(), p["promotion"], approve, pid)
+            except OSError as exc:
+                raise ValueError(f"file du labo inaccessible ({exc}), proposition {pid} toujours en attente")
         elif approve:
             self.settings.update({p["key"]: p["value"]})
         p["status"] = "approved" if approve else "refused"
@@ -154,6 +196,9 @@ def text(p: dict) -> str:
                 f"par trade augmente) · {p['why']}")
     if p.get("kind") == "labo":
         return f"**Proposition {p['id']}** : méthode {p['current']} + « {p['nom']} » · {p['why']}"
+    if p.get("kind") == "promotion":
+        return (f"**Proposition {p['id']}** : mettre en place la méthode **{p['value']}** à la place de {p['current']} "
+                f"(ses filtres s'appliqueront aux plans de JARVIS) · {p['why']}")
     return f"**Proposition {p['id']}** : `{p['key']}` {p['current']} → {p['value']} · {p['why']}"
 
 
@@ -167,6 +212,11 @@ def decision_text(p: dict) -> str:
         if p["status"] == "approved":
             return f"✅ Proposition {p['id']} approuvée : « {p['nom']} » part en essai au labo (challenger)"
         return f"❌ Proposition {p['id']} refusée : « {p['nom']} » ne sera plus proposée"
+    if p.get("kind") == "promotion":
+        if p["status"] == "approved":
+            return (f"✅ Proposition {p['id']} approuvée : la méthode {p['value']} se met en place au prochain passage du "
+                    "labo (si aucun regard plus récent ne l'a remplacée)")
+        return f"❌ Proposition {p['id']} refusée : {p['value']} est retirée, {p['current']} reste en place"
     if p["status"] == "approved":
         return f"✅ Proposition {p['id']} approuvée : `{p['key']}` = {p['value']}"
     return f"❌ Proposition {p['id']} refusée : `{p['key']}` reste à {p['current']}"

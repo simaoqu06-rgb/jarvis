@@ -122,7 +122,10 @@ Chaque plan reçoit une note sur 10, avec ses raisons ligne par ligne (`app/trad
 
 Sans catalyseur évaluable (crypto), la note se calcule sur les deux autres. **GO** si la note
 atteint 7 et qu'aucun veto ne tombe : résultats dans les 48 h, ou R/R sous 2. Le R/R n'est pas
-suivi à la lettre : jusqu'à 0,2 en dessous, il passe si la note dépasse 7,5.
+suivi à la lettre : jusqu'à 0,2 en dessous, il passe si la note dépasse 7,5. Finnhub sans réponse
+pour une action : catalyseur neutre (5/10) et veto « date des résultats non vérifiée ». Le GO est une
+règle de sélection figée, pas une prédiction : quand le labo mesure que la note ne prédit pas le
+résultat (pente ≤ 0 en R par point), le plan et le scanner le disent à côté du GO.
 
 Tous les seuils vivent dans `app/trading/settings.py` (`GET /api/trading/settings`, `!regle`).
 Ils évoluent par propositions : JARVIS propose, tu approuves ou refuses (voir plus bas).
@@ -227,11 +230,19 @@ Tout tourne dans le worker, sans jeton d'IA ; rien ici ne change la méthode en 
   (`keep` au lieu d'`exclude`, conditions `and` / `or` / `not`, opérateurs `> >= < <= == != in not_in
   between is_null not_null`, `"value": "auto"` pour un seuil choisi sur la période d'ajustement). Les
   champs sont ceux connus à l'heure du plan (`plan.…`, `context.…`, `composite`, `regime`…) ; les
-  résultats du trade sont refusés. Validation « walk-forward » sur 3 fenêtres chronologiques
-  (ajustement sur le passé, test sur les mois qui suivent, 1 jour d'embargo). Critères, tous
-  obligatoires : au moins 100 trades touchés en test, +0,05 R par trade en moyenne, meilleure dans 2
-  fenêtres sur 3, capture du potentiel +10 préservée, et p < 0,05 / n où n est le numéro de l'essai
-  (le seuil monte avec le nombre d'idées testées). Une règle déjà testée renvoie son verdict gardé.
+  résultats du trade sont refusés. **Hors échantillon** : une règle est imaginée en lisant les trades
+  du labo ; à la soumission, elle note le dernier jour journalisé par origine et marché
+  (`rules.seen_until`), et seuls comptent les jours journalisés après la soumission (rejeu pas encore
+  calculé et direct ; un jour recalculé ne compte jamais). Tant qu'il n'y en a pas 60, elle reste en
+  attente sans consommer d'essai ; le même test sur les jours déjà vus est affiché comme
+  « exploratoire », sans effet sur le verdict. Validation « walk-forward » sur 3 fenêtres
+  chronologiques de ces jours neufs, coupées marché par marché (l'ajustement ne sert qu'au seuil
+  « auto », 1 jour d'embargo ; chaque fenêtre dit son plus grand trou de calendrier et ses jours en
+  direct). Critères, tous obligatoires : au moins 100 trades touchés en test, +0,05 R par trade en
+  moyenne, meilleure dans 2 fenêtres sur 3, capture du potentiel +10 préservée, et p < 6·α/(π²·n²)
+  (≈ 0,03 au 1er essai, 3·10⁻⁴ au 10e) où n est le numéro de l'essai et α = 0,05 : le seuil monte avec
+  le nombre d'idées testées et la somme sur tous les essais reste ≤ α. Une règle déjà testée renvoie
+  son verdict gardé.
   v1 : filtres seulement ; les règles qui demanderaient de régénérer les plans viendront plus tard.
   Les seuils sont dans la table `lab_config` (défauts dans le code) et ne changent que sur ton accord.
 - **Fiches catalyseurs** (`app/lab/catalysts.py`) : chaque mouvement d'environ ±8 % de l'univers du
@@ -269,22 +280,32 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
   `GET /api/lab/matin`) ; à passer à `on` après ~5 séances.
 - **Carnet des leçons** (`app/lab/lessons.py`) : en plus des règles, la routine du soir écrit ce
   qu'elle a compris (`POST /api/lab/lessons`, au plus ~3 par soir, carnet de 50 leçons actives au plus).
-  Une leçon ne filtre rien : le worker la re-mesure chaque nuit sur les trades du labo (espérance et
-  TP1 des trades concernés contre l'ensemble, z en grappes par jour, même sens sur les deux moitiés de
-  l'historique) et la passe **confirmée** ou **démentie** tout seul. Les démenties restent au carnet
-  (ne pas les retenter). Les confirmées (`data/lab_lessons.json`) ajustent la note des plans en direct
-  de ±0,5 chacune (±1 au plus), avec une ligne « Leçons du labo » dans le plan ; le labo, lui, note
-  ses plans sans elles. La routine relit le carnet (dans `GET /api/lab/brief`) avant d'analyser ;
-  Simão le lit avec `!lecons`.
+  Une leçon ne filtre rien : le worker la re-mesure sur les trades du labo qu'elle n'a pas pu voir
+  (espérance et TP1 des trades concernés contre l'ensemble, z en grappes par jour, même sens sur les
+  deux moitiés) et ne la juge qu'à des paliers de 30, 60, 120… trades concernés, sur au moins 20 jours :
+  le seuil de z (loi de Student) dépense l'alpha de chaque leçon sur ses paliers, pour qu'une leçon sans
+  effet ne soit presque jamais confirmée malgré les regards répétés. **Confirmée**, elle le reste tant
+  que l'effet tient ; **démentie**, c'est définitif (encore mesurée, jamais reconfirmée). Les confirmées
+  (`data/lab_lessons.json`) s'affichent dans les plans en direct (ligne « Leçons du labo », avec la note
+  qu'elles donneraient) **sans toucher au verdict** : GO / NO GO reste calculé sur la note brute. Une
+  leçon « favorable » dont les trades perdent encore est dite « relative ». La routine relit le carnet
+  (dans `GET /api/lab/brief`) avant d'analyser ; Simão le lit avec `!lecons`.
 - **Approuvée** : la règle crée la version suivante (v2 = v1 + ses filtres), d'abord **challenger**.
   Les trades restent journalisés une seule fois (version de génération v1) ; champion et challenger
-  en sont des sous-ensembles calculés avec le même SQL que le validateur. Quand le challenger a au moins
-  100 trades déclenchés **en direct** depuis sa création et un R net moyen par trade meilleur que le
-  champion sur la même période, sans perdre de capture du potentiel +10 (même tolérance que le
-  validateur), il devient la méthode en place et tu reçois « Méthode v2 en place : … ». Après 300
-  trades sans faire mieux, il est retiré (message aussi). Seuils `challenger_min_trades` et
-  `challenger_max_trades` dans `lab_config`. Des règles approuvées pendant un essai attendent sa fin
-  (sauf le même matin : elles rejoignent le challenger tant qu'il n'a aucun trade).
+  en sont des sous-ensembles calculés avec le même SQL que le validateur. La comparaison porte sur les
+  trades déclenchés **en direct** depuis sa création, sur les seuls marchés de ses nouvelles règles, en R
+  à ta mise de 20 € pour les actions (frais IBKR réels), avec un écart et un z en grappes par jour. Elle
+  n'est jugée qu'à 3 regards fixes, à 20, 40 et 60 jours de trades : le challenger est promouvable si
+  l'écart atteint +0,02 R par trade, z ≥ 2,13 (5 % répartis sur les 3 regards), aucun marché touché ne
+  recule, la capture du potentiel +10 tient (même tolérance que le validateur) et il garde au moins 100
+  trades. Il ne bascule pas seul : tu reçois une proposition « mettre en place la méthode v2 » (boutons,
+  `!oui N` / `!non N`), avec l'espérance des trades gardés (« filtre moins perdant, méthode toujours
+  perdante » si elle reste ≤ 0). Approuvée : « Méthode v2 en place : … » ; refusée : v2 est retirée ;
+  sans réponse, il reste mesuré et le regard suivant remplace la proposition. Pas assez net au dernier
+  regard (ou 100 jours sans l'atteindre), il est retiré (message aussi). Seuils `challenger_looks_days`,
+  `challenger_min_z`, `challenger_min_gain`, `challenger_min_trades`, `challenger_max_days` dans
+  `lab_config`. Des règles approuvées pendant un essai attendent sa fin (sauf le même matin : elles
+  rejoignent le challenger tant qu'il n'a aucun trade).
 - **Refusée** : rangée dans la mémoire des échecs (« refusée par Simão »), jamais reproposée.
 - **En direct** : le worker écrit la méthode en place dans `data/lab_champion.json`. Le scanner
   pré-ouverture applique ses filtres avec le même code que le labo (`method.evaluate_rows`) : un plan
