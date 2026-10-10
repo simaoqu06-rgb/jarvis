@@ -402,3 +402,78 @@ def test_ids_et_jours_vus_gardes_pour_les_lecons_et_les_regles(tmp_path, monkeyp
     assert L.seen_until(db.conn, base) == seen and db.conn.execute("SELECT MAX(id) FROM trades").fetchone()[0] == base
     cond, params = L.unseen_sql(seen)
     assert db.conn.execute(f"SELECT COUNT(*) FROM trades t WHERE {cond}", params).fetchone()[0] == 0
+
+
+# --- D3 : révisions lisibles ------------------------------------------------------------------------------------
+
+def _trade(db, origin, market, day, code_rev=None, symbol="AAA"):
+    n = db.conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+    db.conn.execute("INSERT INTO trades (origin, method_version, market, symbol, side, day, planned_at, code_rev) "
+                    "VALUES (?, 'v1', ?, ?, 'long', ?, ?, ?)", (origin, market, symbol, day, n + 1, code_rev))
+
+
+OLD_REPLAY = "inconnue, avant b595c12 (rejeu actions ≤ 13/12/2024)"
+OLD_LIVE = "inconnue, avant b595c12 (direct actions du 06/10/2026)"
+
+
+def test_inconnues_separees_et_alerte_sur_la_rupture(tmp_path):
+    path = str(tmp_path / "lab.db")
+    db = LabDB(path)
+    for day in ("2024-10-01", "2024-12-13"):
+        _trade(db, "replay", "stock", day)               # rejeu d'avant b595c12
+    _trade(db, "replay", "stock", "2024-12-16")          # après la borne : plans identiques sur la sonde
+    _trade(db, "replay", "crypto", "2024-11-01")         # la crypto n'a pas changé
+    _trade(db, "live", "stock", "2026-10-06")            # direct du 06/10, pas encore recalculé
+    _trade(db, "live", "crypto", "2026-10-06")
+    _trade(db, "live", "stock", "2026-10-07", "aedf763a5a")
+    rev = STATS.code_revisions(db.conn)
+    assert rev["par_version"] == {"v1": {OLD_REPLAY: 2, STATS.UNKNOWN_PROBE: 3, OLD_LIVE: 1, "aedf763a5a": 1}}
+    assert rev["alertes"] == [
+        "plusieurs comportements sous la même version : v1 compte 3 trades calculés avant b595c12 (rejeu actions ≤ "
+        "13/12/2024 : 2, direct actions du 06/10/2026 : 1) sur 7, d'une autre règle de plan (rupture listée dans "
+        "empreinte.V1_RUPTURES)"]
+    text = STATUS.text(STATUS.status(path))
+    assert f"⚠️ Méthode v1 calculée par 4 révisions du code : {OLD_REPLAY} 2 trades" in text
+    assert text.count("· trades d'avant b595c12") == 1
+    # La séance du direct recalculée (révision du code actuel) n'est plus « inconnue » ; le rejeu de 2024 le reste.
+    db.conn.execute("UPDATE trades SET code_rev = 'aedf763a5a' WHERE origin = 'live'")
+    rev = STATS.code_revisions(db.conn)
+    assert rev["par_version"] == {"v1": {OLD_REPLAY: 2, STATS.UNKNOWN_PROBE: 2, "aedf763a5a": 3}}
+    assert len(rev["alertes"]) == 1 and "2 trades calculés avant b595c12 (rejeu actions ≤ 13/12/2024 : 2)" \
+        in rev["alertes"][0]
+    # Les filtres de stats.compute s'appliquent : sans les actions du rejeu, plus de rupture en vue.
+    assert STATS.code_revisions(db.conn, market="crypto")["alertes"] == []
+    assert STATS.code_revisions(db.conn, since="2025-01-01")["alertes"] == []
+
+
+def test_sans_alerte_pour_des_sources_differentes_ou_seulement_l_ancien_code(tmp_path):
+    db = LabDB(str(tmp_path / "lab.db"))
+    _trade(db, "replay", "stock", "2024-11-04")
+    assert STATS.code_revisions(db.conn) == {"par_version": {"v1": {OLD_REPLAY: 1}}, "alertes": []}   # rien de mêlé
+    db.conn.execute("DELETE FROM trades")
+    _trade(db, "replay", "stock", "2025-02-03")
+    _trade(db, "replay", "stock", "2025-02-04", "181e9d4920")
+    _trade(db, "replay", "stock", "2025-02-05", "aedf763a5a")
+    db.set("empreintes_v1", "aedf763a5a", E.V1_FINGERPRINT)   # seule révision notée par la garde
+    rev = STATS.code_revisions(db.conn)
+    assert len(rev["par_version"]["v1"]) == 3 and rev["alertes"] == []  # refactorisations, plans identiques
+    assert STATS.revision_mixes(db.conn, rev["par_version"]) == {}
+
+
+# --- D4 : docstring du générateur ------------------------------------------------------------------------------
+
+def test_bougie_de_15_h_45_close_et_bougie_en_cours_plate(tmp_path):
+    """generator.py décrit le comportement depuis b595c12 : à 9 h 10, la dernière bougie connue (15 h 45 la veille) est
+    close, et le plan ajoute après elle une bougie en cours plate."""
+    from zoneinfo import ZoneInfo
+
+    db = LabDB(str(tmp_path / "lab.db"))
+    fill_stock(db, ["AAA"], CO.sessions_back(DAY, 125), DAY)
+    inp = G.stock_inputs(db, "AAA", DAY)
+    last = datetime.fromtimestamp(inp["bars"][-1]["t"], ZoneInfo("America/New_York"))
+    assert (last.date(), last.hour, last.minute) == (date(2026, 10, 5), 15, 45)
+    bars = T.with_open_bar(inp["bars"], 15, datetime.fromtimestamp(inp["moment"], timezone.utc))
+    c = inp["bars"][-1]["c"]
+    assert bars[:-1] == inp["bars"] and bars[-1] | {"t": 0} == {"t": 0, "o": c, "h": c, "l": c, "c": c, "v": 0.0,
+                                                               "pending": True}
+    assert "with_open_bar" in G.__doc__ and "que le plan tient pour en cours" not in G.__doc__

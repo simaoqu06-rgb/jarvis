@@ -64,10 +64,17 @@ def day_counts(p: dict) -> dict:
 
 
 def code_revisions(conn: sqlite3.Connection) -> dict:
-    """Trades (hors scellé) par version et révision du code ; « inconnue » : calculés avant le suivi."""
+    """Trades (hors scellé) par version et révision du code ; « inconnue… » : calculés avant le suivi."""
     from app.lab import stats as STATS  # import tardif, comme market_days
 
     return (STATS.code_revisions(conn) or {}).get("par_version") or {}
+
+
+def revision_mixes(conn: sqlite3.Connection, par: dict) -> dict:
+    """Versions dont les trades viennent de plusieurs comportements (stats.revision_mixes), raisons courtes."""
+    from app.lab import stats as STATS
+
+    return {version: [short for short, _ in mixes] for version, mixes in STATS.revision_mixes(conn, par).items()}
 
 
 def _days_between(market: str, start: str, end: str) -> int:
@@ -100,6 +107,7 @@ def status(path: str | None = None) -> dict:
         for market, origin, n in conn.execute("SELECT market, origin, COUNT(*) FROM trades GROUP BY market, origin"):
             out["trades"].setdefault(market, {})[origin] = n
         out["revisions_code"] = code_revisions(conn)
+        out["revisions_melangees"] = revision_mixes(conn, out["revisions_code"])
         out["scelle"] = {**SEAL.describe(), "trades": {}}
         try:  # base d'avant le scellé ouverte en lecture seule : table absente
             for market, n in conn.execute("SELECT market, COUNT(*) FROM trades_sealed GROUP BY market"):
@@ -208,10 +216,11 @@ def text(st: dict) -> str:
         lines.append(f"{MARKET_FR[market].capitalize()} : rejeu {r.get('pct', 0):g} % ({r.get('days_done', 0)}/"
                      f"{r.get('days_total', 0)} jours) · {t.get('replay', 0)} trades rejoués, {t.get('live', 0)} en direct"
                      + (f" · dernier jour en direct {live}" if live else "") + _gaps_text(r, st["live"].get(market)))
+    mixes = st.get("revisions_melangees") or {}
     for version, revs in (st.get("revisions_code") or {}).items():
-        if len(revs) > 1:  # I2 : une même version calculée par plusieurs codes
+        if mixes.get(version):  # une même version, plusieurs comportements (pas seulement plusieurs sources)
             lines.append(f"⚠️ Méthode {version} calculée par {len(revs)} révisions du code : "
-                         + ", ".join(f"{rev} {n} trades" for rev, n in revs.items()))
+                         + ", ".join(f"{rev} {n} trades" for rev, n in revs.items()) + " · " + ", ".join(mixes[version]))
     for r in (st.get("recalcul_v1") or {}).values():
         if isinstance(r, dict) and r.get("etat") == "non_recalculable":
             lines.append(f"⚠️ Séance du direct {MARKET_FR.get(r.get('marche'), r.get('marche'))} du {_date_fr(r['jour'])} "
