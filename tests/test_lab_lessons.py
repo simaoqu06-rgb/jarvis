@@ -126,7 +126,7 @@ def test_effet_reel_confirme_et_sens_contraire_dementi(db):
     m = good["mesures"]
     assert good["etat"] == "confirmee" and bad["etat"] == "dementie"
     assert m["n"] > 300 and m["ecart_r"] > 0.2 and m["z"] > L.CONFIRM_Z and all(h > 0 for h in m["moities"])
-    assert m["tp1"] > m["tp1_ensemble"] and "trades depuis la leçon :" in L.proof(good)
+    assert m["tp1"] > m["tp1_ensemble"] and "trades jamais vus par la leçon (120 j de rejeu, 0 j du direct) :" in L.proof(good)
 
 
 def test_trades_d_avant_la_lecon_ne_la_confirment_pas(db):
@@ -409,6 +409,77 @@ def test_lecon_favorable_qui_perd_encore_est_relative(db, tmp_path, monkeypatch)
     assert adj["lignes"] == [f"+0.5 #{x['id']} Leçon {x['id']} (relative : moins mauvais que la moyenne, perd encore 0,15 R)"]
 
 
+def test_jours_de_rejeu_et_du_direct_et_etiquette_historique(db, tmp_path, monkeypatch):
+    """Avis de GPT du 10 octobre : « jamais vu par la leçon » n'est pas « prospectif ». La mesure compte ses jours
+    de rejeu et du direct ; sous MIN_DAYS jours du direct, une confirmée est « (historique) » dans !lecons et dans
+    le plan du direct (fichier lab_lessons.json)."""
+    x = add(db, lesson())
+    synthetic_trades(db, n_days=100, per_day=20, effect=pivot_effect)  # rejeu jamais vu par la leçon
+    synthetic_trades(db, n_days=5, per_day=20, effect=pivot_effect, first=date(2026, 10, 5), origin="live", seed=3)
+    L.measure_all(db)
+    x = L.get(db.conn, x["id"])
+    m = x["mesures"]
+    assert x["etat"] == "confirmee" and m["jours_rejeu"] == 100 and m["jours_direct"] == 5 and m["jours"] == 105
+    assert "trades jamais vus par la leçon (100 j de rejeu, 5 j du direct) :" in L.proof(x)
+    assert L.line(x).startswith("✅ (historique) 👍") and "(historique) : confirmée sur le rejeu" in L.text(db.conn)
+    L.write_live(db)
+    (item,) = json.loads(L.live_path(db.path).read_text())["lecons"]
+    assert item["jours_direct"] == 5
+    write_live(tmp_path, monkeypatch, [item])
+    assert L.current()[0]["jours_direct"] == 5
+    assert L.adjustment(L.current())["lignes"] == [f"+0.5 #{x['id']} {x['texte']} (historique)"]
+    # Assez de jours du direct : plus d'étiquette.
+    synthetic_trades(db, n_days=L.MIN_DAYS, per_day=20, effect=pivot_effect, first=date(2026, 11, 2), origin="live",
+                     seed=4)
+    L.measure_all(db)
+    x = L.get(db.conn, x["id"])
+    assert x["mesures"]["jours_direct"] == L.MIN_DAYS + 5 and L.line(x).startswith("✅ 👍")
+    assert L.adjustment([live_item(x["id"]) | {"jours_direct": L.MIN_DAYS}])["lignes"] == [f"+0.5 #{x['id']} Leçon {x['id']}"]
+
+
+def test_lecon_actions_favorable_au_labo_qui_perd_a_20_euros_est_relative(db, monkeypatch):
+    """Scénario 3 de GPT : une leçon d'actions à +0,05 R du labo qui perd à 20 € (commission IBKR) n'est pas un
+    gain pour le compte de Simão : la plus basse des deux espérances décide, le texte dit « à 20 € »."""
+    from app.lab import method as M
+
+    calls = []
+
+    def at_20(market, result, r_net):
+        calls.append(market)
+        return r_net - 0.3  # commission IBKR à 20 € de risque
+    monkeypatch.setattr(M, "compared_r", at_20)
+    a = add(db, lesson(markets=["stock"]))
+    b = add(db, lesson(texte="Cassure de pivot : même chose, deuxième leçon", quand={"or": [PIVOT, PIVOT]},
+                       markets=["stock"]))
+    synthetic_trades(db, n_days=120, per_day=20, effect=pivot_effect, base=-0.25)
+    L.measure_all(db)
+    a, b = L.get(db.conn, a["id"]), L.get(db.conn, b["id"])
+    m = a["mesures"]
+    assert m["esperance_r"] > 0 > m["esperance_20e_r"] == pytest.approx(m["esperance_r"] - 0.3, abs=1e-3)
+    assert len(calls) == m["n"]  # R à 20 € calculé une fois par trade concerné, partagé entre les deux leçons
+    lost = f"{abs(m['esperance_20e_r']):.2f}".replace(".", ",")
+    assert L.proof(a).endswith(f"relative : moins mauvais que la moyenne, perd encore {lost} R à 20 €")
+    assert f"(à 20 € : {m['esperance_20e_r']:+.2f} R)".replace(".", ",") in L.proof(a)
+    adj = L.adjustment([live_item(a["id"]) | {k: m[k] for k in L.LIVE_METRICS}])
+    assert adj["lignes"][0].endswith(f"(historique ; relative : moins mauvais que la moyenne, perd encore {lost} R à 20 €)")
+    # Crypto : pas de R à 20 € (frais OKX déjà dans le R du labo).
+    assert L.relative("favorable", 0.05, None) is None
+    assert L.relative("favorable", -0.1, -0.4) == "relative : moins mauvais que la moyenne, perd encore 0,40 R à 20 €"
+    assert L.relative("favorable", -0.2, 0.1) == "relative : moins mauvais que la moyenne, perd encore 0,20 R"
+    assert L.relative("favorable", 0.2, 0.0) == "relative : moins mauvais que la moyenne, ne gagne rien à 20 €"
+
+
+def test_lecon_a_confirmer_favorable_qui_perd_encore_est_relative(db):
+    x = add(db, lesson())
+    db.conn.execute("UPDATE lessons SET metrics = ? WHERE id = ?",
+                    (json.dumps({"n": 40, "esperance_r": -0.1, "esperance_ensemble_r": -0.3, "jours_rejeu": 12,
+                                 "jours_direct": 0, "vu_jusqu": {}}), x["id"]))
+    x = L.get(db.conn, x["id"])
+    assert x["etat"] == "a_confirmer"
+    assert L.proof(x).endswith("relative : moins mauvais que la moyenne, perd encore 0,10 R")
+    assert L.line(x).startswith("🔎 👍")  # « (historique) » ne vise que les confirmées
+
+
 async def test_sans_lecon_ou_en_erreur_plan_inchange(db, tmp_path, monkeypatch, caplog):
     p = fake_plan("AAA")
     score = json.dumps(p["score"])
@@ -460,7 +531,7 @@ async def test_commande_lecons(db):
     synthetic_trades(db, n_days=120, per_day=20, effect=pivot_effect)
     L.measure_all(db)
     text = await bot.handle("!lecons")
-    assert "1 confirmées" in text and "1 démenties" in text and "✅ 👍 **#1**" in text and "❌ 👎 **#2**" in text
+    assert "1 confirmées" in text and "1 démenties" in text and "✅ (historique) 👍 **#1**" in text and "❌ 👎 **#2**" in text
 
 
 async def test_commande_lecons_sans_base(tmp_path, monkeypatch):
