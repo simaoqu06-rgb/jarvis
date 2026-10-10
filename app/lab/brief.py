@@ -11,7 +11,7 @@ analystes ne reçoivent plus seulement des totaux : `detail` (espérance par set
 calculée par le code avec IC en grappes), `strategies` (tableau du labo v2 en bref, confirmation des GO) et
 `autopsie` (où les trades échouent, élan contre le hasard, grade indicatif des GO confirmés).
 `filtres_scanner` : ce que coûte chaque filtre du scanner de 15 h 10, mesuré sur les trades v1 d'actions (filtres.py).
-`declaration` (lot 2, C4) : la déclaration en vigueur est-elle entièrement re-mesurée (status.declaration_state) ;
+`declaration` (2e tour d'avis, C4) : la déclaration en vigueur est-elle entièrement re-mesurée (status.declaration_state) ;
 aucune hypothèse « prête à déclarer » avant « complete ».
 """
 import fcntl
@@ -209,7 +209,7 @@ def _grade(conn) -> dict | None:
 
 
 def _declaration(conn) -> dict | None:
-    """Lot 2 (C4) : la déclaration en vigueur est-elle entièrement re-mesurée, et sinon ce qui reste."""
+    """2e tour d'avis (C4) : la déclaration en vigueur est-elle entièrement re-mesurée, et sinon ce qui reste."""
     from app.lab import status as STATUS  # import tardif, comme le serveur
 
     try:

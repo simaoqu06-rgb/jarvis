@@ -95,7 +95,7 @@ async def test_passage_complet_appelle_le_labo_2(tmp_path, monkeypatch):
     db = LabDB(str(tmp_path / "t.db"))
     seen = []
 
-    async def fake(db_, now, collect=True, hold=False):  # lot 2 (C1) : hold, archive d'audit en échec
+    async def fake(db_, now, collect=True, hold=False):  # 2e tour d'avis (C1) : hold, archive d'audit en échec
         seen.append(collect)
         return {"ok": True}
 

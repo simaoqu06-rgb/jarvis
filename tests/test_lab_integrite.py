@@ -56,7 +56,8 @@ def test_migration_d_une_base_existante(tmp_path):
     assert db.conn.execute("SELECT code_rev, cout_rev, computed_at FROM trades").fetchone() == (None, None, None)
     assert db.conn.execute("SELECT code_rev, declaration FROM strat_trades").fetchone() == (None, None)
     old_id = db.conn.execute("SELECT id FROM trades").fetchone()[0]
-    assert STATS.compute(db.conn)["revisions_code"]["par_version"] == {"v1": {"inconnue": 1}}
+    # Deuxième tour d'avis du 10 octobre : « inconnue » hors des lignes qu'une rupture listée touche
+    assert STATS.compute(db.conn)["revisions_code"]["par_version"] == {"v1": {"inconnue, plans identiques sur la sonde": 1}}
     db.replace_trades("replay", "v1", "crypto", [1], [_row(r=1.5)])     # même créneau : mis à jour sur place
     row = db.conn.execute("SELECT id, r_net, code_rev, cout_rev, computed_at FROM trades").fetchone()
     assert row[:4] == (old_id, 1.5, E.code_rev("v1"), E.cost_rev()) and row[4] > 0
@@ -92,10 +93,21 @@ async def test_deux_revisions_du_code_sous_la_meme_version(tmp_path, monkeypatch
                                                                                       "2026-09-15": "B"}
     rev = STATS.compute(db.conn)["revisions_code"]
     assert rev["par_version"] == {"v1": {"A": 3, "B": 3}}
+    # Deuxième tour d'avis du 10 octobre : deux sources différentes ne prouvent pas deux comportements (une
+    # refactorisation change la révision) ; pas d'alerte tant que leurs empreintes v1 ne diffèrent pas.
+    assert rev["alertes"] == [] and "révisions du code" not in STATUS.text(STATUS.status(path))
+    db.set("empreintes_v1", "A", "4f5ef18e6e")
+    db.set("empreintes_v1", "B", "4f5ef18e6e")
+    assert STATS.compute(db.conn)["revisions_code"]["alertes"] == []
+    db.set("empreintes_v1", "B", "0123456789")           # notées par la garde du worker : comportements différents
+    rev = STATS.compute(db.conn)["revisions_code"]
     assert len(rev["alertes"]) == 1 and "plusieurs comportements sous la même version" in rev["alertes"][0]
+    assert "aux empreintes v1 différentes (A : 3 trades, empreinte 4f5ef18e6e ; B : 3 trades, empreinte 0123456789)" \
+        in rev["alertes"][0]
     st = STATUS.status(path)
     assert st["revisions_code"] == {"v1": {"A": 3, "B": 3}}
-    assert "Méthode v1 calculée par 2 révisions du code : A 3 trades, B 3 trades" in STATUS.text(st)
+    assert "Méthode v1 calculée par 2 révisions du code : A 3 trades, B 3 trades · empreintes v1 différentes" \
+        in STATUS.text(st)
 
 
 def test_une_seule_revision_sans_alerte():
@@ -201,7 +213,7 @@ def test_rattrapage_a_moitie_fait_ne_montre_que_la_declaration_en_vigueur(tmp_pa
     ro = DB.open_readonly(path)                                 # serveur web : même tableau en lecture seule
     assert SS.report(ro)["strategies"]["stock"]["pullback"]["jours"] == 2
     ro.close()
-    # Lot 2 (C3) : curseur au bout alors que des lignes d'avant restent (jour non refait) : elles restent exclues, le
+    # 2e tour d'avis (C3) : curseur au bout alors que des lignes d'avant restent (jour non refait) : elles restent exclues, le
     # tableau le dit ; avant, elles revenaient dans le tableau dès que remaining() tombait à 0.
     db.set(job, "rattrapage:replay", "2026-09-16")
     rep = SS.report(db.conn)
@@ -259,7 +271,7 @@ def test_autopsie_pendant_un_rattrapage_ne_lit_que_la_declaration_en_vigueur(tmp
     ro = DB.open_readonly(path)                                 # serveur web (/api/lab/autopsie) : lecture seule
     assert AUT.report(ro)["grade_indicatif"]["go_confirme"]["par_go"]["go"] == 2
     ro.close()
-    # Lot 2 (C3) : curseur au bout, lignes d'avant toujours là (jours non refaits) : elles restent exclues.
+    # 2e tour d'avis (C3) : curseur au bout, lignes d'avant toujours là (jours non refaits) : elles restent exclues.
     db.set(job, "rattrapage:replay", "2026-09-16")
     rep = AUT.report(db.conn)
     assert rep["partiel"]["stock"]["jours_rattrapage"] == 0 and rep["partiel"]["stock"]["lignes_exclues"] == 2

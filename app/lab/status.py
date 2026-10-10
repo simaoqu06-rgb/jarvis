@@ -7,7 +7,11 @@ confiance, fiches catalyseurs, règles en attente et testées.
 Avis du 10 octobre (I2, I4) : jours sautés (skipped:<D>, retirés des jours faits), jours calculés sans quelques
 symboles que la source n'a pas donnés (missing_symbols), valeurs de l'univers sans trade (absent), et trades par
 révision du code (trades.code_rev) pour voir quand une même version mélange plusieurs codes.
-Lot 2 (C4) : une ligne « n° 10 : complète » ou ce qui reste à re-mesurer (declaration_state), aussi dans le brief.
+2e tour d'avis (C4) : une ligne « n° 10 : complète » ou ce qui reste à re-mesurer (declaration_state), aussi dans le brief.
+
+Deuxième tour d'avis du 10 octobre : garde du Labo 1 (garde_v1, empreinte v1 calculée au démarrage du worker ; en
+pause, une alerte en tête de !labo) et recalcul ponctuel des séances du direct d'avant une rupture (recalcul_v1 ;
+une séance « non recalculable » est dite).
 """
 import json
 import sqlite3
@@ -61,10 +65,17 @@ def day_counts(p: dict) -> dict:
 
 
 def code_revisions(conn: sqlite3.Connection) -> dict:
-    """Trades (hors scellé) par version et révision du code ; « inconnue » : calculés avant le suivi."""
+    """Trades (hors scellé) par version et révision du code ; « inconnue… » : calculés avant le suivi."""
     from app.lab import stats as STATS  # import tardif, comme market_days
 
     return (STATS.code_revisions(conn) or {}).get("par_version") or {}
+
+
+def revision_mixes(conn: sqlite3.Connection, par: dict) -> dict:
+    """Versions dont les trades viennent de plusieurs comportements (stats.revision_mixes), raisons courtes."""
+    from app.lab import stats as STATS
+
+    return {version: [short for short, _ in mixes] for version, mixes in STATS.revision_mixes(conn, par).items()}
 
 
 def _days_between(market: str, start: str, end: str) -> int:
@@ -97,6 +108,7 @@ def status(path: str | None = None) -> dict:
         for market, origin, n in conn.execute("SELECT market, origin, COUNT(*) FROM trades GROUP BY market, origin"):
             out["trades"].setdefault(market, {})[origin] = n
         out["revisions_code"] = code_revisions(conn)
+        out["revisions_melangees"] = revision_mixes(conn, out["revisions_code"])
         out["scelle"] = {**SEAL.describe(), "trades": {}}
         try:  # base d'avant le scellé ouverte en lecture seule : table absente
             for market, n in conn.execute("SELECT market, COUNT(*) FROM trades_sealed GROUP BY market"):
@@ -114,6 +126,9 @@ def status(path: str | None = None) -> dict:
         out["method_version"] = out["methode"]["champion"]["version"]
         live_start = conn.execute("SELECT value FROM progress WHERE job = 'lab' AND key = 'live_start'").fetchone()
         out["live_start"] = json.loads(live_start[0]) if live_start else None
+        guard = conn.execute("SELECT value FROM progress WHERE job = 'lab' AND key = 'garde_v1'").fetchone()
+        out["garde_v1"] = json.loads(guard[0]) if guard else None
+        out["recalcul_v1"] = {k: v for k, v in _progress(conn, "recalcul").items() if not k.startswith("attempts:")}
         out["labo2"] = headline(conn)
         from app.trading import visibilite as VIS  # import tardif, comme runner
 
@@ -141,7 +156,7 @@ def labo_v2(conn: sqlite3.Connection) -> dict:
 
 
 def declaration_state(conn: sqlite3.Connection) -> dict | None:
-    """Lot 2 (C4) : la déclaration en vigueur est-elle entièrement mesurée ? Jours à rattraper (tableau des stratégies,
+    """2e tour d'avis (C4) : la déclaration en vigueur est-elle entièrement mesurée ? Jours à rattraper (tableau des stratégies,
     strat_stats.partial : marché partiel tant qu'il reste des jours du rejeu ou des lignes d'avant), lignes d'avant
     encore exclues, séances de la n° 9 et de Killmode complet à recalculer. « complete » : tout est à zéro, condition
     écrite pour déclarer la suivante (docs/labo-strategies.md, « Avant la n° 11 »). None si la base n'est pas lisible."""
@@ -234,6 +249,11 @@ def text(st: dict) -> str:
     if not st["exists"]:
         return "🧪 **Labo** : pas encore démarré (aucune base). `docker compose up -d` lance le service jarvis-lab."
     lines = [f"🧪 **Labo de performance** · méthode {st.get('method_version') or 'n/d'} · base {st['db_size_mb']:g} Mo"]
+    from app.lab import empreinte as E  # import tardif, comme stats
+
+    pause = E.guard_text(st.get("garde_v1"))
+    if pause:  # garde du Labo 1 : rien de ce qui suit n'avance côté v1
+        lines.append(f"{pause} : rejeu et direct arrêtés, aucune ligne v1 écrite ; Labo 2, rattrapage et grade continuent")
     for market in ("stock", "crypto"):
         r = st["replay"].get(market) or {}
         t = st["trades"].get(market) or {}
@@ -241,10 +261,15 @@ def text(st: dict) -> str:
         lines.append(f"{MARKET_FR[market].capitalize()} : rejeu {r.get('pct', 0):g} % ({r.get('days_done', 0)}/"
                      f"{r.get('days_total', 0)} jours) · {t.get('replay', 0)} trades rejoués, {t.get('live', 0)} en direct"
                      + (f" · dernier jour en direct {live}" if live else "") + _gaps_text(r, st["live"].get(market)))
+    mixes = st.get("revisions_melangees") or {}
     for version, revs in (st.get("revisions_code") or {}).items():
-        if len(revs) > 1:  # I2 : une même version calculée par plusieurs codes
+        if mixes.get(version):  # une même version, plusieurs comportements (pas seulement plusieurs sources)
             lines.append(f"⚠️ Méthode {version} calculée par {len(revs)} révisions du code : "
-                         + ", ".join(f"{rev} {n} trades" for rev, n in revs.items()))
+                         + ", ".join(f"{rev} {n} trades" for rev, n in revs.items()) + " · " + ", ".join(mixes[version]))
+    for r in (st.get("recalcul_v1") or {}).values():
+        if isinstance(r, dict) and r.get("etat") == "non_recalculable":
+            lines.append(f"⚠️ Séance du direct {MARKET_FR.get(r.get('marche'), r.get('marche'))} du {_date_fr(r['jour'])} "
+                         f"non recalculable ({r.get('raison')}) : ses trades restent ceux d'avant {r.get('avant')}")
     l2 = st.get("labo2") or {}
     stt = l2.get("stats")
     if stt and stt.get("esperance_r") is not None:
@@ -264,7 +289,7 @@ def text(st: dict) -> str:
         lines.append(f"Labo v2 : {sum((v2.get('lignes') or {}).values())} lignes de stratégies (`!strategies`)"
                      + (f" · rattrapage : {left.get('stock', 0)} jours actions, {left.get('crypto', 0)} jours crypto"
                         if any(left.values()) else ""))
-    if st.get("n10"):  # lot 2 (C4)
+    if st.get("n10"):  # 2e tour d'avis (C4)
         lines.append(declaration_line(st["n10"]))
     if st.get("archive_actus"):
         from app.lab import archive as ARC

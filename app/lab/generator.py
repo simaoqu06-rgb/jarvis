@@ -5,8 +5,11 @@ en plus la bougie « en cours » faite des bougies de 5 min déjà closes, comme
 
 - Actions : un plan long par valeur de l'univers et par séance, à 9 h 10 (New York), sur des
   bougies de 15 min (SETTINGS["stock"]) de la séance régulière ; avant l'ouverture la dernière
-  bougie connue est celle de 15 h 45 la veille, que le plan tient pour en cours, exactement comme
-  en direct. Entrée : celle du plan (dernier cours connu), pas de prix de pré-ouverture.
+  bougie connue est celle de 15 h 45 la veille, close : comme en direct hors séance, le plan
+  (service.with_open_bar) ajoute après elle une bougie en cours plate (sa clôture, volume nul) et
+  garde la bougie de 15 h 45 dans ses niveaux, son ATR et ses signaux. Avant b595c12 (07/10/2026),
+  le plan tenait la bougie de 15 h 45 pour en cours : rupture listée dans empreinte.V1_RUPTURES.
+  Entrée : celle du plan (dernier cours connu), pas de prix de pré-ouverture.
 - Crypto : un plan long par paire de l'univers toutes les 4 h (0 h, 4 h… 20 h UTC), bougies d'1 h
   (SETTINGS["crypto"]) : les 720 dernières, comme Kraken.
 - Catalyseur non rejoué (pas d'historique des actus avant le Labo 2) : cat=None, la note se calcule

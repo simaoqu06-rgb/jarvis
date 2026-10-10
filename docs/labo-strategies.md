@@ -448,7 +448,7 @@ réalité, d'où le journal des appels en direct pour juger le mode complet.
     ordres du jour), vente du reste au marché à la dernière minute de la séance après avoir annulé TP et SL ;
   - toujours non modélisés : exécutions partielles et carnet au-delà du meilleur ask, état limite LULD avant
     une pause (les transactions à la bande sont lues, la pause est comptée comme trou), fixing de clôture.
-- Méthode du solde n° 5 (10 octobre, lot 2, vérification de la n° 10) : seul le côté labo de la comparaison change.
+- Méthode du solde n° 5 (10 octobre, 2e tour d'avis, vérification de la n° 10) : seul le côté labo de la comparaison change.
   `r_ibkr` rejoue l'appel en révision du simulateur des lignes du labo (`strategies.SIM_REV`, 2 depuis la n° 10) et
   non plus en révision 1 : la comparaison du journal au labo opposait une révision 1 à des lignes en révision 2. Le
   solde de Simão (minutes, transactions, résolution « prudente ») ne change pas. Tout le journal est re-soldé
@@ -936,11 +936,11 @@ objectif.
   3,56 au lieu de 3,43 sur ~527 jours, à 152 essais). Le se par jour et le facteur d'inflation sont affichés à côté. En actions,
   la même lecture en semaines est affichée, sans effet sur le verdict.
 - **Écart à l'ancien témoin (heure + achats d'avant l'exécution)** (témoin de la même heure − témoin de la journée ;
-  « effet de l'heure » jusqu'au lot 2, mal nommé) et **dispersion entre tirages** (écart-type des moyennes par
+  « effet de l'heure » jusqu'au deuxième tour d'avis, mal nommé) et **dispersion entre tirages** (écart-type des moyennes par
   tirage) : affichés, sans effet. Sous H0 (aucun effet d'heure), le premier lit déjà −0,04 à −0,15 R selon la
   stratégie (+0,06 R pour v1 et son ordre limité) : le témoin de la journée achète aussi avant l'exécution, en
   « sachant » que le prix atteindra le déclencheur. Ce n'est donc pas l'effet de l'heure seul.
-- **✅ réservé aux candidates absolues** (lot 2) : un bras meilleur qu'un autre (la confirmation des GO, un filtre
+- **✅ réservé aux candidates absolues** (2e tour d'avis) : un bras meilleur qu'un autre (la confirmation des GO, un filtre
   FRSH, une sortie de Gemini, le catalyseur de Killmode complet) dit « ↗ aide (relatif) », et ajoute « perd encore
   X R à 20 € » quand le bras amélioré ne gagne pas à 20 € (« ≈ » pour les sorties de Gemini : espérance à 20 € de la
   stratégie plus l'écart moyen de la sortie). Avant, « ✅ la confirmation aide » se lisait comme une stratégie
@@ -965,7 +965,7 @@ biais du simulateur (simulé − vrai, le vrai rejoué transaction par transacti
 +0,001 R sur huit graines (tolérance 0,02 R, ~2,5 erreurs-types), révision 1 entre +0,025 et +0,079 R en faveur de
 l'ordre stop. **Biais résiduel connu** : avec un stop serré, un plus bas sous le stop dans la bougie d'exécution
 compte −1 R alors qu'il a pu venir avant l'exécution. Contre l'ordre stop : −0,06 R à 1 σ d'une bougie, −0,10 R à
-0,75 σ, −0,28 R à 0,5 σ (lot 2, même montage que le test, 3 000 chemins ; −0,04 à −0,06 R n'était vrai qu'à 1 σ). Il
+0,75 σ, −0,28 R à 0,5 σ (2e tour d'avis, même montage que le test, 3 000 chemins ; −0,04 à −0,06 R n'était vrai qu'à 1 σ). Il
 peut cacher un avantage à stop serré, pas en inventer un. Le simulateur seul ne voit pas une anticipation dans un
 signal (`rebond_confirme`, voir Limites) : le R vrai en profite aussi.
 
@@ -988,7 +988,7 @@ recalculées (marque `plus10.MESURE`, le tableau ne lit que les recalculées), e
 direct en actions attendent leur journalier (relu au passage de la séance suivante), puis le rattrapage, qui traite
 d'abord l'arriéré du rejeu. Jusqu'à la fin du rattrapage, le tableau, l'autopsie et le grade indicatif des GO
 confirmés ne lisent que les lignes de la n° 10, avec la mention « Tableau partiel : N jours en rattrapage » (et
-« rattrapage … en cours » dans `!autopsie` et `!grade`) : les lignes d'avant sont exclues, jamais mélangées. Lot 2 :
+« rattrapage … en cours » dans `!autopsie` et `!grade`) : les lignes d'avant sont exclues, jamais mélangées. Deuxième tour d'avis :
 elles restent exclues (et comptées) tant qu'il en reste, même sans jour à refaire (une ligne d'un jour dont le
 journalier manque revenait dans le tableau à la fin du rattrapage) ; un jour du direct qui attend seulement son
 journalier ne rend pas le tableau partiel. Chaque ligne garde aussi l'empreinte du modèle de coût (`cout_rev` :
@@ -1031,12 +1031,12 @@ plusieurs.
 - `r_ouverture` se lit par gap d'ouverture : le prix d'ouverture n'est pas gardé dans la ligne de v1.
 - Le journalier brut pour toute la base (tranches de prix et minimum de 5 $ des mesures de la n° 9) n'est pas fait ici.
 - La comparaison du journal de Killmode au labo (`r_ibkr`, `killmode.settle`) rejouait en révision 1 : alignée au
-  lot 2 (méthode du solde n° 5).
+  2e tour d'avis (méthode du solde n° 5).
 
-### Archive et audit apparié (lot 2)
+### Archive et audit apparié (2e tour d'avis)
 
 Le rattrapage efface les lignes d'avant en les réécrivant : sans copie, l'« Effet attendu » ci-dessus ne pouvait se
-contrôler que sur des tableaux agrégés, sur des fenêtres de jours différentes. Depuis le lot 2 (`app/lab/audit.py`) :
+contrôler que sur des tableaux agrégés, sur des fenêtres de jours différentes. Depuis le 2e tour d'avis (`app/lab/audit.py`) :
 
 - **Archive** : en tête de chaque passage du worker (avant le grade, le Labo 2, le rejeu et le rattrapage) et de
   chaque rattrapage, les lignes qu'une nouvelle déclaration va réécrire sont copiées une fois, toutes colonnes, dans

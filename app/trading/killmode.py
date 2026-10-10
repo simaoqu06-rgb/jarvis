@@ -142,7 +142,7 @@ PAUSE_MIN = 300        # bougies qui commencent à 5 min ou plus l'une de l'autr
 # l'atteint, sinon posé (les deux joués si une seule des deux cotations l'atteint) ; après une suspension prouvée
 # (bougies à 5 min l'une de l'autre et transaction de réouverture), les cotations de la pause ne servent plus au
 # prix ; pas de bougie dans les 2 dernières minutes = incomplet.
-# 5 (10 octobre, lot 2) : `r_ibkr`, le côté labo de la comparaison au labo, rejoué en révision du simulateur du labo
+# 5 (10 octobre, 2e tour d'avis) : `r_ibkr`, le côté labo de la comparaison au labo, rejoué en révision du simulateur du labo
 # (strategies.SIM_REV, déclaration n° 10) et non plus en révision 1 ; le solde de Simão lui-même ne change pas.
 SETTLE_METHOD = 5
 STEP = 60              # bougies du solde : 1 min
@@ -1476,7 +1476,7 @@ def call_gap(book: list[dict], scan_only: bool = False, key: str = "r_20e") -> d
 def lab_item() -> dict | None:
     """La stratégie `killmode` au labo v2 : None si la base n'est pas lisible, {} si rien n'est encore rejoué.
     La mesure sur les jours que la règle n'avait pas vus quand elle a été choisie (jours_suivants) fait foi dès
-    que le labo la donne. Lot 2 (C5) : `tableau_partiel` quand le tableau des actions est partiel (rattrapage d'une
+    que le labo la donne. 2e tour d'avis (C5) : `tableau_partiel` quand le tableau des actions est partiel (rattrapage d'une
     déclaration en cours, strat_stats.partial)."""
     from app.lab import db as lab_db
 

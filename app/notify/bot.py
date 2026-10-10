@@ -297,7 +297,7 @@ def strategies_text() -> str:
     if conn is None:
         return "🧪 Base du labo absente : le service jarvis-lab n'a pas encore démarré."
     try:
-        audit = lab_audit.text(lab_audit.cached(conn))  # lot 2 (C2) : pour audit, jamais pour décider
+        audit = lab_audit.text(lab_audit.cached(conn))  # 2e tour d'avis (C2) : pour audit, jamais pour décider
         return lab_strategies.text(lab_strategies.cached(conn)) + (f"\n\n{audit}" if audit else "")
     finally:
         conn.close()

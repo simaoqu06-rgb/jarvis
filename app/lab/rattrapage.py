@@ -23,7 +23,7 @@ n° 10 : les actions se mesurent aux prix négociés (bougies de 5 min non ajust
 divergent (opération sur titre entre la veille et la séance) est écartée. En crypto, sans frontière posée (rejeu déjà
 fini quand la déclaration change), le rattrapage va jusqu'au dernier jour traité.
 
-Lot 2 (C1) : chaque passage commence par l'archive d'audit (audit.step) ; les lignes d'une autre déclaration sont
+2e tour d'avis (C1) : chaque passage commence par l'archive d'audit (audit.step) ; les lignes d'une autre déclaration sont
 copiées dans data/archives/ avant que replace_strat ne les efface. Si elle échoue, l'erreur remonte et rien n'est
 réécrit.
 """
@@ -236,7 +236,7 @@ async def step(db: LabDB, market: str, max_seconds: float, transport=None) -> in
     avance. Sans cela, un seul jour bloquait le rattrapage du marché, et le direct derrière lui, à chaque passage."""
     from app.lab.runner import MAX_DAY_ATTEMPTS  # import tardif : runner importe generator
 
-    AUD.step(db)  # lot 2 (C1) : archive d'audit d'abord (déjà faite : une lecture de progress) ; une erreur remonte
+    AUD.step(db)  # 2e tour d'avis (C1) : archive d'audit d'abord (déjà faite : une lecture de progress) ; une erreur remonte
     started, done = time.monotonic(), 0
     job = ST.progress_job(market)
     for origin in ORIGINS:

@@ -250,7 +250,7 @@ def ready_days(db: LabDB, limit: int = 30) -> list[date]:
 
 
 def a_recalculer(conn: sqlite3.Connection) -> int:
-    """Lot 2 (C4), lecture seule : séances déjà calculées sous une autre mesure que MESURE (hors bloc scellé), encore à
+    """2e tour d'avis (C4), lecture seule : séances déjà calculées sous une autre mesure que MESURE (hors bloc scellé), encore à
     recalculer, sur le modèle de « a_recalculer » de Killmode complet ; le tableau ne les lit pas en attendant. Les
     séances jamais calculées n'en sont pas (avancement ordinaire de la n° 9)."""
     try:
@@ -364,7 +364,7 @@ async def step(db: LabDB, now: datetime, max_seconds: float, transport=None) -> 
                 db.set(JOB, day.isoformat(), {"absente": True})
             continue
         rows, stats = got
-        cost = E.strat_cost_rev("stock")  # lot 2 (C6) : modèle de coût de r_20e et r_3c
+        cost = E.strat_cost_rev("stock")  # 2e tour d'avis (C6) : modèle de coût de r_20e et r_3c
         with db.transaction():
             db.conn.execute("DELETE FROM plus10_trades WHERE day = ?", (day.isoformat(),))
             db.conn.executemany(f"INSERT INTO plus10_trades ({', '.join(COLUMNS)}, cout_rev) VALUES "
@@ -553,7 +553,7 @@ def report(conn: sqlite3.Connection, trials: int, scans: Path | None = None) -> 
     keys = sorted(days)
     return {
         "numero": NUMERO, "seances": len(days), "du": keys[0], "au": keys[-1], "essais": essais,
-        "a_recalculer": a_recalculer(conn),  # lot 2 (C4) : séances d'une autre mesure, hors du tableau en attendant
+        "a_recalculer": a_recalculer(conn),  # 2e tour d'avis (C4) : séances d'une autre mesure, hors du tableau en attendant
         "amplitude": {k: _pct(v) for k, v in groups.items()},
         "amplitude_par_prix": {k: {t: _pct(c) for t, c in v.items()} for k, v in by_price.items()},
         "reste_apres_decision": {k: _pct(v) for k, v in sorted(reste.items())},
@@ -576,7 +576,7 @@ def text(rep: dict | None) -> str | None:
     """Lignes de !strategies."""
     if not rep:
         return None
-    stale = rep.get("a_recalculer") or 0  # lot 2 (C4)
+    stale = rep.get("a_recalculer") or 0  # 2e tour d'avis (C4)
     lines = [f"🎯 Potentiel +10 (n° {rep['numero']}, {rep['seances']} séances {rep['du']} → {rep['au']}"
              + (f", {stale} séance{'s' if stale > 1 else ''} encore à recalculer (mesure n° {MESURE})" if stale else "")
              + ") :"]

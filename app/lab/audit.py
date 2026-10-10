@@ -1,4 +1,4 @@
-"""Archive d'audit des mesures remplacées par une nouvelle déclaration, et audit apparié ancien → nouveau (lot 2,
+"""Archive d'audit des mesures remplacées par une nouvelle déclaration, et audit apparié ancien → nouveau (2e tour d'avis,
 deuxième tour d'avis de GPT et Gemini, 10 octobre 2026 : scénario 4 de GPT, « garder l'ancien résultat comme
 référence d'audit »).
 

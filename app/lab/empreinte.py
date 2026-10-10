@@ -15,11 +15,18 @@ cache de statistiques ne voit pas qu'un trade a été réécrit sur place ou que
   entiers de service.py ; lu une fois à l'import, sans rien importer, écrit dans chaque ligne. Un changement de
   source change la révision même sans changer le comportement : c'est un indice, la preuve est l'empreinte v1.
 - cost_rev() : empreinte du modèle de coût v1 (simulator.costs sur des prix et rangs types), trades.cout_rev ;
-  strat_cost_rev(marché) : celle des lignes du labo v2 (lot 2, C6), strat_trades.cout_rev.
+  strat_cost_rev(marché) : celle des lignes du labo v2 (2e tour d'avis, C6), strat_trades.cout_rev.
 - STATS_CODE : hachage des sources des modules qui calculent les caches (app/lab, killmode), ajouté à leurs
   signatures : un déploiement les recalcule une fois, tout de suite (code_changed), sans attendre leur âge maximal.
 - revision(conn, table) : compteurs rev:trades et rev:strat (progress « lab »), incrémentés dans la transaction
   de chaque écriture (LabDB.bump) : un trade réécrit sur place (même COUNT, même MAX(id)) invalide les caches.
+
+Deuxième tour d'avis du 10 octobre 2026 (homogénéité des données du Labo 1) :
+- v1_guard() : la même empreinte calculée par le worker à son démarrage (garde à l'exécution : il n'y a pas de CI,
+  V1_FINGERPRINT n'était vérifiée que si quelqu'un lançait pytest avant de déployer). Écart ou calcul en échec : le
+  Labo 1 n'écrit plus rien (worker.guard_v1), guard_text dit pourquoi dans !labo et /api/lab/status.
+- V1_RUPTURES : ruptures de comportement v1 passées et non réparées sur place, avec les lignes qu'elles touchent
+  (stats.code_revisions les compte à part) ; V1_RECALCULS : séances du direct recalculées une fois (worker.recalcul_v1).
 """
 import ast
 import hashlib
@@ -128,7 +135,7 @@ def cost_rev() -> str:
 
 
 def strat_cost_rev(market: str) -> str:
-    """Lot 2 (C6) : empreinte du modèle de coût des lignes du labo v2 (strat_trades.cout_rev, plus10_trades.cout_rev).
+    """2e tour d'avis (C6) : empreinte du modèle de coût des lignes du labo v2 (strat_trades.cout_rev, plus10_trades.cout_rev).
     Actions : kill_complet.cost_fingerprint (base des prix, révision du simulateur, r_20e et r_3c de trades types :
     killmode.real_r, stressed_r et le barème IBKR, absents de STRAT_CODE). Crypto (ni r_20e ni r_3c) : révision du
     simulateur et frais OKX du simulateur par rang."""
@@ -296,3 +303,50 @@ def v1_fingerprint() -> str:
     finally:
         db.close()
     return _sha(_norm(out))
+
+
+# --- Garde à l'exécution et ruptures passées --------------------------------------------------------
+
+def v1_guard() -> dict:
+    """Empreinte du comportement v1 du code qui tourne, contre V1_FINGERPRINT (≈ 1 s) : etat « ok », « change »
+    (comportement différent) ou « erreur » (calcul impossible : comportement non vérifié)."""
+    try:
+        fp = v1_fingerprint()
+    except Exception as exc:  # garde : toute erreur est un comportement non vérifié, jamais un plantage du worker
+        return {"etat": "erreur", "attendue": V1_FINGERPRINT, "calculee": None,
+                "erreur": f"{type(exc).__name__}: {exc}"[:300]}
+    return {"etat": "ok" if fp == V1_FINGERPRINT else "change", "attendue": V1_FINGERPRINT, "calculee": fp,
+            "erreur": None}
+
+
+def guard_text(state: dict | None) -> str | None:
+    """Ligne d'alerte de la garde (None : le Labo 1 écrit)."""
+    if not state or state.get("etat") == "ok":
+        return None
+    if state.get("etat") == "change":
+        return (f"⚠️ Labo 1 en pause : le comportement v1 a changé (empreinte {state.get('calculee')} au lieu de "
+                f"{state.get('attendue')})")
+    return f"⚠️ Labo 1 en pause : empreinte v1 incalculable ({state.get('erreur')}), comportement non vérifié"
+
+
+# Ruptures du comportement v1 non réparées sur place. Une sonde (deuxième tour d'avis du 10 octobre 2026, P1b) a passé
+# des bougies synthétiques (14 actions × 8 séances, 4 paires × 3 jours × 6 créneaux) par generator.stock_trade et
+# crypto_trade de chacun des 19 états de main qui touchent V1_CODE (0bb69ec → fb0b6b7) ; une seule rupture reste :
+# - b595c12 (PR #16, 07/10/2026 à 02:21 UTC, service.with_open_bar) : à 9 h 10, la bougie de 15 h 45 de la veille n'est
+#   plus tenue pour en cours. Actions seulement : stop et objectifs de presque tous les plans (risque −0,55 % en
+#   médiane, entrée inchangée), GO/NO GO d'environ 11 %, R net changé de plus de 0,1 R pour 10 trades déclenchés sur
+#   99 ; aucune crypto. Le code en service le 07/10 à 14 h 45 l'avait déjà (il publiait un grade, et grade.py est
+#   arrivé après b595c12) : au plus les 53 premières séances du rejeu, du 01/10/2024 au 13/12/2024 (borne sûre : les
+#   journaux du worker de ce jour-là ont disparu avec son conteneur), et la séance du direct du 06/10/2026, due à
+#   20 h 30 UTC, avant b595c12. Cette séance est recalculée une fois (worker.recalcul_v1) ; le rejeu ne l'est pas
+#   (il faudrait relire 120 séances de bougies de 5 min par jour rejoué), et le grade ne le voit jamais (fenêtre de
+#   60 jours, rejeu visible arrêté au début du bloc scellé).
+# - Le demi-pas de la n° 8 (PR #43) changeait le coût : réparé sur place par cout.py, il n'est pas listé.
+# « avant » : révision d'avant la rupture ; « rejeu_jusqu_au » : dernier jour de rejeu qu'elle peut toucher ;
+# « direct » : séances du direct calculées avant elle.
+V1_RUPTURES = (
+    {"marche": "stock", "avant": "b595c12", "rejeu_jusqu_au": "2024-12-13", "direct": ("2026-10-06",)},
+)
+# Séances du direct à recalculer une fois avec le code actuel : (marché, révision d'avant, jour). Vidé par
+# tests/conftest.py : les tests prennent souvent le 06/10/2026 pour un direct synthétique.
+V1_RECALCULS = tuple((r["marche"], r["avant"], d) for r in V1_RUPTURES for d in r["direct"])

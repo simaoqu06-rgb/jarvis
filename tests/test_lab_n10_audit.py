@@ -1,4 +1,4 @@
-"""Lot 2, chantier C (deuxième tour d'avis de GPT et Gemini, 10 octobre 2026) : la n° 10 traçable et honnête.
+"""Deuxième tour d'avis de GPT et Gemini (10 octobre 2026), partie C : la n° 10 traçable et honnête.
 Archive d'audit avant réécriture (C1), audit apparié ancien → nouveau (C2), tableau partiel structurel (C3),
 indicateur « n° 10 complète » (C4), coût tracé (C6)."""
 import json
@@ -368,7 +368,7 @@ async def test_lab2_en_attente_saute_killmode_complet_et_n9(tmp_path, monkeypatc
 
 def test_copie_manuelle_respectee(tmp_path):
     """La commande de DEPLOY.md (CREATE TABLE … AS SELECT *, sans archive_info ni index, faite avant le déploiement
-    du lot 2, donc sans la colonne cout_rev) : tables gardées, rien d'effacé ni de modifié, seules les absentes
+    du 2e tour d'avis, donc sans la colonne cout_rev) : tables gardées, rien d'effacé ni de modifié, seules les absentes
     ajoutées."""
     db = _base(tmp_path)
     path = _archive(db)

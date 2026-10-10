@@ -736,7 +736,7 @@ def lab_strategies_get():
 
 @app.get("/api/lab/strategies/audit", dependencies=[Depends(lab_key)])
 def lab_strategies_audit_get():
-    """Lot 2 (C2) : audit de la déclaration en vigueur, lignes archivées avant réécriture (data/archives/) appariées aux
+    """2e tour d'avis (C2) : audit de la déclaration en vigueur, lignes archivées avant réécriture (data/archives/) appariées aux
     lignes refaites, nouveau − ancien par stratégie, IC en grappes. Pour audit, jamais pour décider. Cache du worker,
     sinon calcul direct ; 404 sans archive."""
     conn = _lab_conn()

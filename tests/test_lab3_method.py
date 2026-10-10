@@ -546,7 +546,7 @@ def test_promotion_qui_perd_encore_le_dit():
                     "Regard 1 sur 3.")
 
 
-# --- Lot 2 (chantier A) : seuil du challenger, promotion sans réponse, étiquettes absolues ----------
+# --- 2e tour d'avis (chantier A) : seuil du challenger, promotion sans réponse, étiquettes absolues ----------
 
 def test_premier_regard_en_student_a_g_moins_1_degres():
     """A1 : le z en grappes du challenger n'a que 20 grappes (jours) au premier regard : seuil de Student à 19

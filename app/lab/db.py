@@ -189,7 +189,7 @@ STRAT_MIGRATIONS = STRAT_N10 + (("r_emperor", "REAL"), ("r_emperor_alerte", "REA
                     ("confirmation", "TEXT"), ("r_3c", "REAL"), ("r_20e", "REAL"))
 # I2 : traçabilité des lignes, écrite par replace_trades / replace_strat (et cout.step pour cout_rev).
 TRADE_TRACE = (("code_rev", "TEXT"), ("cout_rev", "TEXT"), ("computed_at", "INTEGER"))
-# Lot 2 (C6) : cout_rev des lignes du labo v2 (empreinte.strat_cost_rev) ; r_20e et r_3c, qui décident du ✅, dépendent
+# 2e tour d'avis (C6) : cout_rev des lignes du labo v2 (empreinte.strat_cost_rev) ; r_20e et r_3c, qui décident du ✅, dépendent
 # de killmode.real_r et du barème IBKR, hors de code_rev (STRAT_CODE).
 STRAT_TRACE = (("code_rev", "TEXT"), ("declaration", "INTEGER"), ("computed_at", "INTEGER"), ("cout_rev", "TEXT"))
 MIGRATIONS = {
@@ -198,7 +198,7 @@ MIGRATIONS = {
     "lessons": (("base_trade_id", "INTEGER"), ("seen_until", "TEXT")),
     "method_versions": (("base", "TEXT"), ("rules", "TEXT"), ("role", "TEXT"), ("started_ts", "INTEGER"),
                         ("decided_at", "TEXT"), ("note", "TEXT")),
-    "plus10_trades": STRAT_N10 + (("cout_rev", "TEXT"),),  # n° 10 (plus10.TRADE_KEYS) ; lot 2 (C6) : modèle de coût
+    "plus10_trades": STRAT_N10 + (("cout_rev", "TEXT"),),  # n° 10 (plus10.TRADE_KEYS) ; 2e tour d'avis (C6) : modèle de coût
     # Labo v2, déclarations n° 2 et 3 : sorties EmperorBTC ; n° 6 : sorties de Gemini, VWAP à la décision et
     # mesure de Killmode (ATR, volume des 15 premières minutes, stop touché avant l'entrée) ; n° 7 : statut de la
     # confirmation du GO (confirme, annule, expire).

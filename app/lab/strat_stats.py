@@ -71,10 +71,10 @@ Déclaration n° 10 (mesures corrigées, aucun essai de plus) :
   semaines dans candidate_t), le se naïf par jour publié à côté avec le facteur d'inflation. Actions : la même
   lecture en grappes par semaine, affichée (« semaines »), sans effet sur le verdict.
 - Témoin des actions à la même heure ; écart à l'ancien témoin (témoin de la même heure − témoin de la journée :
-  l'heure, plus les achats d'avant l'exécution du témoin de la journée ; « effet de l'heure » jusqu'au lot 2) et
+  l'heure, plus les achats d'avant l'exécution du témoin de la journée ; « effet de l'heure » jusqu'au deuxième tour d'avis) et
   dispersion entre tirages (écart-type des moyennes par tirage) : descriptifs.
 - se de l'espérance exposé (Mean.result, se_ibkr de _item) pour l'écart labo/direct de Killmode.
-- Lot 2 (C7) : ✅ réservé à une candidate absolue (candidate_compte) ; un bras meilleur qu'un autre (confirmation,
+- 2e tour d'avis (C7) : ✅ réservé à une candidate absolue (candidate_compte) ; un bras meilleur qu'un autre (confirmation,
   filtre, sorties de Gemini, catalyseur) dit « ↗ aide (relatif) », et ce que le bras amélioré perd encore à 20 €
   quand il ne gagne pas ; lignes déclenchées sans témoin comptées (sans_temoin : hors de l'écart, dans l'espérance) ;
   note fixe sous rebond_confirme (NOTES).
@@ -315,7 +315,7 @@ def _feed(a: dict, r: dict) -> None:
     if r["ecart_temoin"] is not None:
         a["temoin"].add(day, r["temoin"])
         a["ecart"].add(day, r["ecart_temoin"])
-    else:  # lot 2 (C7) : go_brut ouvert au-dessus du TP1 (NO_WITNESS) : hors de l'écart, dans l'espérance
+    else:  # 2e tour d'avis (C7) : go_brut ouvert au-dessus du TP1 (NO_WITNESS) : hors de l'écart, dans l'espérance
         a["sans_temoin"] += 1
     if r.get("journee") is not None:  # n° 10, actions : témoin de la journée (d'avant), et l'effet de l'heure
         x = values[r["refc"]]
@@ -712,7 +712,7 @@ def partial(conn: sqlite3.Connection) -> dict:
     """I2 : marchés en rattrapage d'une nouvelle déclaration, jours restants et lignes d'une autre déclaration (ou
     d'avant le suivi, NULL) : tant qu'il en reste, elles sortent du tableau.
 
-    Lot 2 (C3) : l'exclusion ne dépend plus des jours restants. Avant, d'anciennes lignes au-delà du dernier journalier
+    2e tour d'avis (C3) : l'exclusion ne dépend plus des jours restants. Avant, d'anciennes lignes au-delà du dernier journalier
     (ou d'un jour que le rattrapage n'a pas pu refaire) revenaient dans le tableau dès que remaining() tombait à 0.
     Un marché est « partiel » s'il reste des jours du REJEU à rattraper, ou d'anciennes lignes une fois la déclaration
     en route (curseurs du rattrapage posés, ou lignes de la déclaration déjà écrites, ou jours encore dus). Un jour du
@@ -824,7 +824,7 @@ def entree_v1_appariee(conn: sqlite3.Connection) -> dict | None:
 
 
 def revisions(conn: sqlite3.Connection) -> dict:
-    """Lot 2 (C6), descriptif : lignes lues par le tableau, par marché, selon la révision du code (code_rev) et celle du
+    """2e tour d'avis (C6), descriptif : lignes lues par le tableau, par marché, selon la révision du code (code_rev) et celle du
     modèle de coût (cout_rev) qui les ont produites ; « inconnue » : écrites avant la colonne. Plusieurs révisions ne
     disent pas que les chiffres ont changé, seulement qu'il faut le vérifier (un rattrapage dure plusieurs jours, les
     déploiements sont fréquents)."""
@@ -866,7 +866,7 @@ def report(conn: sqlite3.Connection) -> dict:
             out["potentiel_plus10"] = P10.report(conn, trials)
             out["diagnostic_v1"] = diagnostic_v1(conn)
             out["entree_v1"] = entree_v1_appariee(conn)  # n° 10 (L4)
-            out["revisions"] = revisions(conn)  # lot 2 (C6), descriptif
+            out["revisions"] = revisions(conn)  # 2e tour d'avis (C6), descriptif
     except sqlite3.Error as exc:
         out["erreur"] = f"base pas encore prête : {exc}"
     return out
@@ -901,7 +901,7 @@ def cached(conn: sqlite3.Connection) -> dict | None:
 # --- Discord ---------------------------------------------------------------------------------
 
 MARKET_FR = {"stock": "Actions", "crypto": "Crypto"}
-# Lot 2 (C7) : limites connues d'une stratégie, sous sa ligne (verif2/g_temoin.md : sous H0 en volatilité en U,
+# 2e tour d'avis (C7) : limites connues d'une stratégie, sous sa ligne (verif2/g_temoin.md : sous H0 en volatilité en U,
 # rebond_confirme bat son témoin de +0,013 R [+0,004 ; +0,023] ; le signal reste tel quel dans la n° 10).
 NOTES = {"rebond_confirme": "anticipation connue ≈ +0,01 R sous H0 (bougie ambiguë), corrigée en n° 11"}
 
@@ -942,7 +942,7 @@ def _kill_text(kill: dict) -> str:
 
 def _n10_text(it: dict) -> str:
     """n° 10, descriptifs : écart à l'ancien témoin (clé effet_heure), dispersion entre tirages, lecture en semaines.
-    Lot 2 (C7) : « effet de l'heure » était mal nommé ; sous H0 il lit −0,04 à −0,15 R selon la stratégie, le témoin de
+    2e tour d'avis (C7) : « effet de l'heure » était mal nommé ; sous H0 il lit −0,04 à −0,15 R selon la stratégie, le témoin de
     la journée achetant aussi avant l'exécution, en « sachant » que le prix atteindra le déclencheur."""
     wit, parts = it.get("temoin") or {}, []
     heure = wit.get("effet_heure") or {}
@@ -972,7 +972,7 @@ def _entree_text(e: dict) -> str:
 
 
 def _revisions_text(market: str, revs: dict) -> str | None:
-    """Lot 2 (C6) : « N révisions du code / du coût » d'un marché, seulement quand il y en a plus d'une."""
+    """2e tour d'avis (C6) : « N révisions du code / du coût » d'un marché, seulement quand il y en a plus d'une."""
     code, cost = revs.get("code") or {}, revs.get("cout") or {}
     if len(code) < 2 and len(cost) < 2:
         return None
@@ -986,14 +986,14 @@ def _revisions_text(market: str, revs: dict) -> str | None:
 
 
 def _lost(arm_20e: float | None, approx: bool = False) -> str:
-    """Lot 2 (C7) : « perd encore X R à 20 € » d'un bras qui ne gagne pas à 20 € (`approx` : estimé, « ≈ »)."""
+    """2e tour d'avis (C7) : « perd encore X R à 20 € » d'un bras qui ne gagne pas à 20 € (`approx` : estimé, « ≈ »)."""
     if arm_20e is None or arm_20e > 0:
         return ""
     return f"perd encore {'≈ ' if approx else ''}{_r(abs(arm_20e)).lstrip('+')} R à 20 €"
 
 
 def _relative(helps: bool, arm_20e: float | None) -> str:
-    """Lot 2 (C7) : un bras meilleur qu'un autre n'est pas une candidate : « ↗ aide (relatif) », et ce que le bras
+    """2e tour d'avis (C7) : un bras meilleur qu'un autre n'est pas une candidate : « ↗ aide (relatif) », et ce que le bras
     amélioré perd encore à 20 € quand il ne gagne pas."""
     if not helps:
         return ""
@@ -1012,12 +1012,12 @@ def _arm(variant: str, arm: str) -> str | None:
 
 
 def _no_witness(n: int | None) -> str:
-    """Lot 2 (C7) : lignes déclenchées sans témoin (go_brut ouvert au-dessus du TP1…), hors de l'écart au témoin."""
+    """2e tour d'avis (C7) : lignes déclenchées sans témoin (go_brut ouvert au-dessus du TP1…), hors de l'écart au témoin."""
     return f" · {n} ligne{'s' if n > 1 else ''} sans témoin (hors de l'écart)" if n else ""
 
 
 def _exit_losses(c: str, helped: dict) -> str:
-    """Lot 2 (C7) : stratégies qu'une sortie de Gemini améliore et qui perdent encore à 20 € avec elle ; estimé (≈) :
+    """2e tour d'avis (C7) : stratégies qu'une sortie de Gemini améliore et qui perdent encore à 20 € avec elle ; estimé (≈) :
     espérance à 20 € de la stratégie + écart moyen de la sortie, les deux sur ses trades déclenchés."""
     out = []
     for name, it in helped.items():
@@ -1034,7 +1034,7 @@ def _t(res: dict) -> str:
 
 def _go_text(variant: str, res: dict, items: dict | None = None) -> str:
     """n° 7 : une ligne par stop, la confirmation contre le brut, GO par GO ; n° 8 : filtres FRSH et résultats.
-    `items` : stratégies actions du tableau (le bras amélioré à 20 €, lot 2)."""
+    `items` : stratégies actions du tableau (le bras amélioré à 20 €, 2e tour d'avis)."""
     items = items or {}
     diff = res["ecart_par_go"]
     parts = [f"{res['go']} GO · confirmé ou rien − brut {_r(diff['esperance_r'])} R par GO ({_t(diff)}"
@@ -1077,7 +1077,7 @@ def text(rep: dict | None) -> str:
                 else "aucun jour en rattrapage")  # C3 : d'anciennes lignes sans jour à refaire restent exclues
         lines.append(f"⏳ Tableau partiel ({MARKET_FR.get(market, market).lower()}) : {days}, {old} "
                      f"(n° {p['declaration']} seule en attendant)")
-    for market, revs in (rep.get("revisions") or {}).items():  # lot 2 (C6), descriptif
+    for market, revs in (rep.get("revisions") or {}).items():  # 2e tour d'avis (C6), descriptif
         line = _revisions_text(market, revs)
         if line:
             lines.append(line)
@@ -1101,7 +1101,7 @@ def text(rep: dict | None) -> str:
                          + _no_witness(wit.get("sans_temoin"))
                          + _n10_text(it) + (" · échantillon faible" if it.get("echantillon_faible") else "")
                          + _after_seen(it))
-            if name in NOTES:  # lot 2 (C7)
+            if name in NOTES:  # 2e tour d'avis (C7)
                 lines.append(f"   ↳ {NOTES[name]}")
     n6 = rep.get("sorties_gemini")
     if n6:

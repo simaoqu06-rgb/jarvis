@@ -151,7 +151,7 @@ Ensuite : `docker compose logs -f jarvis-lab` pour suivre le rejeu, `!labo` sur 
 l'historique (bougies journalières de toutes les actions, puis 5 min des valeurs de chaque jour) :
 compter quelques heures avant la fin du rejeu, surtout la nuit et le week-end.
 
-### Archive d'audit des mesures remplacées (lot 2)
+### Archive d'audit des mesures remplacées (2e tour d'avis)
 
 Quand une déclaration change la façon de mesurer (n° 10 : simulateur révision 2, témoin à la même heure, prix
 négociés), le labo réécrit ses anciennes lignes. Avant toute réécriture, le worker les copie **automatiquement**,

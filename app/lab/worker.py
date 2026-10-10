@@ -37,11 +37,17 @@ Toutes les ~10 min :
    confirmés, recalculés quand les trades changent, au plus toutes les stats_age secondes.
 14. « filtres » (filtres.py) : ce que coûte chaque filtre du scanner de 15 h 10 sur les trades v1 d'actions,
    recalculé quand les trades ou les réglages changent, au plus toutes les stats_age secondes, hors séance US.
-15. Lot 2 (C1, audit.py) : en tête de chaque passage, avant le grade, le Labo 2, le rejeu et le rattrapage, les lignes
+15. 2e tour d'avis (C1, audit.py) : en tête de chaque passage, avant le grade, le Labo 2, le rejeu et le rattrapage, les lignes
    qu'une nouvelle déclaration va réécrire (stratégies, Killmode complet, n° 9) sont copiées une fois dans le
    fichier d'archive de data/archives/ ; en échec, rien ne les réécrit dans ce passage (rattrapage, étapes
    killmode_complet et potentiel_plus10 sautées ; le direct et le rejeu n'écrivent que des jours neufs). L'étape
    « audit » met en cache l'audit apparié ancien → nouveau (pour audit, jamais pour décider).
+16. Garde du Labo 1 (deuxième tour d'avis du 10 octobre 2026) : au démarrage, l'empreinte du comportement v1
+   (empreinte.v1_guard, ≈ 1 s) est comparée à V1_FINGERPRINT. Écart ou calcul en échec : rejeu et direct du Labo 1
+   en pause (aucune ligne v1 écrite, ni le recalcul des coûts), journal d'erreur, événement du labo et alerte dans
+   !labo ; le Labo 2, le rattrapage et le grade continuent. Un calcul en échec est retenté à chaque passage.
+17. « recalcul » (recalcul_v1) : séances du direct calculées avant une rupture de comportement (empreinte.V1_RECALCULS,
+   la séance d'actions du 06/10/2026), recalculées une fois avec le code actuel en tête de passage, avant le grade.
 Le battement (lab.heartbeat) porte l'étape en cours, affichée par /api/lab/status et !labo.
 Le rejeu couvre JARVIS_LAB_REPLAY_DAYS séances (504 ≈ 2 ans) avant le premier lancement du worker ;
 le direct prend le relais à partir de ce jour-là. JARVIS_LAB_ENABLED=off met le worker en veille.
@@ -53,6 +59,7 @@ import time as clock
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from app.core.http import SourceError
 from app.lab import archive as ARC
 from app.lab import audit as AUD
 from app.lab import catalysts as CAT
@@ -75,6 +82,7 @@ from app.lab import regime as REG
 from app.lab import runner as R
 from app.lab import stats as STATS
 from app.lab import strat_stats as SS
+from app.lab import strategies as ST
 from app.lab import summary as SUM
 from app.lab import universe as U
 from app.lab import validator as V
@@ -262,6 +270,181 @@ def market_order(db: LabDB, markets: list[str]) -> list[str]:
     return order
 
 
+# --- Garde du Labo 1 (deuxième tour d'avis du 10 octobre 2026) --------------------------------
+
+# État de la garde de ce processus (empreinte.v1_guard), posé par guard_v1 au démarrage du worker ; None (tests qui
+# appellent tick directement) : pas de garde, le Labo 1 écrit.
+_v1_guard: dict | None = None
+
+
+def guard_v1(db: LabDB, now: datetime | None = None) -> dict:
+    """Calcule l'empreinte du comportement v1 du code qui tourne et la compare à V1_FINGERPRINT (≈ 1 s).
+
+    Écart (« change ») ou calcul en échec (« erreur ») : le Labo 1 se met en pause (v1_paused) au lieu d'écrire des lignes
+    d'un autre comportement sous la même version ; le calcul en échec aussi, car une pause ne perd rien (le direct et le
+    rejeu reprennent les jours en attente, les bougies restent chez la source) alors qu'une ligne v1 d'un comportement
+    non vérifié reste dans les statistiques et le grade. Il est retenté à chaque passage (tick) : une erreur passagère
+    lève la pause d'elle-même. L'état est gardé dans progress (« lab », « garde_v1 ») pour !labo et /api/lab/status,
+    l'empreinte de la révision du code dans « empreintes_v1 » (stats.code_revisions) ; un changement d'état est un
+    événement du labo, relayé sur Discord."""
+    global _v1_guard
+    now = now or datetime.now(timezone.utc)
+    state = E.v1_guard() | {"le": now.isoformat(timespec="seconds"), "code_rev": E.code_rev("v1")}
+    _v1_guard = state  # avant toute écriture : la pause tient même si la base refuse l'état
+    prev = db.get("lab", "garde_v1")
+    key = lambda s: (s.get("etat"), s.get("calculee"), s.get("erreur"))  # noqa: E731
+    with db.transaction():
+        db.set("lab", "garde_v1", state)
+        if state["calculee"]:
+            db.set("empreintes_v1", state["code_rev"], state["calculee"])
+        alert = E.guard_text(state)
+        if alert and (not prev or key(prev) != key(state)):
+            M.event(db, "labo1_pause", None, alert + " : rejeu et direct du Labo 1 arrêtés, aucune ligne v1 écrite ; "
+                    "Labo 2, rattrapage et grade continuent. Revenir en arrière, ou ouvrir une nouvelle version de "
+                    "méthode avec sa nouvelle empreinte.", state, now)
+        elif not alert and prev and prev.get("etat") != "ok":
+            M.event(db, "labo1_reprise", None, f"✅ Labo 1 repris : empreinte v1 {state['calculee']} conforme, rejeu et "
+                    "direct relancés.", state, now)
+    if alert:
+        log.error("Labo : %s ; rejeu et direct du Labo 1 en pause", alert.removeprefix("⚠️ "))
+    else:
+        log.info("Labo : empreinte v1 %s conforme", state["calculee"])
+    return state
+
+
+def v1_paused(db: LabDB | None = None, now: datetime | None = None) -> str | None:
+    """Raison de la pause du Labo 1 (None : il écrit). Avec `db`, un calcul d'empreinte en échec est retenté."""
+    if db is not None and _v1_guard and _v1_guard.get("etat") == "erreur":
+        try:
+            guard_v1(db, now)
+        except Exception as exc:  # la base refuse l'état : la pause calculée tient
+            log.warning("Labo : garde du Labo 1 non enregistrée : %s: %s", type(exc).__name__, exc)
+    return E.guard_text(_v1_guard)
+
+
+# --- Recalcul ponctuel des séances du direct d'avant une rupture (deuxième tour d'avis) --------
+
+RECALCUL_JOB = "recalcul"
+
+
+def recalcul_key(market: str, avant: str, day: str) -> str:
+    return f"v1:{avant}:{market}:live:{day}"
+
+
+def _live_rows(db: LabDB, market: str, day: str) -> tuple[int, int]:
+    """Trades du direct du jour : nombre, et nombre sans révision du code (calculés avant le suivi)."""
+    return db.conn.execute("SELECT COUNT(*), COUNT(*) - COUNT(code_rev) FROM trades WHERE origin = 'live' "
+                           "AND market = ? AND day = ?", (market, day)).fetchone()
+
+
+async def recalcul_v1(db: LabDB, now: datetime, transport=None) -> dict:
+    """Recalcule une fois, avec le code actuel, chaque séance du direct calculée avant une rupture de comportement
+    (empreinte.V1_RECALCULS). Idempotent : l'état final (fait, sans objet, non recalculable) est gardé dans progress
+    (job « recalcul », clé « v1:<révision>:<marché>:live:<jour> ») et le jour n'est plus jamais relu. Actions seulement
+    (la seule rupture listée). Renvoie l'état de chaque séance traitée à ce passage."""
+    out = {}
+    for market, avant, day in E.V1_RECALCULS:
+        key = recalcul_key(market, avant, day)
+        if db.get(RECALCUL_JOB, key) or market != "stock":
+            continue
+        heartbeat.beat(f"recalcul v1 {market} {day}")
+        out[key] = await _recalcul_day(db, market, avant, date.fromisoformat(day), now, transport)
+        heartbeat.beat()
+    return out
+
+
+async def _recalcul_day(db: LabDB, market: str, avant: str, day: date, now: datetime, transport=None) -> dict:
+    """Une séance d'actions du direct, comme la calcule le direct (bougies de 5 min de la base complétées à la source,
+    runner.run_day sur l'univers du jour gardé), sans toucher son avancement (last_day).
+
+    - Plus aucune ligne sans révision (déjà recalculée, ou pas encore journalisée : le direct la fera avec ce code) :
+      sans objet.
+    - Bougies de 5 min manquantes (purgées puis refusées par la source, univers absent) : rien n'est effacé, nouvel
+      essai au passage suivant ; au 3e échec (runner.MAX_DAY_ATTEMPTS), « non recalculable », dit dans !labo. Trades
+      d'une autre version de méthode que celle en cours : « non recalculable » tout de suite.
+    - replace_trades réécrit les trades en place : mêmes id pour un même symbole (leçons, règles et grade bornent ce
+      qu'ils ont vu par jour, le jour reste « vu »), révision du code et heure du calcul neuves. run_day efface aussi
+      les lignes du labo v2 du jour (n° 10 : le générateur n'en écrit pas pour les actions) : si le rattrapage de la
+      déclaration en vigueur a déjà passé ce jour du direct, ses lignes sont refaites depuis les nouveaux plans, dans
+      la même transaction (rattrapage.stock_rows, prix négociés : réseau) ; sinon le rattrapage les bâtira."""
+    iso = day.isoformat()
+    key = recalcul_key(market, avant, iso)
+    total, unknown = _live_rows(db, market, iso)
+    base = {"marche": market, "avant": avant, "jour": iso, "le": now.isoformat(timespec="seconds")}
+    if not unknown:
+        state = base | {"etat": "sans_objet", "trades": total}
+        db.set(RECALCUL_JOB, key, state)
+        log.info("Labo : recalcul v1 %s %s sans objet (%d trades, tous du code suivi)", market, iso, total)
+        return state
+    versions = sorted(v for (v,) in db.conn.execute("SELECT DISTINCT method_version FROM trades WHERE origin = 'live' "
+                                                    "AND market = ? AND day = ?", (market, iso)))
+    current = R.method(db)[0]
+    if versions != [current]:  # replace_trades remplace par version : l'ancienne ligne resterait à côté de la neuve
+        state = base | {"etat": "non_recalculable", "raison": f"version de méthode changée ({', '.join(versions)} → "
+                                                              f"{current})", "essais": 0}
+        db.set(RECALCUL_JOB, key, state)
+        log.error("Labo : recalcul v1 %s %s non recalculable : %s", market, iso, state["raison"])
+        return state
+    tries = (db.get(RECALCUL_JOB, f"attempts:{key}", 0) or 0) + 1
+    last = tries >= R.MAX_DAY_ATTEMPTS
+    try:
+        universe = db.universe(market, iso)
+        if not universe:
+            raise SourceError("univers du jour absent")
+        names = [u["symbol"] for u in universe]
+        failed: set = set()
+        await CO.ensure_intraday(db, market, names, *CO.stock_window(day), now, transport, failed_out=failed)
+        if failed & set(names):
+            lost = sorted(failed & set(names))
+            raise SourceError(f"{len(lost)} symboles sans leurs bougies de 5 min : {', '.join(lost[:5])}")
+        job_v2 = ST.progress_job(market)
+        cursor = db.get(job_v2, "rattrapage:live")
+        with db.transaction():
+            n = R.run_day(db, market, day, "live", universe, now=now)
+            v2 = "laissées au rattrapage"
+            if cursor and cursor >= iso:
+                v2 = await _redo_v2(db, market, day, job_v2, transport, last)
+            state = base | {"etat": "fait", "trades": n, "trades_avant": total, "sans_revision_avant": unknown,
+                            "code_rev": E.code_rev("v1"), "labo_v2": v2}
+            db.set(RECALCUL_JOB, key, state)
+    except Exception as exc:  # données manquantes, source en panne… : 3 essais, rien n'est effacé
+        reason = f"{type(exc).__name__}: {exc}"[:300]
+        with db.transaction():
+            db.set(RECALCUL_JOB, f"attempts:{key}", tries)
+            if last:
+                state = base | {"etat": "non_recalculable", "raison": reason, "essais": tries}
+                db.set(RECALCUL_JOB, key, state)
+        if last:
+            log.error("Labo : recalcul v1 %s %s non recalculable après %d essais : %s", market, iso, tries, reason)
+            return state
+        log.warning("Labo : recalcul v1 %s %s en échec (essai %d/%d) : %s", market, iso, tries,
+                    R.MAX_DAY_ATTEMPTS, reason)
+        return base | {"etat": "en_echec", "raison": reason, "essais": tries}
+    log.info("Labo : recalcul v1 %s %s fait, %d trades (%d sans révision avant), labo v2 : %s", market, iso, n, unknown, v2)
+    return state
+
+
+async def _redo_v2(db: LabDB, market: str, day: date, job: str, transport, last: bool) -> str:
+    """Lignes du labo v2 d'un jour du direct déjà rattrapé, refaites comme rattrapage.step le fait pour un jour (dans la
+    transaction de l'appelant) : au dernier essai, sans les lots en échec à la source, et sautées si la source est en
+    panne (lignes effacées, raison gardée sous skipped:live:<jour>, comme le rattrapage)."""
+    iso = day.isoformat()
+    missing = set() if last else None
+    try:
+        rows = await RAT.stock_rows(db, "live", day, transport, missing)
+    except Exception as exc:
+        if not last:
+            raise  # tout est annulé, nouvel essai au passage suivant
+        db.replace_strat("live", market, iso, [])
+        db.set(job, f"skipped:live:{iso}", f"{type(exc).__name__}: {exc}"[:300])
+        return "sautées (source en panne)"
+    db.replace_strat("live", market, iso, rows or [])
+    db.conn.execute("DELETE FROM progress WHERE job = ? AND key IN (?, ?)", (job, f"skipped:live:{iso}", f"missing:live:{iso}"))
+    if missing:
+        db.set(job, f"missing:live:{iso}", {"missing": len(missing), "missing_symbols": sorted(missing)[:10]})
+    return f"refaites ({len(rows or [])} lignes)"
+
+
 # --- Boucle -------------------------------------------------------------------------------
 
 async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, transport=None) -> dict:
@@ -273,7 +456,7 @@ async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, tra
     live_start = date.fromisoformat(live_start)
     R.method(db)
     report: dict = {"live": {}, "replay": {}, "paused": {}}
-    # Lot 2 (C1) : archive d'audit avant toute réécriture ; en échec, ce passage ne réécrit rien (hold).
+    # 2e tour d'avis (C1) : archive d'audit avant toute réécriture ; en échec, ce passage ne réécrit rien (hold).
     heartbeat.beat("archive d'audit")
     hold = False
     try:
@@ -282,6 +465,24 @@ async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, tra
         hold = True
         report["archive_audit"] = f"échec : {type(exc).__name__}"
         log.warning("Labo : archive d'audit en échec, rien n'est réécrit ce passage : %s: %s", type(exc).__name__, exc)
+    pause = stock_pause(now, collect)
+    if pause:
+        report["paused"]["stock"] = pause
+        if pause.startswith("clés"):
+            warn_missing_keys()
+    markets = [m for m in R.MARKETS if not (m == "stock" and pause)]
+    # Garde du Labo 1 : comportement v1 changé ou non vérifié, ni direct ni rejeu (aucune ligne v1 écrite).
+    paused_v1 = v1_paused(db, now)
+    if paused_v1:
+        report["paused"]["labo1"] = paused_v1
+    elif collect and not pause and not hold and E.V1_RECALCULS:
+        # Séances du direct d'avant une rupture, recalculées une fois avant le grade (bougies complétées à la source :
+        # jamais pendant la séance US ; archive d'audit en échec : attend, il peut réécrire des lignes n° 10).
+        try:
+            report["recalcul"] = await recalcul_v1(db, now, transport)
+        except Exception as exc:
+            log.warning("Labo : recalcul v1 en échec : %s: %s", type(exc).__name__, exc)
+    v1_markets = [] if paused_v1 else markets
     # Grade en tête de passage (lecture de la base, sans réseau, < 1 s) : il ne doit pas attendre derrière
     # une collecte longue du rejeu (journalier de tout l'univers crypto au premier passage…).
     heartbeat.beat("grade")
@@ -289,13 +490,7 @@ async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, tra
         report["grade"] = GRADE.step(db, now)
     except Exception as exc:
         log.warning("Labo : grade en échec : %s: %s", type(exc).__name__, exc)
-    pause = stock_pause(now, collect)
-    if pause:
-        report["paused"]["stock"] = pause
-        if pause.startswith("clés"):
-            warn_missing_keys()
-    markets = [m for m in R.MARKETS if not (m == "stock" and pause)]
-    for market in markets:
+    for market in v1_markets:
         heartbeat.beat(f"direct {market}")
         try:
             last = db.get(f"live:{market}", "last_day")
@@ -323,7 +518,7 @@ async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, tra
     # rejeu le repoussaient après la routine de 22 h 52, voire après minuit (résumé perdu).
     if summary_first(now, db.get("summary", "last_day")):
         report["labo2"] = await lab2(db, current(), collect, hold)
-    for market in market_order(db, markets):
+    for market in market_order(db, v1_markets):
         heartbeat.beat(f"rejeu {market}")
         try:
             report["replay"][market] = await R.replay(
@@ -427,7 +622,8 @@ async def lab2(db: LabDB, now: datetime, collect: bool = True, hold: bool = Fals
     await step("couverture", lambda: U.coverage_step(db, budget["coverage_days"]))
     await step("archive", lambda: ARC.step(db, now, budget["archive_seconds"], collect,
                                                 budget["archive_days"]))
-    await step("cout", lambda: COUT.step(db))
+    # Recalcul des coûts v1 (n° 8) : il réécrit des lignes v1, en pause avec le Labo 1 (garde).
+    await step("cout", lambda: "en pause (garde du Labo 1)" if v1_paused() else COUT.step(db))
     if collect and not hold:
         await step("killmode_complet", lambda: KC.step(db, budget["kill_complet_seconds"]))
         await step("potentiel_plus10", lambda: P10.step(db, now, budget["plus10_seconds"]))
@@ -441,7 +637,7 @@ async def lab2(db: LabDB, now: datetime, collect: bool = True, hold: bool = Fals
     await step("lecons", lambda: L.step(db, now, budget["stats_age"]))
     await step("grade", lambda: GRADE.step(db, now))
     await step("strategies", lambda: refresh_strategies(db, now, budget["stats_age"]))
-    await step("audit", lambda: AUD.refresh(db, now, budget["stats_age"]))  # lot 2 (C2) : jamais lu pour décider
+    await step("audit", lambda: AUD.refresh(db, now, budget["stats_age"]))  # 2e tour d'avis (C2) : jamais lu pour décider
     await step("autopsie", lambda: AUT.step(db, now, budget["stats_age"]))
     if not CO.CAL.session_open(now):  # un journalier relu par action : pas pendant la séance US
         await step("filtres", lambda: FIL.step(db, now, budget["stats_age"]))
@@ -467,6 +663,10 @@ async def loop() -> None:
     heartbeat.enabled = True
     heartbeat.beat()
     log.info("Labo démarré : base %s, rejeu de %d séances", db.path, replay_sessions())
+    try:  # une fois par processus (≈ 1 s), avant toute écriture du Labo 1
+        guard_v1(db)
+    except Exception as exc:  # la base refuse l'état : la garde calculée tient pour ce processus (pause comprise)
+        log.error("Labo : garde du Labo 1 impossible : %s: %s", type(exc).__name__, exc)
     while True:
         started = clock.monotonic()
         try:
