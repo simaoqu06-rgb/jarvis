@@ -538,6 +538,8 @@ def sizing_lines(p: dict) -> list[str]:
         if s.get("hors_grade"):
             line += " · taille du KILL, hors grade" + (
                 f", au-delà de {_amount(rule_eur())} € (une action au moins)" if s.get("hors_budget") else "")
+        elif (p.get("grade") or {}).get("hors_budget"):  # risk_pct explicite au-delà de ce que propose JARVIS
+            line += " · risque demandé, hors budget"
         return [line]
     if s:  # taille sans change (plan_from_bars seul : labo, anciens trades)
         return [f"💰 Risque {s['risk_pct']:g} % = {s['risk_amount']:g} · taille {s['quantity']:g} "

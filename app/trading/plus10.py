@@ -195,15 +195,24 @@ def orb_now(d: ST.Day, minutes: int) -> dict | None:
     return ST._cand(d, d.d0 + n - 1, hi + d.tick(hi), lo - d.tick(lo), valid_until=d.orb_until_ts)
 
 
-def _order(c: dict | None, risk_usd: float | None, usd_per_eur: float | None = None) -> str:
+def _order(c: dict | None, risk_usd: float | None, usd_per_eur: float | None = None, rule_eur: float | None = None,
+           no_size: str | None = None) -> str:
+    """Ordre d'un essai ; `rule_eur` : la taille est ta règle (grade à 0 %), dite dans la ligne même ; `no_size` :
+    pourquoi aucune taille n'est chiffrée (arrêt de la journée, budget de risque ouvert plein)."""
     if not c:
         return "pas de niveau (range incomplet sur IEX)"
     entry, stop = c["entry"], c["stop"]
     tps = " / ".join(_num(t) for t in ST._r_targets(entry, stop))
     until = datetime.fromtimestamp(c["entry_until"], NEW_YORK).strftime("%H h %M").replace(" 00", "")
-    qty = CF.shares(entry, stop, risk_usd)
-    size = (f" · {qty} actions pour ce risque" if qty else
-            f" · {CF.over_budget(entry, stop, risk_usd / usd_per_eur, usd_per_eur)}" if qty == 0 and usd_per_eur else "")
+    qty = None if no_size else CF.shares(entry, stop, risk_usd)
+    if no_size:
+        size = f" · pas de taille : {no_size}"
+    elif qty:
+        size = f" · {qty} actions " + (f"à ta règle de {rule_eur:g} € (hors avis)" if rule_eur else "pour ce risque")
+    elif qty == 0 and usd_per_eur:
+        size = f" · {CF.over_budget(entry, stop, risk_usd / usd_per_eur, usd_per_eur)}"
+    else:
+        size = ""
     return (f"ordre stop d'achat {_num(entry)} · stop {_num(stop)} ({_fr((stop / entry - 1) * 100)} %) · "
             f"TP {tps} (1/2/3 R) · valable jusqu'à {until} NY" + size)
 
@@ -280,6 +289,14 @@ def confirmed_text(c: dict) -> str:
     head = ("🎯 **Rebond · range de 30 min** (10 h 01 New York)" if late else
             "🎯 **Potentiel +10 · liste confirmée** (gap d'ouverture, 9 h 46 New York)")
     lines = [head + " · mesuré au labo (n° 9), ni GO ni note"]
+    g, risk_eur = c.get("grade"), c.get("risk_eur")
+    rule = risk_eur if g and g.get("risque_propose", 0) <= 0 else None  # ta règle de 20 €, hors avis de JARVIS
+    # Pas de taille : le 0 % vient de l'arrêt de la journée ou du budget plein (scheduler._size_rule).
+    no_size = (CF.portfolio_stop(g) or "aucun risque proposé") if g and risk_eur is None else None
+
+    def order(level: dict | None) -> str:
+        return _order(level, c["risk_usd"], c.get("eurusd"), rule, no_size)
+
     for liste, syms in c["listes"].items():
         if late and liste != "rebond":
             continue
@@ -291,18 +308,16 @@ def confirmed_text(c: dict) -> str:
             pre = c["gaps_attente"].get(s)
             lines.append(_line(s, m) + (f" (pré-ouverture {_fr(pre)} %)" if pre is not None else " (absente à 9 h 10)"))
             if late:
-                lines.append("range 30 min : " + _order(lv.get("orb30"), c["risk_usd"], c.get("eurusd")))
+                lines.append("range 30 min : " + order(lv.get("orb30")))
                 continue
-            lines.append("range 15 min : " + _order(lv.get("orb15"), c["risk_usd"], c.get("eurusd")))
+            lines.append("range 15 min : " + order(lv.get("orb15")))
             if liste == "s10":
                 k = lv.get("killmode")
                 why = "; ".join(lv.get("killmode_pourquoi") or [])
-                lines.append("règle Killmode : " + ("✅ " + _order(k, c["risk_usd"], c.get("eurusd")) if k
-                                                    else f"❌ {why or 'pas de signal'}"))
+                lines.append("règle Killmode : " + ("✅ " + order(k) if k else f"❌ {why or 'pas de signal'}"))
     if not late and c["listes"]["rebond"]:
         lines.append("-# Rebond, range de 30 min : à 16 h 01.")
-    g, risk_eur = c.get("grade"), c.get("risk_eur")
-    off = CF.off_grade(g, risk_eur) if risk_eur else None
+    off = CF.off_grade(g, risk_eur) if risk_eur or no_size else None
     if off:
         lines += ["-# Range lu sur IEX en temps réel (le labo rejoue le SIP).", off]
     elif risk_eur and g:

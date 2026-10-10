@@ -357,9 +357,14 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
   - Taille, une seule règle : risque = min(`JARVIS_CAPITAL` (€) × % proposé, `JARVIS_RISK_EUR` = 20 €),
     20 € sans capital connu, converti au change BCE du jour, en actions entières (« 💰 Risque 20 €
     (23,0 $) : 46 actions »). Grade à 0 % : JARVIS ne propose pas de taille ; ta règle de 20 € est
-    affichée à part, « hors avis de JARVIS » (plans, GO confirmés, potentiel +10, Killmode). Un
-    risque demandé explicitement (`risk_pct`) remplace le % du grade et est signalé hors budget
-    s'il engage plus que ce que propose JARVIS.
+    affichée à part, « hors avis de JARVIS » (plans, GO confirmés, potentiel +10, Killmode), dans la
+    ligne d'ordre même des MP automatiques (« **46 actions à ta règle de 20 €** (hors avis de
+    JARVIS) »). Quand ce 0 % vient de l'arrêt de la journée ou du budget de risque ouvert plein, les
+    MP automatiques (GO confirmé, potentiel +10) ne chiffrent aucune quantité (« pas de taille :
+    arrêt de la journée (−3,3 R) ») : choix par défaut, `JARVIS_MP_TAILLE_APRES_ARRET=oui` pour
+    revenir à ta règle de 20 €. Un risque demandé explicitement (`risk_pct`) remplace le % du grade
+    et est signalé hors budget s'il engage plus que ce que propose JARVIS (ligne 💰 : « risque
+    demandé, hors budget »).
   - Changements : baisse immédiate ; hausse après au moins 150 nouveaux trades sur 5 nouveaux jours,
     et une hausse de **lettre** attend ton accord (proposition Approuver / Refuser en privé, `!oui N`) ;
     à partir de C, une baisse de 20 R depuis le sommet ramène tout de suite en D (coupe-circuit) ; une

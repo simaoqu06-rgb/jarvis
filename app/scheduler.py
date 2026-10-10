@@ -269,16 +269,17 @@ async def _usd_per_eur() -> float | None:
         return None
 
 
-def _size_rule(now: datetime) -> tuple[dict, float]:
+def _size_rule(now: datetime) -> tuple[dict, float | None]:
     """Grade du moment (actions, trades suivis) et risque en € des tailles des GO confirmés et du potentiel +10 :
     la règle unique (risque du grade, 20 € au plus) ; ta règle de 20 € quand le grade ne propose rien (le message
-    le dit). Un grade illisible vaut 0 % (fail-closed)."""
+    le dit dans la ligne d'ordre) ; None, pas de taille, quand ce 0 % vient de l'arrêt de la journée ou du budget de
+    risque ouvert plein (confirm.rule_size, JARVIS_MP_TAILLE_APRES_ARRET). Un grade illisible vaut 0 % (fail-closed)."""
     try:
         g = lab_grade.risk_now("stock", book.trades, now)
     except Exception as exc:
         log.warning("Grade illisible pour la taille des GO (%s: %s) : 0 %%", type(exc).__name__, exc)
         g = lab_grade.unreadable(exc)
-    return g, trading.recommended_eur(g["risque_propose"]) or trading.rule_eur()
+    return g, CONFIRM.rule_size(g, trading.recommended_eur(g["risque_propose"]), trading.rule_eur())
 
 
 async def _bars_5min(symbol: str) -> list[dict] | None:
@@ -358,7 +359,7 @@ async def tick_plus10(now: datetime | None = None) -> None:
     rate = await _usd_per_eur()
     g, risk_eur = _size_rule(now)
     try:
-        result = await PLUS10.confirmed(kind, now, risk_eur * rate if rate else None)
+        result = await PLUS10.confirmed(kind, now, risk_eur * rate if rate and risk_eur else None)
     except Exception as exc:
         log.warning("Potentiel +10 : passage %s en échec : %s", kind, exc)
         return  # nouvelle tentative à la minute suivante, dans la fenêtre du passage
