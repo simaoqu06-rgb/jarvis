@@ -7,7 +7,10 @@ qu'aux comptes listés dans JARVIS_DISCORD_OWNER_ID et ignore tout le reste sans
   !plan NVDA            plan complet (long, action ; « short », « crypto » ou « action » en plus)
   !avis NVDA            avis de JARVIS : long, short ou attendre, pourquoi, et ce que le labo a mesuré
   !prends NVDA          calcule le plan et suit le trade (TP/SL annoncés, cockpit) ; `!prends NVDA 132.5`
-                        = ton prix d'entrée réel, `stop 128` en plus pour ton stop, `tp 135 138 142` pour tes objectifs
+                        = ton prix d'entrée réel, `stop 128` en plus pour ton stop, `tp 135 138 142` pour tes objectifs ;
+                        `!prends NVDA 132.5 go` = le GO confirmé du jour, avec son stop et ses objectifs
+  !sortie NVDA 131.2    ta sortie réelle : clôture le trade suivi à ce prix, ou corrige le prix de sa dernière
+                        sortie s'il est déjà terminé (stop exécuté plus bas, objectif touché sans remplissage)
   !rouvre NVDA 132.5    le stop a été touché mais tu tiens toujours la position : rouvre le trade
                         (même syntaxe que !prends, ex. `!rouvre MRVL 281 stop 273.9 tp 286.8 290.5 299.5`)
   !positions            que faire des trades suivis avant la clôture : sortir, alléger ou garder
@@ -201,9 +204,28 @@ def parse_trade(args: list[str]) -> dict:
     else:
         market = "crypto" if symbol in CRYPTO | set(config.WATCHLIST_CRYPTO) else "stock"
     side = "short" if "short" in words else "long"
+    go = {"go": True} if "go" in words else {}  # « go » : le GO confirmé du jour (`!prends … go`)
     # « kill » : un KILL de Killmode pris, mesuré par son journal et pas par `!desaccords`
     return {"symbol": symbol, "market": market, "side": side, "entry": entry, "stop": stop,
-            "targets": targets or None} | ({"killmode": True} if "kill" in words else {})
+            "targets": targets or None} | ({"killmode": True} if "kill" in words else {}) | go
+
+
+GO_STATUS_FR = {"attente": "en attente du repli", "repli": "repli vu, reprise du VWAP pas encore confirmée",
+                "annulé": "annulé", "expiré": "expiré à 11 h 30 New York"}
+
+
+def confirmed_go(symbol: str, state: dict, now: datetime | None = None) -> tuple[dict | None, str]:
+    """Le GO du scanner confirmé aujourd'hui (New York) sur `symbol`, d'après l'état des confirmations, ou None
+    et la raison en clair."""
+    day = (now or datetime.now(timezone.utc)).astimezone(trading.NEW_YORK).date().isoformat()
+    if state.get("day") != day:
+        return None, "pas de GO du scanner aujourd'hui"
+    go = (state.get("gos") or {}).get(symbol.upper())
+    if go is None:
+        return None, f"{symbol.upper()} n'est pas dans les GO du scanner du jour"
+    if go.get("status") != "confirmé":
+        return None, f"son GO est {GO_STATUS_FR.get(go.get('status'), go.get('status'))}"
+    return go, ""
 
 
 def settings_text() -> str:
@@ -320,17 +342,52 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
             if kill:  # stop et objectifs du KILL du jour quand ils manquent : la gestion que son journal mesure
                 req["stop"] = req["stop"] if req["stop"] is not None else kill["stop"]
                 req["targets"] = req["targets"] or kill["targets"]
+            go = None
+            if req.get("go"):  # stop et objectifs du GO confirmé du jour, pas recalculés : ceux que mesure `!confirmations`
+                from app import scheduler  # import tardif : scheduler importe ce module
+                go, why = confirmed_go(req["symbol"], scheduler.confirm_state)
+                if go is None:
+                    price = f"{req['entry']:g}" if req["entry"] is not None else "<ton prix>"
+                    return (f"Pas de GO confirmé aujourd'hui pour {req['symbol']} ({why}) : rien n'est suivi. "
+                            f"`!prends {req['symbol']} {price}` sans `go` pour le suivre sur un plan recalculé.")
+                if req["side"] != "long":
+                    return f"Le GO du scanner sur {req['symbol']} est à l'achat : `!prends {req['symbol']} <ton prix> go`."
+                req["entry"] = req["entry"] if req["entry"] is not None else go.get("trigger")
+                req["stop"] = req["stop"] if req["stop"] is not None else go["stop"]
+                req["targets"] = req["targets"] or go["targets"]
             plan = await trading.build_plan(req["symbol"], req["market"], req["side"], req["entry"], req["stop"],
                                             req["targets"])
+            if go:
+                plan["policy"] = "go_confirme"
             if req.get("killmode"):
                 plan["killmode"] = True
                 plan["sizing"] = killmode.taken_sizing(plan)  # 20 € hors grade, compté dans le risque ouvert
                 plan.pop("sizing_regle", None)
             async with lock or asyncio.Lock():
                 from app import scheduler  # import tardif : scheduler importe ce module
-                scheduler.book.add(plan, "via Killmode" if req.get("killmode") else "via Discord")
+                scheduler.book.add(plan, "via Killmode" if req.get("killmode") else
+                                   "via GO confirmé" if go else "via Discord")
             head = trading.disagreement_text(plan) + "\n" if trading.against_jarvis(plan) else ""
+            if go:
+                head += (f"✅ GO confirmé du jour : stop {trading._num(plan['stop'])}, objectifs "
+                         f"{' · '.join(trading._num(t['price']) for t in plan['targets'])}. Stop remonté à l'entrée "
+                         "après TP2 (ta règle), pas de sortie au temps.\n")
+                if plan.get("score") and not plan["score"]["go"]:
+                    head += ("-# La note recalculée à ton entrée est NO GO ; le trade compte quand même avec JARVIS, "
+                             "comme le GO confirmé du scanner.\n")
             return head + "📌 Trade suivi\n" + trading.plan_text(plan)
+        if cmd == "sortie":
+            if not args:
+                return "Donne le symbole et ton prix de sortie réel, ex. `!sortie NVDA 131.2`."
+            req = parse_trade(args)
+            if req["entry"] is None:
+                return f"Donne ton prix de sortie réel, ex. `!sortie {req['symbol']} 131.2`."
+            async with lock or asyncio.Lock():
+                from app import scheduler
+                res = trading.record_exit(scheduler.book, req["symbol"], req["entry"])
+            if res is None:
+                return f"Aucun trade {req['symbol']} suivi : rien à clôturer ni à corriger."
+            return trading.exit_text(res)
         if cmd == "rouvre":
             req = parse_trade(args)
             if req["entry"] is None:
@@ -357,7 +414,8 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
             return CONFIRM.report_text(CONFIRM.read_log(), scheduler.confirm_state)
         if cmd in ("desaccords", "désaccords"):
             from app import scheduler
-            return trading.disagreements_text(trading.disagreements(scheduler.book))
+            slopes = await asyncio.to_thread(trading.note_slopes)
+            return trading.disagreements_text(trading.disagreements(scheduler.book, slopes))
         if cmd == "regle":
             return settings_text()
         if cmd == "labo":

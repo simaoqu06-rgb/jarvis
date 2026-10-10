@@ -411,7 +411,12 @@ def test_risque_now():
     # Arrêt de la journée à −3 R (date de Paris de la clôture).
     stopped = [trade(status="closed", events=[{"kind": "stop", "price": 95.0, "at": NOW.isoformat()}])
                for _ in range(3)]
-    assert GR.day_r(stopped, NOW) == -3.0
+    assert GR.day_r(stopped, NOW) == pytest.approx(3 * (-1.0 - 5.9 / 20), abs=0.01)  # net : 5,90 $ pour 20 $ de risque
+    # Net des frais estimés (4 actions en 3 brackets IBKR), les frais avancent l'arrêt : −2,2 R bruts (deux stops et
+    # une sortie à −0,2 R), mais −3,09 R nets.
+    mixed = stopped[:2] + [trade(status="closed", events=[{"kind": "stop", "price": 99.0, "at": NOW.isoformat()}])]
+    assert GR.day_r(mixed, NOW) == pytest.approx(-3.09, abs=0.01)
+    assert "arrêt de la journée" in GR.risk_now("stock", mixed, NOW, DATA)["raison"]
     g = GR.risk_now("stock", stopped, NOW, DATA)
     assert g["risque_propose"] == 0.0 and "arrêt de la journée" in g["raison"]
 

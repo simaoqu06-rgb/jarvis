@@ -133,8 +133,14 @@ Ils évoluent par propositions : JARVIS propose, tu approuves ou refuses (voir p
 **JARVIS n'est pas d'accord parce que c'est toi.** Si tu prends un plan noté NO GO (`!prends` ou le
 cockpit), il le dit franchement avec ses raisons, suit le trade quand même et le marque « contre l'avis
 de JARVIS ». `!desaccords` (ou `GET /api/trading/disagreements`) compare ces trades aux plans GO, avec
-un tiers de la position par objectif : au bout de 10 trades terminés de chaque côté, il dit qui avait
-raison, toi ou sa note. Le même principe s'applique aux Claude qui travaillent sur JARVIS
+un tiers de la position par objectif, en R nets de frais estimés (IBKR à la taille du plan) et un
+intervalle de confiance en grappes par jour. Deux questions séparées : la note sépare-t-elle les bons
+trades, et les NO GO pris rapportent-ils ? Verdict seulement avec au moins 30 trades sur 20 jours de
+chaque côté et un intervalle qui exclut 0 ; « JARVIS a raison » seulement si la note est prédictive au
+labo (pente > 0). Les sorties sont au prix suivi (stop franchi en gap : à l'ouverture ; objectif : franchi
+d'un pas) ou au tien avec `!sortie`. Ce R net sert aussi à l'arrêt de la journée à −3 R, aux trades réels
+de `!grade` et au journal du cockpit. Un GO confirmé pris avec `!prends NVDA 132.5 go` garde le stop et les
+objectifs du scanner et compte avec JARVIS. Le même principe s'applique aux Claude qui travaillent sur JARVIS
 ([CLAUDE.md](CLAUDE.md)).
 
 ## Scanner avant l'ouverture US
@@ -331,7 +337,7 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
     puis ¼ de Kelly (borne basse de l'espérance / variance des R, corrigé de la corrélation des
     trades d'un même jour) plafonné à C 1 %, B 1,5 %, A 3 %, S 5 % (4 % en pratique). Plus un
     budget : risque ouvert sur les trades pris ≤ 4 % (un trade pris compte ses euros sur le capital,
-    1 % sans capital connu), arrêt de la journée à −3 R. Grade illisible ou que le labo n'a pas
+    1 % sans capital connu), arrêt de la journée à −3 R (nets de frais estimés). Grade illisible ou que le labo n'a pas
     revérifié depuis 6 h (`JARVIS_GRADE_MAX_AGE_H`) : 0 %.
   - Taille, une seule règle : risque = min(`JARVIS_CAPITAL` (€) × % proposé, `JARVIS_RISK_EUR` = 20 €),
     20 € sans capital connu, converti au change BCE du jour, en actions entières (« 💰 Risque 20 €
@@ -420,6 +426,8 @@ trade terminé, comparé à une sortie au moment du conseil (ligne « Bilan des 
 | `!plan NVDA` | plan complet en temps réel (ajoute `short`, `crypto` ou `action` si besoin) |
 | `!avis NVDA` | avis de JARVIS : entrer long, entrer short ou attendre, pourquoi, ce qui invaliderait, et ce que le labo a mesuré |
 | `!prends NVDA` | calcule le plan et suit le trade (TP/SL annoncés, cockpit) ; `!prends NVDA 132.5 stop 128` = ton entrée et ton stop réels |
+| `!prends NVDA 132.5 go` | suit le GO confirmé du jour avec son stop et ses objectifs (pas recalculés) ; sans GO confirmé ce jour, rien n'est suivi |
+| `!sortie NVDA 131.2` | ta sortie réelle : clôture le trade suivi à ce prix, ou corrige le prix de sa dernière sortie s'il est déjà terminé |
 | `!positions` | trades suivis : sortir, alléger ou garder, avec les faits (aussi envoyé seul 30 min avant la clôture US) |
 | `!position NVDA 132.5` | même conseil pour une position prise hors de JARVIS (`short`, `stop 128` en plus) |
 | `!scan` | scanner tout de suite |

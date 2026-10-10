@@ -741,13 +741,14 @@ def open_risk(trades: list[dict]) -> float:
 
 
 def day_r(trades: list[dict], now: datetime) -> float:
-    """R réalisé aujourd'hui (date de Paris de la clôture) sur les trades pris."""
+    """R réalisé aujourd'hui (date de Paris de la clôture) sur les trades pris, net des frais estimés
+    (service.realized_r_net : stop exécuté au prix du gap, commissions IBKR à la taille du trade)."""
     from app.trading import service as T
 
     today = now.astimezone(PARIS).date()
     total = 0.0
     for t in trades:
-        r = T.realized_r(t)
+        r = T.realized_r_net(t)
         if r is None:
             continue
         ends = [e["at"] for e in t.get("events", []) if e["kind"] in ("stop", "close", "tp3", "tp2", "tp1")]
@@ -925,29 +926,42 @@ def text(data: dict | None, hist: list[dict] | None = None, now: datetime | None
 
 def reels(trades: list[dict]) -> dict:
     """Troisième population (avis de GPT, 10 oct.) : trades réellement pris et suivis par JARVIS (`!prends`),
-    terminés, hors Killmode (mesuré par son propre journal), en R réalisé. Indicatif : aucun effet."""
+    terminés, hors Killmode (mesuré par son propre journal), en R réalisé avant frais et net des frais estimés
+    (service.realized_r_net ; gagnants comptés nets). Indicatif : aucun effet."""
     from app.trading import service as T
 
     out = {}
     for market in MARKETS:
-        rs = [r for r in (T.realized_r(t) for t in trades if t.get("market", "stock") == market
-                          and not t.get("killmode")) if r is not None]
+        mine = [t for t in trades if t.get("market", "stock") == market and not t.get("killmode")]
+        done = [(T.realized_r(t), T.realized_r_net(t)) for t in mine if T.realized_r(t) is not None]
+        rs, nets = [r for r, _ in done], [n for _, n in done]
         out[market] = {"termines": len(rs), "esperance_r": round(sum(rs) / len(rs), 3) if rs else None,
-                       "total_r": round(sum(rs), 2), "gagnants": sum(r > 0 for r in rs)}
+                       "total_r": round(sum(rs), 2), "gagnants": sum(n > 0 for n in nets),
+                       "esperance_net_r": round(sum(nets) / len(nets), 3) if nets else None,
+                       "total_net_r": round(sum(nets), 2)}
     return out
 
 
 def populations_text(indicatif: list[str], real: dict | None) -> str:
-    """Lignes ajoutées à `!grade` : GO confirmés (labo) et trades réels, à côté du grade officiel de v1."""
+    """Lignes ajoutées à `!grade` : GO confirmés (labo) et trades réels, à côté du grade officiel de v1, chacun
+    avec la politique qu'il mesure (entrée, break-even, sortie au temps, taille)."""
+    from app.trading import service as T
+
     lines = []
     if indicatif:
-        lines.append("\n**Ce que tu trades vraiment** (indicatif : ne change ni le grade ni le risque)")
+        lines.append("\n**GO confirmés, stop fixe, vendus à la clôture** (≠ ton suivi : stop à l'entrée après TP2, "
+                     "pas de sortie au temps) · entrée par l'ordre stop de la confirmation, en R du labo (ses coûts, "
+                     "pas ta taille) ; indicatif : ne change ni le grade ni le risque")
         lines += indicatif
-    for market, g in (real or {}).items():
-        if g["termines"]:
-            lines.append(f"-# Tes trades réels {MARKET_FR[market]} : {g['termines']} terminés, {g['gagnants']} "
-                         f"gagnants, {g['esperance_r']:+.2f} R en moyenne avant frais ({g['total_r']:+.2f} R au total)"
-                         + (" · trop peu pour conclure" if g["termines"] < 30 else ""))
+    real = [(m, g) for m, g in (real or {}).items() if g["termines"]]
+    if real:
+        lines.append("\n**Tes trades réels** (R nets de frais estimés, bruts entre parenthèses)")
+        lines.append(f"-# Politique mesurée : {T.suivi_politique()}.")
+    for market, g in real:
+        lines.append(f"-# {MARKET_FR[market].capitalize()} : {g['termines']} terminés, {g['gagnants']} gagnants, "
+                     f"{g['esperance_net_r']:+.2f} R en moyenne ({g['esperance_r']:+.2f} brut), "
+                     f"{g['total_net_r']:+.2f} R au total ({g['total_r']:+.2f} brut)"
+                     + (" · trop peu pour conclure" if g["termines"] < 30 else ""))
     return "\n".join(lines)
 
 

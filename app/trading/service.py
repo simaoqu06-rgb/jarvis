@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 
 from app.config import env_float
 from app.core.http import SourceError
+from app.lab import simulator as SIM
 from app.sources import alpaca, kraken, twelvedata
 from app.trading import calendar as CAL
 from app.trading import catalyst as C
@@ -619,6 +620,7 @@ class Book:
             trade["status"] = "closed"
             trade["events"].append({"kind": "close", "price": trade["last_price"] if price is None else price, "reason": reason,
                                     "at": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+            _settle(trade)
             self.save()
         return trade
 
@@ -672,17 +674,29 @@ def apply_bars(trade: dict, bars: list[dict], now: datetime) -> list[str]:
             stop_hit = False
         if stop_hit:
             trade["status"] = "closed"
-            _event(trade, "stop", trade["stop_current"], bar["t"])
+            # Ouverture au-delà du stop (gap) : l'ordre stop part au marché, au pire du stop et de l'ouverture
+            # (règle du labo, simulator.py).
+            stop = trade["stop_current"]
+            fill = min(stop, bar["o"]) if sign == 1 else max(stop, bar["o"])
+            _event(trade, "stop", fill, bar["t"])
+            _settle(trade)
+            where = (f"exécuté vers {_num(fill)} (gap {'sous le' if sign == 1 else 'au-dessus du'} stop {_num(stop)})"
+                     if fill != stop else f"touché à {_num(stop)}")
             if trade["targets_hit"]:
-                messages.append(f"🛡️ **{trade['symbol']}** : stop suivi touché à {_num(trade['stop_current'])} après "
+                messages.append(f"🛡️ **{trade['symbol']}** : stop suivi {where} après "
                                 f"TP{trade['targets_hit']}. Trade terminé.")
             else:
-                messages.append(f"🛑 **{trade['symbol']}** : stop touché à {_num(trade['stop_current'])} "
-                                f"({trade['stop_pct']:+.2f} %). Point d'invalidation atteint, trade terminé.")
+                tail = (f" ({trade['stop_pct']:+.2f} %)" if fill == stop
+                        else f", soit {-abs(fill - trade['entry']) / trade['entry'] * 100:+.2f} %")
+                messages.append(f"🛑 **{trade['symbol']}** : stop {where}{tail}. "
+                                "Point d'invalidation atteint, trade terminé.")
             break
         while trade["targets_hit"] < len(trade["targets"]):
             target = trade["targets"][trade["targets_hit"]]
-            if not (bar["h"] >= target["price"] if sign == 1 else bar["l"] <= target["price"]):
+            # Un objectif compte franchi d'au moins un pas de cotation, comme au labo (un contact ne remplit
+            # pas forcément l'ordre limite) ; comparaison en pas, avec une tolérance pour les flottants.
+            tick = SIM.tick_size(trade.get("market", "stock"), target["price"])
+            if ((bar["h"] if sign == 1 else bar["l"]) - target["price"]) * sign < (1 - 1e-6) * tick:
                 break
             trade["targets_hit"] += 1
             n = trade["targets_hit"]
@@ -695,6 +709,7 @@ def apply_bars(trade: dict, bars: list[dict], now: datetime) -> list[str]:
             text += "."
             if n == len(trade["targets"]):
                 trade["status"] = "closed"
+                _settle(trade)
                 text += " Dernier objectif atteint, trade terminé. 🏁"
             else:
                 nxt = trade["targets"][n]
@@ -860,7 +875,8 @@ def summary(trade: dict) -> dict:
     risk = abs(trade["entry"] - trade["stop"])
     r_now = sign * (trade["last_price"] - trade["entry"]) / risk if risk else 0
     return trade | {"move_pct": round(move, 2), "r_now": round(r_now, 2),
-                    "against_jarvis": against_jarvis(trade)}
+                    "against_jarvis": against_jarvis(trade), "realized_r": realized_r(trade),
+                    "realized_r_net": realized_r_net(trade)}
 
 
 # --- Désaccords : Simão contre JARVIS, mesuré ----------------------------------------------
@@ -869,8 +885,11 @@ def summary(trade: dict) -> dict:
 
 def against_jarvis(p: dict) -> bool:
     """Vrai si le plan était noté NO GO (un plan sans note n'est ni pour ni contre). Un KILL de Killmode pris
-    (`!prends … kill`) n'est ni pour ni contre : sa mesure est le journal de Killmode."""
-    return bool(p.get("score")) and not p["score"]["go"] and not p.get("killmode")
+    (`!prends … kill`) n'est ni pour ni contre : sa mesure est le journal de Killmode. Un GO confirmé pris
+    (`!prends … go`) est avec JARVIS : son GO est celui du scanner, confirmé après l'ouverture, même si la note
+    recalculée à ton entrée a baissé."""
+    return (bool(p.get("score")) and not p["score"]["go"] and not p.get("killmode")
+            and p.get("policy") != "go_confirme")
 
 
 def disagreement_text(p: dict) -> str:
@@ -880,8 +899,22 @@ def disagreement_text(p: dict) -> str:
             "Je le suis quand même, marqué « contre l'avis de JARVIS » ; `!desaccords` dira qui avait raison.")
 
 
+EXIT_KINDS = ("stop", "close")
+
+
+def suivi_politique() -> str:
+    """Ce que mesurent `!desaccords` et les trades réels de `!grade` : ton suivi, pas le labo (entrée, break-even,
+    sortie au temps, taille)."""
+    from app.trading import killmode as K  # import tardif : killmode importe ce module
+
+    return ("ton suivi `!prends` : entrée à ton prix, stop d'origine jusqu'au TP2 puis à l'entrée, aucune sortie au "
+            f"temps, un tiers par objectif ; taille du trade (sinon {K.RISK_EUR:g} € de risque), frais IBKR estimés à "
+            "cette taille (crypto : frais du labo)")
+
+
 def realized_r(trade: dict) -> float | None:
-    """Gain d'un trade terminé en R, avec un tiers de la position par objectif (sa gestion habituelle)."""
+    """Gain d'un trade terminé en R, avec un tiers de la position par objectif (sa gestion habituelle), avant frais.
+    Chaque tiers sort au prix noté par le suivi (objectif, stop exécuté, clôture) ou corrigé avec `!sortie`."""
     if trade["status"] != "closed" or not trade.get("targets"):
         return None
     sign = 1 if trade["side"] == "long" else -1
@@ -891,47 +924,206 @@ def realized_r(trade: dict) -> float | None:
     r = lambda price: sign * (price - trade["entry"]) / risk  # noqa: E731
     legs = len(trade["targets"])
     hit = min(trade["targets_hit"], legs)
-    total = sum(r(t["price"]) for t in trade["targets"][:hit]) / legs
+    events = trade.get("events") or []
+    prices = {e["kind"]: e["price"] for e in events}
+    total = sum(r(prices.get(f"tp{i}", t["price"])) for i, t in enumerate(trade["targets"][:hit], start=1)) / legs
     if hit < legs:
-        exits = [e for e in trade["events"] if e["kind"] in ("stop", "close")]
+        exits = [e for e in events if e["kind"] in EXIT_KINDS]
         total += (legs - hit) / legs * r(exits[-1]["price"] if exits else trade["last_price"])
     return round(total, 2)
 
 
-def disagreements(book: Book) -> dict:
-    """Trades pris avec et contre l'avis de JARVIS : nombre, réussite et gain moyen des trades terminés."""
+def realized_r_net(trade: dict) -> float | None:
+    """realized_r moins les frais estimés (app/trading/fees.py) : le chiffre de l'arrêt de la journée, de
+    `!desaccords` et des trades réels de `!grade`."""
+    from app.trading import fees as FEES  # import tardif : fees lit killmode, qui importe ce module
+
+    r = realized_r(trade)
+    if r is None:
+        return None
+    try:
+        fees = FEES.fees_r(trade) or 0.0
+    except (KeyError, TypeError, ValueError, ZeroDivisionError) as exc:  # trade mal formé : le brut, jamais d'arrêt
+        log.warning("Frais du trade %s non estimés (%s: %s)", trade.get("id"), type(exc).__name__, exc)
+        fees = 0.0
+    return round(r - fees, 3)
+
+
+def _settle(trade: dict) -> None:
+    """Note le R net de frais estimés du trade qui vient de se terminer (ou dont la sortie est corrigée)."""
+    trade["realized_r_net"] = realized_r_net(trade)
+
+
+def record_exit(book: Book, symbol: str, price: float) -> dict | None:
+    """`!sortie SYMBOLE prix` : ta sortie réelle. Ferme à ce prix le dernier trade ouvert de `symbol` ; sans trade
+    ouvert, corrige le prix de la dernière sortie (stop, objectif ou clôture) du dernier trade terminé, marquée
+    `corrige` (le prix du suivi reste dans `prix_suivi`). None si aucun trade de `symbol` n'est suivi."""
+    symbol = symbol.upper()
+    mine = [t for t in book.trades if t["symbol"] == symbol]
+    opened = [t for t in mine if t["status"] == "open"]
+    if opened:
+        trade = book.close(opened[-1]["id"], price, "sortie déclarée sur Discord")
+        return {"trade": trade, "corrige": False, "autres": len(opened) - 1}
+    done = [t for t in mine if t["status"] == "closed" and t.get("events")
+            and (t["events"][-1]["kind"] in EXIT_KINDS or t["events"][-1]["kind"].startswith("tp"))]
+    if not done:
+        return None
+    trade = max(done, key=lambda t: t["events"][-1]["at"])
+    ev = trade["events"][-1]
+    before = {"price": ev["price"], "r": realized_r(trade), "r_net": realized_r_net(trade)}
+    ev.setdefault("prix_suivi", ev["price"])
+    ev.update(price=price, corrige=True)
+    _settle(trade)
+    book.save()
+    return {"trade": trade, "corrige": True, "avant": before, "sortie": ev}
+
+
+def exit_text(res: dict, now: datetime | None = None) -> str:
+    """Réponse à `!sortie` : le trade fermé ou corrigé, son R net de frais estimés et brut."""
+    now = now or datetime.now(timezone.utc)
+    t = res["trade"]
+    net, gross = realized_r_net(t), realized_r(t)
+    result = (f"{net:+.2f} R nets de frais estimés ({gross:+.2f} R brut)" if net is not None
+              else "résultat en R inconnu (trade sans objectifs)")
+    if not res["corrige"]:
+        text = f"🏁 **{t['symbol']}** clôturé à {_num(t['events'][-1]['price'])} (entrée {_num(t['entry'])}) : {result}."
+        if res["autres"]:
+            text += (f"\n-# {res['autres']} autre(s) trade(s) {t['symbol']} encore suivi(s) : `!sortie {t['symbol']} "
+                     "prix` à nouveau pour le suivant.")
+        return text
+    ev, before = res["sortie"], res["avant"]
+    kind = {"stop": "stop", "close": "clôture"}.get(ev["kind"], ev["kind"].upper())
+    return (f"✏️ **{t['symbol']}** : sortie corrigée à {_num(ev['price'])} au lieu de {_num(before['price'])} "
+            f"({kind} noté par le suivi {time_fr(datetime.fromisoformat(ev['at']), now)}, entrée {_num(t['entry'])}). "
+            f"Résultat : {result}" + (f", contre {before['r_net']:+.2f} R nets avant correction" if before["r_net"]
+                                      is not None else "") + ".")
+
+
+def note_slopes() -> dict:
+    """Pente de la note au labo par marché (R par point de note, cache des statistiques du worker), la même que
+    sous les plans (score.lab_slopes) ; {} sans labo. Ne lève jamais d'exception."""
+    try:
+        return SC.lab_slopes()
+    except Exception as exc:
+        log.warning("Pente de la note du labo illisible (%s: %s)", type(exc).__name__, exc)
+        return {}
+
+
+def _exit_day(t: dict) -> str:
+    """Jour de la sortie (UTC ; pendant la séance américaine, c'est aussi le jour de New York)."""
+    return t["events"][-1]["at"][:10] if t.get("events") else t["created_at"][:10]
+
+
+def disagreements(book: Book, slopes: dict | None = None) -> dict:
+    """Trades pris avec et contre l'avis de JARVIS : nombre, réussite et gain moyen des trades terminés, en R nets
+    de frais estimés (et bruts), avec erreur type et IC à 95 % en grappes par jour de sortie (stats.mean_ci).
+    `slopes` : pente de la note au labo par marché (note_slopes), qui conditionne « JARVIS a raison »."""
+    from app.lab import stats as LS  # import tardif : le labo importe ce module
+
     groups = {"avec": [], "contre": []}
     for t in book.trades:
         if t.get("score") and not t.get("killmode"):
             groups["contre" if against_jarvis(t) else "avec"].append(t)
-    out = {}
+    out: dict = {}
     for name, trades in groups.items():
-        rs = [x for x in (realized_r(t) for t in trades) if x is not None]
-        out[name] = {"total": len(trades), "closed": len(rs), "open": sum(t["status"] == "open" for t in trades),
-                     "wins": sum(x > 0 for x in rs), "avg_r": round(sum(rs) / len(rs), 2) if rs else None,
-                     "sum_r": round(sum(rs), 2)}
+        done = [(t, r, realized_r_net(t)) for t, r in ((t, realized_r(t)) for t in trades) if r is not None]
+        nets = [net for _, _, net in done]
+        day_sums: dict = {}
+        for t, _, net in done:
+            d = day_sums.setdefault(_exit_day(t), [0.0, 0])
+            d[0] += net
+            d[1] += 1
+        m, se, ci = LS.mean_ci(day_sums, sum(nets), len(nets))
+        out[name] = {"total": len(trades), "closed": len(done), "open": sum(t["status"] == "open" for t in trades),
+                     "wins": sum(x > 0 for x in nets), "avg_r": round(m, 4) if m is not None else None,
+                     "sum_r": round(sum(nets), 2), "se": se, "ci": ci, "days": len(day_sums),
+                     "avg_r_brut": round(sum(r for _, r, _ in done) / len(done), 4) if done else None,
+                     "sum_r_brut": round(sum(r for _, r, _ in done), 2),
+                     "marches": sorted({t.get("market", "stock") for t, _, _ in done})}
+    out["pente_note"] = dict(slopes or {})
     return out
 
 
+def _ci_text(ci: list | None) -> str:
+    return f"IC 95 % [{ci[0]:+.2f} ; {ci[1]:+.2f}]" if ci else "IC 95 % inconnu (un seul jour)"
+
+
 def disagreements_text(st: dict) -> str:
-    """Qui avait raison, en clair. Pas de conclusion tant que l'échantillon est trop petit."""
-    lines = ["**Désaccords : toi contre JARVIS** (trades suivis, un tiers par objectif)"]
+    """Qui avait raison, en clair, sur deux questions séparées : la note sépare-t-elle les bons trades (écart
+    NO GO pris − GO), et les NO GO pris rapportent-ils (NO GO trop sévère ?). Verdict seulement avec au moins
+    30 trades sur 20 jours de chaque côté et un IC à 95 % qui exclut 0 ; « JARVIS a raison » seulement si la note
+    est prédictive au labo (pente > 0 sur chaque marché des trades)."""
+    from app.lab import stats as LS  # import tardif : le labo importe ce module
+
+    market_fr = {"stock": "actions", "crypto": "crypto"}
+    lines = ["**Désaccords : toi contre JARVIS** (R nets de frais estimés, bruts entre parenthèses ; sorties au prix "
+             "suivi, ou au tien avec `!sortie`)",
+             f"-# Politique mesurée : {suivi_politique()}."]
     for name, label in (("avec", "Plans GO (JARVIS d'accord)"), ("contre", "Plans NO GO pris quand même")):
         g = st[name]
         if not g["closed"]:
             lines.append(f"{label} : {g['total']} trade(s), aucun terminé.")
             continue
-        lines.append(f"{label} : {g['closed']} terminé(s), {g['wins']} gagnant(s), "
-                     f"{g['avg_r']:+.2f} R en moyenne, {g['sum_r']:+.2f} R au total"
+        lines.append(f"{label} : {g['closed']} terminé(s) sur {g['days']} jour(s), {g['wins']} gagnant(s), "
+                     f"{g['avg_r']:+.2f} R en moyenne ({g['avg_r_brut']:+.2f} brut), {g['sum_r']:+.2f} R au total"
                      + (f" ({g['open']} en cours)" if g["open"] else ""))
     a, c = st["avec"], st["contre"]
-    if a["closed"] < 10 or c["closed"] < 10:
-        lines.append("-# Pas encore de verdict : il faut au moins 10 trades terminés de chaque côté.")
-    elif c["avg_r"] > a["avg_r"]:
-        lines.append("➡️ Pour l'instant **tu as raison contre JARVIS** : sa note NO GO est trop sévère, "
-                     "elle est à revoir.")
+    slopes = st.get("pente_note") or {}
+    markets = sorted(set(a.get("marches") or []) | set(c.get("marches") or []))
+    flat = [m for m in markets if slopes.get(m) is not None and slopes[m] <= 0]
+    unknown = [m for m in markets if slopes.get(m) is None]
+    slope_ok = bool(markets) and not flat and not unknown
+    for m in flat:  # pente du labo ≤ 0 : même mention que sous les plans
+        value = f"{slopes[m]:+.3f}".replace(".", ",").replace("-", "−")
+        lines.append(f"⚠️ Note non prédictive au labo (pente {value} R/pt, {market_fr.get(m, m)})")
+    if unknown:
+        lines.append(f"-# Pente de la note au labo inconnue ({', '.join(market_fr.get(m, m) for m in unknown)}) : "
+                     "aucun verdict en faveur de JARVIS tant qu'elle n'est pas mesurée positive.")
+
+    def enough(g: dict) -> bool:
+        return g["closed"] >= LS.MIN_TRADES and g["days"] >= LS.DEGRADE_MIN_DAYS
+
+    q1 = "**1. La note sépare-t-elle les bons trades ?** "
+    if not a["closed"] or not c["closed"]:
+        lines.append(q1 + "Pas de verdict : il faut des trades terminés des deux côtés.")
     else:
-        lines.append("➡️ Pour l'instant **JARVIS a raison** : les plans NO GO pris quand même rapportent moins.")
+        delta = c["avg_r"] - a["avg_r"]
+        se = math.sqrt(a["se"] ** 2 + c["se"] ** 2) if a["se"] is not None and c["se"] is not None else None
+        q = LS.t_quantile(0.975, min(a["days"], c["days"]) - 1) if min(a["days"], c["days"]) > 1 else None
+        ci = [delta - q * se, delta + q * se] if se is not None and q is not None else None  # t de Student, comme mean_ci
+        sure = enough(a) and enough(c) and ci is not None and (ci[0] > 0 or ci[1] < 0)
+        gap = f"écart {delta:+.2f} R, {_ci_text(ci)}"
+        if sure and ci[0] > 0:
+            lines.append(q1 + f"➡️ **tu as raison contre JARVIS** : les NO GO pris font mieux que les GO ({gap}). "
+                         "La note classe à l'envers, elle est à revoir.")
+        elif sure and slope_ok:
+            lines.append(q1 + f"➡️ **JARVIS a raison** : les GO font mieux que les NO GO pris ({gap}).")
+        elif sure:
+            lines.append(q1 + f"Pas de verdict pour JARVIS : les GO font mieux que les NO GO pris ({gap}), mais la "
+                         "note n'est pas prédictive au labo.")
+        else:
+            lines.append(q1 + f"Pas de verdict : {gap} ({a['closed']}/{c['closed']} trades, {a['days']}/{c['days']} "
+                         "jours)" + ("" if enough(a) and enough(c) else
+                                     f" ; il faut {LS.MIN_TRADES} trades sur {LS.DEGRADE_MIN_DAYS} jours de chaque côté")
+                         + ".")
+    q2 = "**2. NO GO trop sévère ?** "
+    if not c["closed"]:
+        lines.append(q2 + "Pas de réponse : aucun NO GO pris n'est terminé.")
+    else:
+        mean = f"{c['avg_r']:+.2f} R par trade, {_ci_text(c['ci'])}"
+        sure = enough(c) and c["ci"] is not None
+        if sure and c["ci"][0] > 0:
+            lines.append(q2 + f"➡️ **Oui pour l'instant** : les NO GO que tu as pris rapportent ({mean}).")
+        elif sure and c["ci"][1] < 0 and slope_ok:
+            lines.append(q2 + f"➡️ **Non, JARVIS a raison de dire NO GO** : les NO GO pris perdent ({mean}).")
+        elif sure and c["ci"][1] < 0:
+            lines.append(q2 + f"Non : les NO GO pris perdent ({mean}), mais la note n'est pas prédictive au labo : "
+                         "ce n'est pas un point pour JARVIS.")
+        else:
+            lines.append(q2 + f"Pas de réponse : {mean} ({c['closed']} trades, {c['days']} jours"
+                         + ("" if enough(c) else f" ; il en faut {LS.MIN_TRADES} sur {LS.DEGRADE_MIN_DAYS}") + ").")
+    lines.append("-# Les frais touchent les deux groupes presque autant : ils baissent les moyennes mais changent peu "
+                 "l'écart.")
     return "\n".join(lines)
 
 

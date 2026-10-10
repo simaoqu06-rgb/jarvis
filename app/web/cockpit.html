@@ -535,6 +535,8 @@ function renderOpen() {
 }
 
 function resultR(t) {
+  // R net de frais estimés du serveur (un tiers par objectif, comme !desaccords) ; sinon la dernière sortie seule.
+  if (t.realized_r_net != null) return t.realized_r_net;
   const last = (t.events || []).at(-1);
   if (!last) return null;
   return Math.round(sideSign(t) * (last.price - t.entry) / Math.abs(t.entry - t.stop) * 100) / 100;
@@ -544,7 +546,7 @@ function outcome(t) {
   const last = (t.events || []).at(-1);
   if (!last) return "—";
   const labels = { stop: "🛑 Stop", close: "✋ À la main", tp1: "🎯 TP1", tp2: "🎯 TP2", tp3: "🏁 TP3" };
-  return `${labels[last.kind] || esc(last.kind)} <span class="num">${fmt(last.price)}</span><div class="muted small">${when(last.at)}</div>`;
+  return `${labels[last.kind] || esc(last.kind)} <span class="num">${fmt(last.price)}</span>${last.corrige ? ` <span class="muted small">(ton prix, suivi ${fmt(last.prix_suivi)})</span>` : ""}<div class="muted small">${when(last.at)}</div>`;
 }
 
 let journal = { count: 0, total: 0, win: 0 };
@@ -568,7 +570,7 @@ function renderClosed() {
       <div><span>Moyenne</span><b class="${cls(journal.total)}">${rr(journal.count ? journal.total / journal.count : 0)}</b></div>
     </div>
     ${bars}
-    <div class="scroll"><table><tr><th>Actif</th><th>Entrée</th><th>Sortie</th><th style="text-align:right">Résultat</th></tr>
+    <div class="scroll"><table><tr><th>Actif</th><th>Entrée</th><th>Sortie</th><th style="text-align:right" title="R nets de frais estimés, un tiers par objectif">Résultat</th></tr>
     ${closed.map((t) => { const r = resultR(t); return `<tr>
       <td><span class="pill ${t.side}">${t.side}</span> <b>${esc(t.symbol)}</b><div class="muted small">${when(t.created_at)}</div></td>
       <td class="num">${fmt(t.entry)}</td><td>${outcome(t)}</td>

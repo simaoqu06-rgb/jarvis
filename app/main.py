@@ -320,8 +320,9 @@ async def trading_list(status: str | None = Query(None, description="open ou clo
 
 @app.get("/api/trading/disagreements")
 async def trading_disagreements():
-    """Trades pris avec et contre l'avis de JARVIS (plans NO GO) : qui avait raison."""
-    return trading.disagreements(scheduler.book)
+    """Trades pris avec et contre l'avis de JARVIS (plans NO GO) : qui avait raison (R nets de frais estimés, IC en
+    grappes par jour, pente de la note au labo)."""
+    return trading.disagreements(scheduler.book, await asyncio.to_thread(trading.note_slopes))
 
 
 @app.get("/api/trading/opinion")

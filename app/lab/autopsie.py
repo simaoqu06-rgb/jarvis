@@ -25,8 +25,9 @@ déclarer). Comparer les stops aux trades gardés jusqu'à la clôture serait un
 pas fait ici. Les repères (« gain rendu », « stop dans le bruit »…) sont des pistes pour une déclaration,
 jamais des règles : rien ici ne filtre un trade ni ne change un stop. Bloc scellé exclu.
 
-Grade indicatif des GO confirmés (même demande, avis de GPT : trois populations séparées) : la note de la
-politique que Simão trade (GO du scanner confirmés après l'ouverture), calculée par grade.evaluate sur les
+Grade indicatif des GO confirmés (même demande, avis de GPT : trois populations séparées) : la note des GO
+confirmés, stop fixe, vendus à la clôture (≠ ton suivi : stop à l'entrée après TP2, pas de sortie au temps),
+soit les GO du scanner confirmés après l'ouverture, calculée par grade.evaluate sur les
 lignes de la déclaration n° 7 (sortie déclarée r_sans_be), par trade exécuté et par GO de départ (0 R
 quand aucun ordre ne part). Indicatif : il ne change ni le grade officiel ni le risque proposé. Sa fenêtre
 (FENETRE_JOURS jours présents dans la base) publie son étendue réelle (stats.span, avis du 10 octobre, I5) :

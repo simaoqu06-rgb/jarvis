@@ -148,8 +148,16 @@ def test_trades_reels_et_lignes_du_grade():
               {"market": "stock", "status": "closed", "killmode": True, "side": "long", "entry": 10.0, "stop": 9.0,
                "targets_hit": 1, "targets": [{"price": 12.0}], "events": []}]
     real = GRADE.reels(trades)
-    assert real["stock"] == {"termines": 2, "esperance_r": 0.5, "total_r": 1.0, "gagnants": 1}
+    assert {k: real["stock"][k] for k in ("termines", "esperance_r", "total_r", "gagnants")} == \
+        {"termines": 2, "esperance_r": 0.5, "total_r": 1.0, "gagnants": 1}
+    # Nets des frais estimés : 23 actions (20 € × 1,15 sur 1 $ de risque), un bracket, 1 $ à l'entrée et à la sortie.
+    assert real["stock"]["esperance_net_r"] == pytest.approx(0.5 - 2 / 23, abs=1e-3)
+    assert real["stock"]["total_net_r"] == pytest.approx(1.0 - 4 / 23, abs=0.01)
     assert real["crypto"]["termines"] == 0
     txt = GRADE.populations_text(["-# GO confirmés : E indicatif"], real)
-    assert "Ce que tu trades vraiment" in txt and "2 terminés" in txt and "trop peu" in txt
+    assert "Ce que tu trades vraiment" not in txt
+    assert "GO confirmés, stop fixe, vendus à la clôture** (≠ ton suivi : stop à l'entrée après TP2, pas de sortie " \
+           "au temps)" in txt
+    assert "**Tes trades réels** (R nets de frais estimés" in txt and "Politique mesurée : ton suivi `!prends`" in txt
+    assert "2 terminés" in txt and "+0.41 R en moyenne (+0.50 brut)" in txt and "trop peu" in txt
     assert GRADE.populations_text([], {"stock": {"termines": 0}}) == ""
