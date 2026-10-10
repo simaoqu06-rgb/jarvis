@@ -238,6 +238,31 @@ async def test_rattrapage_aux_prix_negocies_et_operation_sur_titre(tmp_path, mon
     assert {r["strategy"] for r in rows} >= {"go_brut", "go_confirme"}       # le GO du plan, remis à l'échelle
 
 
+async def test_direct_rattrape_seulement_avec_le_journalier_du_jour(tmp_path, monkeypatch):
+    """Relecture : le direct d'un jour est traité le soir même, avant que son journalier soit en base ; rattrapé tout
+    de suite, une division du jour même passait sans être vue (gap brut −50 % pris pour un vrai gap)."""
+    hist, session, daily, today = _consistent()
+    db = LabDB(str(tmp_path / "lab.db"))
+    db.set("lab", "live_start", DAY.isoformat())
+    db.set("live:stock", "last_day", DAY.isoformat())
+    db.replace_universe("stock", DAY.isoformat(), [{"symbol": "AAA", "rank": 1, "reason": "test"},
+                                                   {"symbol": "SPLT", "rank": 2, "reason": "test"}])
+    db.put_bars("stock", "AAA", 1440, daily)
+    db.put_bars("stock", "SPLT", 1440, _half(daily))      # rechargé ajusté de la division du jour même
+    raw = {"AAA": hist + session, "SPLT": hist + _half(session)}
+
+    async def fake_bars(symbols, tf, start, end, transport=None, adjustment="split"):
+        return {s: raw[s] for s in symbols if s in raw}
+
+    monkeypatch.setattr(RAT.SRC, "alpaca_bars", fake_bars)
+    assert RAT.due_days(db, "stock", "live") == [] and await RAT.step(db, "stock", 60) == 0
+    db.put_bars("stock", "AAA", 1440, [today])           # séance suivante : le journalier du jour arrive
+    db.put_bars("stock", "SPLT", 1440, _half([today]))
+    assert RAT.due_days(db, "stock", "live") == [DAY] and await RAT.step(db, "stock", 60) == 1
+    symbols = {s for (s,) in db.conn.execute("SELECT DISTINCT symbol FROM strat_trades")}
+    assert symbols == {"AAA"}                              # SPLT écartée (opération sur titre)
+
+
 def test_facteur_des_prix_negocies():
     assert RAT._factor(100.0, 100.0) == RAT._factor(100.0, 97.0) == 1.0     # clôture officielle / dernière bougie
     assert RAT._factor(100.0, 50.0) == 2.0 and RAT._factor(10.0, 100.0) == pytest.approx(0.1)
@@ -269,6 +294,10 @@ def test_frontiere_du_rattrapage(tmp_path):
     db.set(ST.progress_job("stock"), "inline_from:live", "2026-09-21")
     assert RAT.due_days(db, "stock", "live") == []
     db.set("live:stock", "last_day", "2026-09-22")
+    assert RAT.due_days(db, "stock", "live") == []                      # aucun journalier en base
+    db.put_bars("stock", "SPY", 1440, [{"t": CO.ny_midnight(date(2026, 9, 21)), "o": 1, "h": 1, "l": 1, "c": 1}])
+    assert RAT.due_days(db, "stock", "live") == [date(2026, 9, 21)]     # le 22 attend son journalier
+    db.put_bars("stock", "SPY", 1440, [{"t": CO.ny_midnight(date(2026, 9, 22)), "o": 1, "h": 1, "l": 1, "c": 1}])
     assert RAT.due_days(db, "stock", "live") == [date(2026, 9, 21), date(2026, 9, 22)]
     assert RAT.remaining(db.conn, "stock") == {"replay": 0, "live": 2}
 

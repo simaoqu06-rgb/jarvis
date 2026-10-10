@@ -896,7 +896,8 @@ les essais existants, plus des colonnes descriptives qui ne décident de rien et
    valeur dont le gap brut et le gap ajusté divergent de plus de 25 % (opération sur titre entre la veille et la
    séance) est écartée, comme à la n° 9. Avant, le demi-pas, les 3 cents, les actions entières, la commission et le
    minimum de 1 $ étaient calculés sur des prix qu'aucun trader n'a vus. Le générateur n'écrit plus les lignes des
-   actions : le rattrapage les fait toutes, jusqu'au dernier jour traité (rejeu et direct).
+   actions : le rattrapage les fait toutes, jusqu'au dernier jour traité (rejeu et direct) dont le journalier est
+   en base (sans lui, l'opération sur titre du jour même ne se voit pas).
 
 ### Ce qui ne change pas
 
@@ -959,9 +960,10 @@ regroupement d'actions.
 Rattrapage complet des deux marchés (`progress_job` : `strats:stock:d10`, `strats:crypto:d10`), bougies relues à la
 source : plusieurs minutes par séance d'actions, hors séance seulement. Les séances de la n° 9 sont recalculées (marque
 `plus10.MESURE`, le tableau ne lit que les recalculées), et celles de Killmode complet aussi (l'empreinte de coût
-change avec les nouvelles variantes). Les jours du direct en actions attendent le passage du rattrapage suivant, qui
-traite d'abord l'arriéré du rejeu. Jusqu'à la fin du rattrapage, le tableau ne montre que les lignes de la n° 10,
-avec la mention « Tableau partiel : N jours en rattrapage » : les lignes d'avant sont exclues, jamais mélangées.
+change avec les nouvelles variantes). Les jours du direct en actions attendent leur journalier (relu au passage de
+la séance suivante), puis le rattrapage, qui traite d'abord l'arriéré du rejeu. Jusqu'à la fin du rattrapage, le
+tableau ne montre que les lignes de la n° 10, avec la mention « Tableau partiel : N jours en rattrapage » : les
+lignes d'avant sont exclues, jamais mélangées.
 
 ### Limites
 

@@ -389,6 +389,7 @@ def test_nouvelle_declaration_relance_le_rattrapage(tmp_path, monkeypatch):
     db.set("replay:stock", "start", "2026-09-14")
     db.set("replay:stock", "last_day", "2026-09-16")
     db.set(ST.progress_job("stock"), "rattrapage:replay", "2026-09-16")
+    db.put_bars("stock", "SPY", 1440, [{"t": CO.ny_midnight(date(2026, 9, 16)), "o": 1, "h": 1, "l": 1, "c": 1}])
     assert RAT.due_days(db, "stock", "replay") == []
     monkeypatch.setattr(ST, "DECLARATION", ST.DECLARATION + 1)
     assert RAT.due_days(db, "stock", "replay") == [date(2026, 9, 14), date(2026, 9, 15), date(2026, 9, 16)]

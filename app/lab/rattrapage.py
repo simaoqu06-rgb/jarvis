@@ -19,9 +19,9 @@ ajoutée) repart du début, et chaque jour est recalculé avec toutes les strat�
 
 n° 10 : les actions se mesurent aux prix négociés (bougies de 5 min non ajustées, journalier et plans v1 remis à leur
 échelle, comme la n° 9) ; le générateur n'écrit plus leurs lignes, le rattrapage va donc jusqu'au dernier jour traité
-(last_day du rejeu ou du direct). Une valeur dont le gap brut et le gap ajusté divergent (opération sur titre entre la
-veille et la séance) est écartée. En crypto, sans frontière posée (rejeu déjà fini quand la déclaration change), le
-rattrapage va jusqu'au dernier jour traité.
+(last_day du rejeu ou du direct) dont le journalier est en base. Une valeur dont le gap brut et le gap ajusté
+divergent (opération sur titre entre la veille et la séance) est écartée. En crypto, sans frontière posée (rejeu déjà
+fini quand la déclaration change), le rattrapage va jusqu'au dernier jour traité.
 """
 import json
 import logging
@@ -54,7 +54,9 @@ def _start(db: LabDB, market: str, origin: str) -> date | None:
 
 def due_days(db: LabDB, market: str, origin: str) -> list[date]:
     """Jours à rattraper, dans l'ordre : du curseur (exclu) au premier jour calculé en ligne (exclu) ; n° 10 : en
-    actions, et en crypto sans jour calculé en ligne, jusqu'au dernier jour traité (inclus)."""
+    actions, et en crypto sans jour calculé en ligne, jusqu'au dernier jour traité (inclus). En actions, pas au-delà
+    du dernier journalier en base : sans la bougie du jour, une opération sur titre du jour même ne se voit pas
+    (operation), et le direct ne l'a qu'au passage de la séance suivante."""
     job = ST.progress_job(market)
     inline = None if market == "stock" else db.get(job, f"inline_from:{origin}")
     done = db.get(f"{origin}:{market}", "last_day")
@@ -64,6 +66,11 @@ def due_days(db: LabDB, market: str, origin: str) -> list[date]:
     cursor = db.get(job, f"rattrapage:{origin}")
     first = date.fromisoformat(cursor) + timedelta(days=1) if cursor else start
     last = date.fromisoformat(inline) - timedelta(days=1) if inline else date.fromisoformat(done)
+    if market == "stock":
+        known = P10.last_daily(db)
+        if known is None:
+            return []
+        last = min(last, date.fromisoformat(known))
     if first > last:
         return []
     from app.lab.runner import market_days  # import tardif : runner importe generator

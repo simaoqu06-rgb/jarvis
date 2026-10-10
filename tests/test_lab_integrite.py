@@ -185,6 +185,7 @@ def test_rattrapage_a_moitie_fait_ne_montre_que_la_declaration_en_vigueur(tmp_pa
     db.set("replay:stock", "start", "2026-09-14")
     db.set("replay:stock", "last_day", "2026-09-16")         # n° 10 : en actions, le rattrapage va jusqu'au dernier jour
     db.set(job, "inline_from:replay", "2026-09-17")          # traité ; le 17 est déjà de la nouvelle déclaration
+    db.put_bars("stock", "SPY", 1440, [{"t": CO.ny_midnight(date(2026, 9, 17)), "o": 1, "h": 1, "l": 1, "c": 1}])
     db.set(job, "rattrapage:replay", "2026-09-14")           # le 14 est refait, restent le 15 et le 16
     db.replace_strat("replay", "stock", "2026-09-14", [_strat("AAA"), _strat("BBB")])
     _old_declaration(db, "2026-09-15", ["AAA", "BBB"], ST.DECLARATION - 1)
