@@ -201,9 +201,17 @@ def test_rattrapage_a_moitie_fait_ne_montre_que_la_declaration_en_vigueur(tmp_pa
     ro = DB.open_readonly(path)                                 # serveur web : même tableau en lecture seule
     assert SS.report(ro)["strategies"]["stock"]["pullback"]["jours"] == 2
     ro.close()
-    db.set(job, "rattrapage:replay", "2026-09-16")           # rattrapage fini : tout est de la même déclaration
+    # Lot 2 (C3) : curseur au bout alors que des lignes d'avant restent (jour non refait) : elles restent exclues, le
+    # tableau le dit ; avant, elles revenaient dans le tableau dès que remaining() tombait à 0.
+    db.set(job, "rattrapage:replay", "2026-09-16")
     rep = SS.report(db.conn)
-    assert rep["partiel"] is None and rep["strategies"]["stock"]["pullback"]["jours"] == 4
+    assert rep["partiel"] == {"stock": {"declaration": ST.DECLARATION, "jours_rattrapage": 0, "lignes_exclues": 3}}
+    assert rep["strategies"]["stock"]["pullback"]["jours"] == 2
+    assert "Tableau partiel (actions) : aucun jour en rattrapage, 3 lignes de l'ancienne déclaration exclues" \
+        in SS.text(rep)
+    db.conn.execute("DELETE FROM strat_trades WHERE declaration IS NOT ?", (ST.DECLARATION,))   # refaits (ou sautés)
+    rep = SS.report(db.conn)                                  # rattrapage fini : tout est de la même déclaration
+    assert rep["partiel"] is None and rep["strategies"]["stock"]["pullback"]["jours"] == 2
     assert "Tableau partiel" not in SS.text(rep)
 
 
@@ -251,9 +259,15 @@ def test_autopsie_pendant_un_rattrapage_ne_lit_que_la_declaration_en_vigueur(tmp
     ro = DB.open_readonly(path)                                 # serveur web (/api/lab/autopsie) : lecture seule
     assert AUT.report(ro)["grade_indicatif"]["go_confirme"]["par_go"]["go"] == 2
     ro.close()
+    # Lot 2 (C3) : curseur au bout, lignes d'avant toujours là (jours non refaits) : elles restent exclues.
     db.set(job, "rattrapage:replay", "2026-09-16")
     rep = AUT.report(db.conn)
-    assert rep["partiel"] is None and rep["grade_indicatif"]["go_confirme"]["par_go"]["go"] == 4
+    assert rep["partiel"]["stock"]["jours_rattrapage"] == 0 and rep["partiel"]["stock"]["lignes_exclues"] == 2
+    assert rep["grade_indicatif"]["go_confirme"]["par_go"]["go"] == 2
+    assert "aucun jour à rattraper, mais des lignes d'avant" in "\n".join(AUT.indicatif_lines(rep["grade_indicatif"]))
+    db.conn.execute("DELETE FROM strat_trades WHERE declaration IS NOT ?", (ST.DECLARATION,))   # refaits (ou sautés)
+    rep = AUT.report(db.conn)
+    assert rep["partiel"] is None and rep["grade_indicatif"]["go_confirme"]["par_go"]["go"] == 2
     assert "rattrapage" not in "\n".join(AUT.indicatif_lines(rep["grade_indicatif"]))
 
 

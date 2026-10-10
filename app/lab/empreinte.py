@@ -14,7 +14,8 @@ cache de statistiques ne voit pas qu'un trade a été réécrit sur place ou que
   constantes qui produisent les lignes, « v1 » (trades) ou « strat » (lignes du labo v2), pas des fichiers
   entiers de service.py ; lu une fois à l'import, sans rien importer, écrit dans chaque ligne. Un changement de
   source change la révision même sans changer le comportement : c'est un indice, la preuve est l'empreinte v1.
-- cost_rev() : empreinte du modèle de coût v1 (simulator.costs sur des prix et rangs types), trades.cout_rev.
+- cost_rev() : empreinte du modèle de coût v1 (simulator.costs sur des prix et rangs types), trades.cout_rev ;
+  strat_cost_rev(marché) : celle des lignes du labo v2 (lot 2, C6), strat_trades.cout_rev.
 - STATS_CODE : hachage des sources des modules qui calculent les caches (app/lab, killmode), ajouté à leurs
   signatures : un déploiement les recalcule une fois, tout de suite (code_changed), sans attendre leur âge maximal.
 - revision(conn, table) : compteurs rev:trades et rev:strat (progress « lab »), incrémentés dans la transaction
@@ -124,6 +125,21 @@ def cost_rev() -> str:
     from app.lab import simulator as SIM  # import tardif : ce module reste sans dépendance à l'import
 
     return _sha([SIM.costs("stock", p) for p in COST_PRICES] + [SIM.costs("crypto", 100.0, r) for r in COST_RANKS])
+
+
+def strat_cost_rev(market: str) -> str:
+    """Lot 2 (C6) : empreinte du modèle de coût des lignes du labo v2 (strat_trades.cout_rev, plus10_trades.cout_rev).
+    Actions : kill_complet.cost_fingerprint (base des prix, révision du simulateur, r_20e et r_3c de trades types :
+    killmode.real_r, stressed_r et le barème IBKR, absents de STRAT_CODE). Crypto (ni r_20e ni r_3c) : révision du
+    simulateur et frais OKX du simulateur par rang."""
+    if market == "stock":
+        from app.lab import kill_complet as KC  # imports tardifs : tirent killmode
+
+        return KC.cost_fingerprint()
+    from app.lab import simulator as SIM
+    from app.lab import strategies as ST
+
+    return _sha([ST.SIM_REV] + [SIM.costs("crypto", 100.0, r) for r in COST_RANKS])
 
 
 def revision(conn, table: str) -> int:

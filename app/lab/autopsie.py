@@ -409,6 +409,9 @@ def _esp(m: dict, market: str) -> str:
 def _partial_text(part: dict) -> str:
     """I2 : rattrapage d'une nouvelle déclaration en cours, seules ses lignes sont lues."""
     n = part["jours_rattrapage"]
+    if not n:  # lot 2 (C3) : d'anciennes lignes restent sans jour à refaire, toujours exclues
+        return (f"aucun jour à rattraper, mais des lignes d'avant la déclaration n° {part['declaration']} restent "
+                "(exclues) : seuls les jours refaits comptent")
     return (f"rattrapage de la déclaration n° {part['declaration']} en cours (encore {n} jour{'s' if n > 1 else ''}), "
             "seuls les jours déjà refaits comptent")
 

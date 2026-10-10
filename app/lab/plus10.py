@@ -42,6 +42,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from app.lab import collector as CO
+from app.lab import empreinte as E
 from app.lab import heartbeat
 from app.lab import seal as SEAL
 from app.lab import sources as SRC
@@ -248,6 +249,18 @@ def ready_days(db: LabDB, limit: int = 30) -> list[date]:
         if d not in done and not SEAL.sealed("replay", d)][:limit]
 
 
+def a_recalculer(conn: sqlite3.Connection) -> int:
+    """Lot 2 (C4), lecture seule : séances déjà calculées sous une autre mesure que MESURE (hors bloc scellé), encore à
+    recalculer, sur le modèle de « a_recalculer » de Killmode complet ; le tableau ne les lit pas en attendant. Les
+    séances jamais calculées n'en sont pas (avancement ordinaire de la n° 9)."""
+    try:
+        rows = conn.execute("SELECT key, value FROM progress WHERE job = ?", (JOB,)).fetchall()
+    except sqlite3.Error:
+        return 0
+    return sum(1 for key, value in rows if not SEAL.sealed("replay", key)
+               and not (v := json.loads(value)).get("absente") and v.get("mesure") != MESURE)
+
+
 async def inactive_symbols(db: LabDB, today: date, transport=None) -> set[str]:
     """Actions inactives chez Alpaca (lues une fois par jour) : la part des valeurs des listes devenues inactives."""
     cached = db.get("assets", INACTIVE_KEY)
@@ -351,10 +364,12 @@ async def step(db: LabDB, now: datetime, max_seconds: float, transport=None) -> 
                 db.set(JOB, day.isoformat(), {"absente": True})
             continue
         rows, stats = got
+        cost = E.strat_cost_rev("stock")  # lot 2 (C6) : modèle de coût de r_20e et r_3c
         with db.transaction():
             db.conn.execute("DELETE FROM plus10_trades WHERE day = ?", (day.isoformat(),))
-            db.conn.executemany(f"INSERT INTO plus10_trades ({', '.join(COLUMNS)}) VALUES "
-                                f"({', '.join('?' for _ in COLUMNS)})", [tuple(r.get(c) for c in COLUMNS) for r in rows])
+            db.conn.executemany(f"INSERT INTO plus10_trades ({', '.join(COLUMNS)}, cout_rev) VALUES "
+                                f"({', '.join('?' for _ in COLUMNS)}, ?)",
+                                [(*(r.get(c) for c in COLUMNS), cost) for r in rows])
             db.set(JOB, day.isoformat(), stats | {"mesure": MESURE})
         log.info("Labo : n° 9 %s, %d S+10, %d Rebond, %d lignes", day, len(stats["listes"]["s10"]),
                  len(stats["listes"]["rebond"]), len(rows))
@@ -538,6 +553,7 @@ def report(conn: sqlite3.Connection, trials: int, scans: Path | None = None) -> 
     keys = sorted(days)
     return {
         "numero": NUMERO, "seances": len(days), "du": keys[0], "au": keys[-1], "essais": essais,
+        "a_recalculer": a_recalculer(conn),  # lot 2 (C4) : séances d'une autre mesure, hors du tableau en attendant
         "amplitude": {k: _pct(v) for k, v in groups.items()},
         "amplitude_par_prix": {k: {t: _pct(c) for t, c in v.items()} for k, v in by_price.items()},
         "reste_apres_decision": {k: _pct(v) for k, v in sorted(reste.items())},
@@ -560,7 +576,10 @@ def text(rep: dict | None) -> str | None:
     """Lignes de !strategies."""
     if not rep:
         return None
-    lines = [f"🎯 Potentiel +10 (n° {rep['numero']}, {rep['seances']} séances {rep['du']} → {rep['au']}) :"]
+    stale = rep.get("a_recalculer") or 0  # lot 2 (C4)
+    lines = [f"🎯 Potentiel +10 (n° {rep['numero']}, {rep['seances']} séances {rep['du']} → {rep['au']}"
+             + (f", {stale} séance{'s' if stale > 1 else ''} encore à recalculer (mesure n° {MESURE})" if stale else "")
+             + ") :"]
     for e, it in rep["essais"].items():
         flag = ("✅ " if it.get("candidate_compte", it["candidate"])  # n° 10
                 else "☑️ avantage, perd à 20 € · " if it["candidate"] else "")
