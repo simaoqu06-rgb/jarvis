@@ -45,17 +45,19 @@ def test_temoin_de_killmode_pendant_la_vie_de_son_ordre(monkeypatch):
     windows = {}
     real = ST.witness
 
-    def spy(d, key, risk_pct, multiples, cost_of, window):
-        windows[key[3]] = window
-        return real(d, key, risk_pct, multiples, cost_of, window)
+    def spy(d, key, risk_pct, multiples, cost_of, window, exit_mode="v1"):
+        windows.setdefault(key[3], []).append(window)
+        return real(d, key, risk_pct, multiples, cost_of, window, exit_mode)
 
     monkeypatch.setattr(ST, "witness", spy)
     d = day(RANGE + RUN + [(114.7, 114.9, 114.5, 114.7)] * 40)   # séance jusqu'après 11 h
-    rows_by_name(d)
+    rows = rows_by_name(d)
     until = int(datetime.combine(DAY, ST.KILL_UNTIL, CO.NEW_YORK).timestamp())
-    assert windows["killmode"] == (d.first, bisect_left(d.t, until))
-    assert windows["killmode"][1] - windows["killmode"][0] == 15   # 9 h 45 à 10 h 55
-    assert windows["orb15"] == (d.first, d.last)
+    # n° 10 : témoin à la même heure (ST.witness_window), puis celui de la journée (temoin_journee_r) sur la fenêtre
+    # de la n° 6.
+    assert windows["killmode"] == [ST.witness_window(d, rows["killmode"]), (d.first, bisect_left(d.t, until))]
+    assert windows["killmode"][1][1] - windows["killmode"][1][0] == 15   # 9 h 45 à 10 h 55
+    assert windows["orb15"][-1] == (d.first, d.last)
 
 
 def _days(start: str, n: int) -> list[str]:

@@ -89,8 +89,9 @@ def test_stress_de_3_cents_et_mise_de_simao():
     gain = sum(e["part"] * (e["price"] - (0 if e["reason"].startswith("tp") else 0.03) - fill) for e in res["exits"])
     assert v["r_3c"] == pytest.approx(gain / 3.01 - SS.ibkr_commission_r(101.01, 98.0), abs=1e-4)
     assert v["r_20e"] < conf["r_sans_be"] - 0.2       # 6 ordres à 1 $ minimum pour ~23 $ de risque
-    assert ST.cost_variants("crypto", res) == {"r_3c": None, "r_20e": None}
-    assert ST.cost_variants("stock", {"triggered": False, "exits": []}) == {"r_3c": None, "r_20e": None}
+    none = dict.fromkeys(("r_3c", "r_20e", "r_20e_deg", "r_20e_1s", "r_20e_2s"))  # n° 10 : variantes descriptives
+    assert ST.cost_variants("crypto", res) == none
+    assert ST.cost_variants("stock", {"triggered": False, "exits": []}) == none
 
 
 def test_candidate_exige_le_stress_de_3_cents():
@@ -99,9 +100,15 @@ def test_candidate_exige_le_stress_de_3_cents():
     item = SS.report(db.conn)["strategies"]["stock"]["pullback"]
     assert item["candidate"] and set(item["robuste"]) >= {"r_3c"} and "r_3c" in item["robustesse"]
     assert item["mise_20e"]["esperance_r"] == pytest.approx(0.2, abs=0.01) and item["rentable_20e"]
+    assert item["candidate_compte"] and f"\n✅ {item['nom']} :" in SS.text(SS.report(db.conn))
     db.conn.execute("UPDATE strat_trades SET r_20e = -0.05")
-    item = SS.report(db.conn)["strategies"]["stock"]["pullback"]
-    assert item["candidate"] and not item["rentable_20e"]                    # la mise de Simão ne décide pas
+    rep = SS.report(db.conn)
+    item = rep["strategies"]["stock"]["pullback"]
+    # n° 10 (L3, voie B) : « candidate » garde sa définition (la mise de Simão n'en décide pas), mais le ✅ demande
+    # aussi une espérance positive à 20 € (candidate_compte) ; r_20e est affiché avec la robustesse, hors de « tient ».
+    assert item["candidate"] and not item["rentable_20e"] and not item["candidate_compte"]
+    assert item["robuste"]["r_20e"] < 0 and item["robuste"]["tient"]
+    assert f"\n☑️ avantage, perd à 20 € · {item['nom']} :" in SS.text(rep) and f"✅ {item['nom']}" not in SS.text(rep)
     db.conn.execute("UPDATE strat_trades SET r_3c = -0.1")
     item = SS.report(db.conn)["strategies"]["stock"]["pullback"]
     assert not item["candidate"] and item["robuste"]["r_3c"] < 0 and not item["robuste"]["tient"]

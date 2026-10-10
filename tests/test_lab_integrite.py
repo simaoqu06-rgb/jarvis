@@ -70,6 +70,9 @@ async def test_rejeu_ecrit_code_cout_et_declaration(tmp_path):
     await R.replay(START, START, "stock", db, collect=False, now=NOW)
     revs = db.conn.execute("SELECT DISTINCT code_rev, cout_rev, computed_at IS NOT NULL FROM trades").fetchall()
     assert revs == [(E.code_rev("v1"), E.cost_rev(), 1)]
+    # n° 10 : les lignes v2 des actions ne viennent que du rattrapage (prix bruts) ; replace_strat les trace
+    assert db.conn.execute("SELECT COUNT(*) FROM strat_trades WHERE market = 'stock'").fetchone()[0] == 0
+    db.replace_strat("replay", "stock", "2026-09-14", [_strat()])
     strat = db.conn.execute("SELECT DISTINCT code_rev, declaration, computed_at IS NOT NULL FROM strat_trades").fetchall()
     assert strat == [(E.code_rev("strat"), ST.DECLARATION, 1)]
     db.replace_strat("replay", "crypto", "2026-09-14", [_strat()])
@@ -180,7 +183,8 @@ def test_rattrapage_a_moitie_fait_ne_montre_que_la_declaration_en_vigueur(tmp_pa
     db = LabDB(path)
     job = ST.progress_job("stock")
     db.set("replay:stock", "start", "2026-09-14")
-    db.set(job, "inline_from:replay", "2026-09-17")          # nouvelle déclaration calculée en ligne depuis le 17
+    db.set("replay:stock", "last_day", "2026-09-16")         # n° 10 : en actions, le rattrapage va jusqu'au dernier jour
+    db.set(job, "inline_from:replay", "2026-09-17")          # traité ; le 17 est déjà de la nouvelle déclaration
     db.set(job, "rattrapage:replay", "2026-09-14")           # le 14 est refait, restent le 15 et le 16
     db.replace_strat("replay", "stock", "2026-09-14", [_strat("AAA"), _strat("BBB")])
     _old_declaration(db, "2026-09-15", ["AAA", "BBB"], ST.DECLARATION - 1)

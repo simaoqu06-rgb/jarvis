@@ -127,10 +127,11 @@ def test_plans_go_par_stop():
     # stock_day : les bras viennent avec la ligne v1, rien sans GO.
     v1 = {"plan": PLAN, "decided_at": OPEN - 20 * 60, "entry_until": d_close(), "last_price": 100.0,
           "cost": SIM.costs("stock", 100.0), "go": True, "plancher": None}
-    names = {r["strategy"] for r in ST.stock_day(DAY, "AAA", hist(), bars_from(OPEN, session(CONFIRMED)), daily(), 3, v1)}
+    names = {r["strategy"] for r in ST.stock_day(DAY, "AAA", hist(), bars_from(OPEN, session(CONFIRMED)), daily(), 3, v1,
+                                                 traded=True)}
     assert {"v1", "go_brut", "go_confirme"} <= names and "go_brut_plancher" not in names
     names = {r["strategy"] for r in ST.stock_day(DAY, "AAA", hist(), bars_from(OPEN, session(CONFIRMED)), daily(), 3,
-                                                 v1 | {"go": False})}
+                                                 v1 | {"go": False}, traded=True)}
     assert "v1" in names and not names & set(ST.GO_STRATEGIES)
 
 
@@ -244,10 +245,11 @@ def test_tableau_de_la_confirmation():
 
 
 def test_la_crypto_garde_son_rattrapage():
-    # Les n° 7 et 8 ne touchent que les actions : le rattrapage crypto de la n° 6 continue (rien n'y change). Une
-    # déclaration qui ajoute des essais crypto doit remonter CRYPTO_DECLARATION (ce test la rappelle).
-    assert ST.progress_job("stock") == "strats:stock:d8" and ST.progress_job("crypto") == "strats:crypto:d6"
-    assert len([t for t in ST.trials() if t["market"] == "crypto"]) == 49 and ST.CRYPTO_DECLARATION == 6
+    # Les n° 7 et 8 ne touchaient que les actions : le rattrapage crypto de la n° 6 continuait. Une déclaration qui
+    # change les lignes crypto doit remonter CRYPTO_DECLARATION (ce test la rappelle) : la n° 10 corrige le
+    # simulateur (stops serrés), les deux marchés repartent, sans essai crypto de plus.
+    assert ST.progress_job("stock") == "strats:stock:d10" and ST.progress_job("crypto") == "strats:crypto:d10"
+    assert len([t for t in ST.trials() if t["market"] == "crypto"]) == 49 and ST.CRYPTO_DECLARATION == 10
 
 
 def test_reference_des_bras_et_commission():

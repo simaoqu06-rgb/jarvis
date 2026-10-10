@@ -46,6 +46,12 @@ STRAT_COLUMNS = ("origin", "market", "symbol", "day", "strategy", "slot", "signa
                  "r_retard", "r_manque", "temoin_r", "temoin_triggered", "gap_open_pct", "rank", "r_emperor",
                  "r_emperor_alerte", "r_emperor_confirme", "r_vwap", "r_1430", "r_spy", "sur_vwap", "atr_pct",
                  "vol15_adv", "stop_avant_entree", "confirmation", "r_3c", "r_20e")
+# Déclaration n° 10 : colonnes descriptives (aucune ne décide de « candidate ») et témoin des actions sur la journée,
+# ajoutées par migration, aussi sur une base neuve (strat_* et plus10_trades).
+STRAT_N10 = (("r_be_tp2", "REAL"), ("r_ouverture", "REAL"), ("r_20e_deg", "REAL"), ("r_20e_1s", "REAL"),
+             ("r_20e_2s", "REAL"), ("temoin_journee_r", "REAL"), ("temoin_journee_triggered", "INTEGER"),
+             ("temoin_tirages", "TEXT"))
+STRAT_COLUMNS += tuple(c for c, _ in STRAT_N10)
 STRAT_DDL = """CREATE TABLE IF NOT EXISTS {name} (
     id INTEGER PRIMARY KEY,
     origin TEXT NOT NULL CHECK (origin IN ('replay', 'live')),
@@ -177,7 +183,7 @@ CREATE TABLE IF NOT EXISTS plus10_trades (
 """.format(trades=TRADES_DDL.format(name="trades"), trades_sealed=TRADES_DDL.format(name="trades_sealed"),
            strat=STRAT_DDL.format(name="strat_trades"), strat_sealed=STRAT_DDL.format(name="strat_trades_sealed"))
 # Colonnes ajoutées après coup (ALTER TABLE à l'ouverture par le worker ; idempotent).
-STRAT_MIGRATIONS = (("r_emperor", "REAL"), ("r_emperor_alerte", "REAL"), ("r_emperor_confirme", "REAL"),
+STRAT_MIGRATIONS = STRAT_N10 + (("r_emperor", "REAL"), ("r_emperor_alerte", "REAL"), ("r_emperor_confirme", "REAL"),
                     ("r_vwap", "REAL"), ("r_1430", "REAL"), ("r_spy", "REAL"), ("sur_vwap", "INTEGER"),
                     ("atr_pct", "REAL"), ("vol15_adv", "REAL"), ("stop_avant_entree", "INTEGER"),
                     ("confirmation", "TEXT"), ("r_3c", "REAL"), ("r_20e", "REAL"))
@@ -190,6 +196,7 @@ MIGRATIONS = {
     "lessons": (("base_trade_id", "INTEGER"), ("seen_until", "TEXT")),
     "method_versions": (("base", "TEXT"), ("rules", "TEXT"), ("role", "TEXT"), ("started_ts", "INTEGER"),
                         ("decided_at", "TEXT"), ("note", "TEXT")),
+    "plus10_trades": STRAT_N10,  # n° 10 (plus10.TRADE_KEYS)
     # Labo v2, déclarations n° 2 et 3 : sorties EmperorBTC ; n° 6 : sorties de Gemini, VWAP à la décision et
     # mesure de Killmode (ATR, volume des 15 premières minutes, stop touché avant l'entrée) ; n° 7 : statut de la
     # confirmation du GO (confirme, annule, expire).

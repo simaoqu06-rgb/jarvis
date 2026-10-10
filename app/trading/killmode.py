@@ -1509,7 +1509,8 @@ def lab_line(it: dict | None) -> str | None:
             + f" sur {it['declenches']} trades ({it.get('jours', 'n/d')} j"
             + (", jours non vus au choix de la règle" if it.get("jours_non_vus") else "")
             + f") · vs témoin {SS._r(wit.get('ecart_r'))} R"
-            + (" · ✅ candidate au labo (pas une promotion)" if it.get("candidate") else "")
+            + (" · ✅ candidate au labo (pas une promotion)" if it.get("candidate_compte", it.get("candidate"))
+               else " · ☑️ avantage au labo, perd à 20 €" if it.get("candidate") else "")  # n° 10
             + (" · échantillon faible" if it.get("echantillon_faible") else ""))
 
 
@@ -1741,7 +1742,11 @@ def _lab_gap(st: dict, lab: dict | None) -> str | None:
     m_lab = lab.get("esperance_ibkr_r")
     if m_lab is None:
         m_lab = (lab_ci[0] + lab_ci[1]) / 2
-    se = math.hypot((lab_ci[1] - lab_ci[0]) / 3.92, st["se"])
+    se_lab = lab.get("se_ibkr")  # n° 10 (L5) ; avant, l'IC en t sur les jours redonne le même se
+    if se_lab is None:
+        g = lab.get("jours") or 0
+        se_lab = (lab_ci[1] - lab_ci[0]) / (2 * t_quantile(0.975, g - 1) if g >= 2 else 3.92)
+    se = math.hypot(se_lab, st["se"])
     if not se or abs(st["esperance_r"] - m_lab) / se < 1.96:
         return None
     return (f"-# Écart labo/direct (frais du labo des deux côtés) : le journal fait {SS._r(st['esperance_r'])} R, le "

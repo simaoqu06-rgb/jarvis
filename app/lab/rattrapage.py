@@ -16,6 +16,12 @@ rattrapage:<origine>) avance jour par jour jusqu'au premier jour calculé par le
 (inline_from:<origine>, posé par runner.run_day). Reprenable, idempotent (replace_strat), borné en temps
 par passage du worker. La clé dépend de la déclaration en vigueur : une nouvelle déclaration (stratégie
 ajoutée) repart du début, et chaque jour est recalculé avec toutes les stratégies.
+
+n° 10 : les actions se mesurent aux prix négociés (bougies de 5 min non ajustées, journalier et plans v1 remis à leur
+échelle, comme la n° 9) ; le générateur n'écrit plus leurs lignes, le rattrapage va donc jusqu'au dernier jour traité
+(last_day du rejeu ou du direct). Une valeur dont le gap brut et le gap ajusté divergent (opération sur titre entre la
+veille et la séance) est écartée. En crypto, sans frontière posée (rejeu déjà fini quand la déclaration change), le
+rattrapage va jusqu'au dernier jour traité.
 """
 import json
 import logging
@@ -25,6 +31,7 @@ from datetime import date, datetime, timedelta, timezone
 from app.lab import collector as CO
 from app.lab import generator as G
 from app.lab import heartbeat
+from app.lab import plus10 as P10
 from app.lab import simulator as SIM
 from app.lab import sources as SRC
 from app.lab import strategies as ST
@@ -34,6 +41,7 @@ log = logging.getLogger(__name__)
 ORIGINS = ("replay", "live")
 STOCK_BATCH = 100
 DAILY_LOOKBACK_DAYS = 90  # ≥ strategies.ZONE_DAILY_BARS séances et la MM 20 jours
+SPLIT_TOL = 0.05  # n° 10 : en deçà, prix négocié et prix ajusté sont les mêmes (clôture officielle / dernière bougie)
 
 
 def _start(db: LabDB, market: str, origin: str) -> date | None:
@@ -45,15 +53,17 @@ def _start(db: LabDB, market: str, origin: str) -> date | None:
 
 
 def due_days(db: LabDB, market: str, origin: str) -> list[date]:
-    """Jours à rattraper, dans l'ordre : du curseur (exclu) au premier jour calculé en ligne (exclu)."""
+    """Jours à rattraper, dans l'ordre : du curseur (exclu) au premier jour calculé en ligne (exclu) ; n° 10 : en
+    actions, et en crypto sans jour calculé en ligne, jusqu'au dernier jour traité (inclus)."""
     job = ST.progress_job(market)
-    inline = db.get(job, f"inline_from:{origin}")
+    inline = None if market == "stock" else db.get(job, f"inline_from:{origin}")
+    done = db.get(f"{origin}:{market}", "last_day")
     start = _start(db, market, origin)
-    if not inline or not start:
-        return []  # le labo v2 n'a encore traité aucun jour : il n'y a pas de frontière
+    if not (inline or done) or not start:
+        return []  # le labo n'a encore traité aucun jour : il n'y a pas de frontière
     cursor = db.get(job, f"rattrapage:{origin}")
     first = date.fromisoformat(cursor) + timedelta(days=1) if cursor else start
-    last = date.fromisoformat(inline) - timedelta(days=1)
+    last = date.fromisoformat(inline) - timedelta(days=1) if inline else date.fromisoformat(done)
     if first > last:
         return []
     from app.lab.runner import market_days  # import tardif : runner importe generator
@@ -72,17 +82,35 @@ def v1_trades(db: LabDB, origin: str, market: str, day: str) -> dict[str, list[d
     return out
 
 
-def _v1(market: str, trade: dict, entry_until: int, rank) -> dict | None:
+def _v1(market: str, trade: dict, entry_until: int, rank, factor: float = 1.0) -> dict | None:
+    """Plan v1 gardé, remis à l'échelle des prix négociés par `factor` (n° 10, actions)."""
     p = trade["plan"]
     if not p.get("entry") or not p.get("stop") or not p.get("targets"):
         return None
     floor = p.get("plancher")  # n° 7 : plan du direct, gardé par le générateur depuis la déclaration n° 7
-    return {"plan": {"entry": p["entry"], "stop": p["stop"], "targets": [{"price": t["price"]} for t in p["targets"]]},
-            "decided_at": trade["planned_at"], "entry_until": entry_until, "last_price": p["entry"],
-            "cost": SIM.costs(market, p["entry"], rank), "go": bool((p.get("score") or {}).get("go")),
-            "plancher": {"plan": {"entry": floor["entry"], "stop": floor["stop"],
-                                  "targets": [{"price": x} for x in floor["targets"]]}, "go": floor["go"]}
+    entry = p["entry"] * factor
+    return {"plan": {"entry": entry, "stop": p["stop"] * factor,
+                     "targets": [{"price": t["price"] * factor} for t in p["targets"]]},
+            "decided_at": trade["planned_at"], "entry_until": entry_until, "last_price": entry,
+            "cost": SIM.costs(market, entry, rank), "go": bool((p.get("score") or {}).get("go")),
+            "plancher": {"plan": {"entry": floor["entry"] * factor, "stop": floor["stop"] * factor,
+                                  "targets": [{"price": x * factor} for x in floor["targets"]]}, "go": floor["go"]}
             if floor else None}
+
+
+def _factor(raw: float | None, adjusted: float | None) -> float:
+    """Rapport prix négocié / prix ajusté d'un même cours ; 1 sans division survenue depuis (écart ≤ SPLIT_TOL)."""
+    if not raw or not adjusted or raw <= 0 or adjusted <= 0 or abs(raw / adjusted - 1) <= SPLIT_TOL:
+        return 1.0
+    return raw / adjusted
+
+
+def operation(hist: list[dict], session: list[dict], daily: list[dict], today: list[dict]) -> bool:
+    """Opération sur titre entre la veille et la séance : gap brut (bougies non ajustées) et gap ajusté (journalier de
+    la base) divergent de plus de plus10.OP_RATIO. Sans l'un des deux, rien n'est écarté."""
+    if not hist or not session or not daily or not today or min(hist[-1]["c"], daily[-1]["c"], today[0]["o"]) <= 0:
+        return False
+    return abs((session[0]["o"] / hist[-1]["c"]) / (today[0]["o"] / daily[-1]["c"]) - 1) > P10.OP_RATIO
 
 
 def _daily(db: LabDB, market: str, symbol: str, cutoff: int) -> list[dict]:
@@ -103,11 +131,12 @@ async def stock_rows(db: LabDB, origin: str, day: date, transport=None) -> list[
     # Déclaration n° 6 : séance de SPY en 5 min (sortie sur avalement baissier de l'indice).
     index = (await SRC.alpaca_bars([G.INDEX["stock"]], CO.BASE_TF, datetime.fromtimestamp(bounds[0], timezone.utc),
                                    datetime.fromtimestamp(bounds[1], timezone.utc),
-                                   transport=transport)).get(G.INDEX["stock"])
+                                   transport=transport, adjustment="raw")).get(G.INDEX["stock"])
     for i in range(0, len(names), STOCK_BATCH):
         batch = names[i:i + STOCK_BATCH]
         bars = await SRC.alpaca_bars(batch, CO.BASE_TF, datetime.fromtimestamp(first, timezone.utc),
-                                     datetime.fromtimestamp(bounds[1], timezone.utc), transport=transport)
+                                     datetime.fromtimestamp(bounds[1], timezone.utc), transport=transport,
+                                     adjustment="raw")
         heartbeat.beat()
         for symbol in batch:
             b5 = CO.regular_hours(bars.get(symbol) or [])
@@ -115,10 +144,19 @@ async def stock_rows(db: LabDB, origin: str, day: date, transport=None) -> list[
             session = [b for b in b5 if bounds[0] <= b["t"] < bounds[1]]
             if not session:
                 continue
-            v = next((_v1("stock", t, bounds[1], ranks[symbol]) for t in v1.get(symbol, [])), None)
+            daily = _daily(db, "stock", symbol, cutoff)
+            if operation(hist, session, daily, db.get_bars("stock", symbol, 1440, cutoff, cutoff + 86400)):
+                log.info("Labo v2 : rattrapage %s %s écarté (opération sur titre)", symbol, day)
+                continue
+            raw_prev = hist[-1]["c"] if hist else None
+            scale = _factor(raw_prev, daily[-1]["c"]) if daily else 1.0
+            if scale != 1.0:
+                daily = P10.scale(daily, scale)
+            trades = v1.get(symbol, [])
+            factor = _factor(raw_prev, trades[0]["plan"].get("entry")) if trades else 1.0
+            v = next((_v1("stock", t, bounds[1], ranks[symbol], factor) for t in trades), None)
             try:
-                rows += ST.stock_day(day, symbol, hist, session, _daily(db, "stock", symbol, cutoff), ranks[symbol], v,
-                                     index)
+                rows += ST.stock_day(day, symbol, hist, session, daily, ranks[symbol], v, index, traded=True)
             except Exception as exc:
                 log.warning("Labo v2 : rattrapage %s %s ignoré (%s: %s)", symbol, day, type(exc).__name__, exc)
     return rows

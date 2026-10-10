@@ -377,13 +377,20 @@ def test_sortie_emperor_objectifs_et_signal_de_retournement():
 
 def test_nouvelle_declaration_relance_le_rattrapage(tmp_path, monkeypatch):
     db = LabDB(str(tmp_path / "lab.db"))
+    db.set("replay:crypto", "start", "2026-09-14")
+    db.set(ST.progress_job("crypto"), "inline_from:replay", "2026-09-16")
+    db.set(ST.progress_job("crypto"), "rattrapage:replay", "2026-09-15")
+    assert RAT.due_days(db, "crypto", "replay") == []
+    monkeypatch.setattr(ST, "CRYPTO_DECLARATION", ST.CRYPTO_DECLARATION + 1)
+    assert RAT.due_days(db, "crypto", "replay") == []          # pas encore de frontière pour la nouvelle
+    db.set(ST.progress_job("crypto"), "inline_from:replay", "2026-09-17")
+    assert RAT.due_days(db, "crypto", "replay") == [date(2026, 9, 14), date(2026, 9, 15), date(2026, 9, 16)]
+    # n° 10, actions : leurs lignes ne viennent que du rattrapage, jusqu'au dernier jour rejoué (inclus).
     db.set("replay:stock", "start", "2026-09-14")
-    db.set(ST.progress_job("stock"), "inline_from:replay", "2026-09-16")
-    db.set(ST.progress_job("stock"), "rattrapage:replay", "2026-09-15")
+    db.set("replay:stock", "last_day", "2026-09-16")
+    db.set(ST.progress_job("stock"), "rattrapage:replay", "2026-09-16")
     assert RAT.due_days(db, "stock", "replay") == []
     monkeypatch.setattr(ST, "DECLARATION", ST.DECLARATION + 1)
-    assert RAT.due_days(db, "stock", "replay") == []          # pas encore de frontière pour la nouvelle
-    db.set(ST.progress_job("stock"), "inline_from:replay", "2026-09-17")
     assert RAT.due_days(db, "stock", "replay") == [date(2026, 9, 14), date(2026, 9, 15), date(2026, 9, 16)]
 
 
@@ -457,7 +464,8 @@ def test_v1_rejouee_avec_ses_objectifs():
     p = {"entry": entry, "stop": entry - 1.0, "targets": [{"price": entry + 1}, {"price": entry + 2}, {"price": entry + 3}]}
     v1 = {"plan": p, "decided_at": OPEN - 20 * 60, "entry_until": CLOSE, "last_price": entry,
           "cost": SIM.costs("stock", entry)}
-    rows = ST.stock_day(DAY, "AAA", hist, session, daily, 1, v1)
+    assert ST.stock_day(DAY, "AAA", hist, session, daily, 1, v1) == []   # n° 10 : prix négociés seulement
+    rows = ST.stock_day(DAY, "AAA", hist, session, daily, 1, v1, traded=True)
     (row,) = [r for r in rows if r["strategy"] == "v1"]
     assert row["slot"] == OPEN - 20 * 60 and row["triggered"] == 1 and row["gap_open_pct"] is not None
 
@@ -536,14 +544,21 @@ NOW = datetime(2026, 9, 20, tzinfo=timezone.utc)
 
 async def test_rejeu_ecrit_les_strategies_et_la_frontiere_du_rattrapage(tmp_path):
     db = LabDB(str(tmp_path / "lab.db"))
-    fill_stock(db, ["AAA", "BBB", "CCC"], CO.sessions_back(START, 125), END)
-    await R.replay(START, END, "stock", db, collect=False, now=NOW)
+    fill_crypto(db, ["BTC-USDT", "ETH-USDT"], date(2026, 7, 20), date(2026, 9, 17))
+    await R.replay(START, END, "crypto", db, collect=False, now=NOW)
     names = {r[0] for r in db.conn.execute("SELECT DISTINCT strategy FROM strat_trades")}
     assert "v1" in names and names <= {"v1", *ST.STRATEGIES}
-    assert db.get(ST.progress_job("stock"), "inline_from:replay") == START.isoformat()
+    assert db.get(ST.progress_job("crypto"), "inline_from:replay") == START.isoformat()
     n = db.conn.execute("SELECT COUNT(*) FROM strat_trades").fetchone()[0]
-    await R.replay(START, END, "stock", db, collect=False, now=NOW)  # rien à refaire, rien de doublé
+    await R.replay(START, END, "crypto", db, collect=False, now=NOW)  # rien à refaire, rien de doublé
     assert db.conn.execute("SELECT COUNT(*) FROM strat_trades").fetchone()[0] == n
+    # n° 10 : le rejeu des actions n'écrit plus de lignes du labo v2 (bougies de la base, ajustées des divisions
+    # survenues depuis) ; le rattrapage les fait toutes, aux prix négociés, jusqu'au dernier jour rejoué.
+    fill_stock(db, ["AAA", "BBB", "CCC"], CO.sessions_back(START, 125), END)
+    await R.replay(START, END, "stock", db, collect=False, now=NOW)
+    assert db.conn.execute("SELECT COUNT(*) FROM strat_trades WHERE market = 'stock'").fetchone()[0] == 0
+    assert db.conn.execute("SELECT COUNT(*) FROM trades WHERE market = 'stock'").fetchone()[0] > 0   # Labo 1 intact
+    assert RAT.due_days(db, "stock", "replay") == [START, date(2026, 9, 15), END]
 
 
 def test_crypto_attend_que_toutes_les_sorties_soient_connues(tmp_path):
@@ -564,21 +579,22 @@ async def test_rattrapage_relit_les_bougies_sans_les_stocker(tmp_path, monkeypat
     db = LabDB(str(tmp_path / "lab.db"))
     fill_stock(db, ["AAA", "BBB"], CO.sessions_back(START, 125), END)
     await R.replay(START, END, "stock", db, collect=False, now=NOW)
-    # Le labo v2 arrive après coup : on efface ses lignes et on fait comme si le 16 était son premier jour.
+    # n° 10 : le rejeu n'écrit plus les lignes des actions ; le rattrapage les fait toutes, bougies relues.
     stored = {s: db.get_bars("stock", s, 5, 0, 2**40) for s in ("AAA", "BBB")}
-    db.conn.execute("DELETE FROM strat_trades WHERE day < '2026-09-16'")
-    db.set(ST.progress_job("stock"), "inline_from:replay", "2026-09-16")
     db.conn.execute("DELETE FROM bars WHERE tf = 5")  # le rejeu a fait le ménage
+    adjustments = []
 
-    async def fake_bars(symbols, tf, start, end, transport=None):
+    async def fake_bars(symbols, tf, start, end, transport=None, adjustment="split"):
+        adjustments.append(adjustment)
         a, b = start.timestamp(), end.timestamp()
         return {s: [x for x in stored.get(s, []) if a <= x["t"] < b] for s in symbols}
 
     monkeypatch.setattr(RAT.SRC, "alpaca_bars", fake_bars)
-    assert RAT.due_days(db, "stock", "replay") == [date(2026, 9, 14), date(2026, 9, 15)]
-    assert await RAT.step(db, "stock", 60) == 2
+    assert RAT.due_days(db, "stock", "replay") == [date(2026, 9, 14), date(2026, 9, 15), date(2026, 9, 16)]
+    assert await RAT.step(db, "stock", 60) == 3
+    assert adjustments and set(adjustments) == {"raw"}                     # prix réellement négociés
     days = {r[0] for r in db.conn.execute("SELECT DISTINCT day FROM strat_trades")}
-    assert {"2026-09-14", "2026-09-15"} <= days
+    assert {"2026-09-14", "2026-09-15", "2026-09-16"} <= days
     assert db.conn.execute("SELECT COUNT(*) FROM bars WHERE tf = 5").fetchone()[0] == 0
     assert RAT.due_days(db, "stock", "replay") == []
     v1 = db.conn.execute("SELECT COUNT(*) FROM strat_trades WHERE strategy = 'v1' AND day = '2026-09-14'").fetchone()[0]

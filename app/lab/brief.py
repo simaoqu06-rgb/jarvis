@@ -144,7 +144,8 @@ def _strategies(conn) -> dict | None:
         out["marches"][market] = {
             name: {"n": s.get("declenches"), "jours": s.get("jours"), "esperance_r": s.get("esperance_ref_r"),
                    "ic95": s.get("ic95"), "brut_r": s.get("brut_r"), "frais_r": s.get("frais_r"),
-                   "candidate": s.get("candidate"),
+                   "candidate": s.get("candidate"), "candidate_compte": s.get("candidate_compte"),  # n° 10
+                   "rentable_20e": s.get("rentable_20e"), "mise_20e_r": (s.get("mise_20e") or {}).get("esperance_r"),
                    "temoin_ecart_r": (s.get("temoin") or {}).get("ecart_r"), "temoin_z": (s.get("temoin") or {}).get("z")}
             for name, s in strats.items()}
     conf = (rep.get("confirmation_go") or {})
