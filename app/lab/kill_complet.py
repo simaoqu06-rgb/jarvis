@@ -83,8 +83,9 @@ def frozen() -> bool:
 
 
 def cost_fingerprint() -> str:
-    """Empreinte de la méthode de coût en vigueur : base des prix (PRICES) et r_20e et r_3c des COST_PROBES."""
-    values = [PRICES] + [ST.cost_variants("stock", p) for p in COST_PROBES]
+    """Empreinte de la méthode de coût en vigueur : base des prix (PRICES), révision du simulateur des lignes
+    (strategies.SIM_REV, n° 10) et r_20e et r_3c des COST_PROBES."""
+    values = [PRICES, ST.SIM_REV] + [ST.cost_variants("stock", p) for p in COST_PROBES]
     return hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()[:10]
 
 

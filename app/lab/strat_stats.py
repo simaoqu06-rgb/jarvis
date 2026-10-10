@@ -62,11 +62,25 @@ Déclaration n° 8 (suites des avis de GPT et Gemini sur Killmode, et trade FRSH
 
 Diagnostic v1 (Lot 1 du plan) : espérance par gap d'ouverture, par mode d'entrée, par raison de sortie,
 et brut contre net de frais, pour vérifier « v1 achète la faiblesse » et « les frais expliquent la perte ».
+
+Déclaration n° 10 (mesures corrigées, aucun essai de plus) :
+- « candidate » garde sa définition (avantage de la règle, D2) ; `candidate_compte` exige en plus, en actions, une
+  espérance positive à la mise de Simão (r_20e, ajouté à « robuste » sans entrer dans « tient ») : ✅ seulement
+  alors, sinon « ☑️ avantage, perd à 20 € ».
+- Crypto : grappes par semaine ISO (Mean `key`, les positions de 24 h se chevauchent d'un jour à l'autre ; G =
+  semaines dans candidate_t), le se naïf par jour publié à côté avec le facteur d'inflation. Actions : la même
+  lecture en grappes par semaine, affichée (« semaines »), sans effet sur le verdict.
+- Témoin des actions à la même heure ; effet de l'heure (écart au témoin de la journée − écart au témoin de la
+  même heure) et dispersion entre tirages (écart-type des moyennes par tirage) : descriptifs.
+- se de l'espérance exposé (Mean.result, se_ibkr de _item) pour l'écart labo/direct de Killmode.
+- Entrée de v1 (entree_v1_appariee) : « limite ou rien » contre l'achat à l'ouverture, sur les GO (go_brut ramené
+  au risque prévu) et sur tous les plans (r_ouverture) ; descriptif.
 """
 import json
 import math
 import sqlite3
 from collections import defaultdict
+from contextlib import contextmanager
 from datetime import date, datetime
 from statistics import NormalDist
 
@@ -83,7 +97,7 @@ MIN_N = 30
 ALPHA = 0.05
 COLUMNS = ("r_net", "r_sans_be", "r_2r", "r_suiveur", "r_emperor", "r_emperor_alerte", "r_emperor_confirme",
            "r_vwap", "r_1430", "r_spy", "r_glisse_x2", "r_glisse_x3", "r_retard", "r_manque", "r_gross",
-           "r_3c", "r_20e")
+           "r_3c", "r_20e", "r_be_tp2", "r_20e_deg", "r_20e_1s", "r_20e_2s")  # n° 10 : descriptives
 RANK_BUCKETS = ((1, 50, "rang 1-50"), (51, 150, "rang 51-150"), (151, 10**9, "rang 151+"))
 IBKR_PER_SHARE = 0.005      # IBKR Pro, plan Fixe (/mnt/project-files/trading/plateforme-actions-us.md)
 IBKR_MAX_PCT = 0.01         # plafond : 1 % de la valeur de l'ordre
@@ -97,6 +111,14 @@ ROBUST = ("r_glisse_x2", "r_glisse_x3", "r_retard", "r_manque")
 # IBKR déjà comptée dedans) ; r_20e (à la mise de Simão) est affiché, il ne décide pas de « candidate ».
 ROBUST_STOCK = (*ROBUST, "r_3c")
 WITH_COMMISSION = ("r_3c", "r_20e")  # colonnes qui comptent déjà la commission IBKR
+# n° 10 : la politique que mesure le tableau, en une ligne (X1, point 4).
+POLICY = ("entrée au signal (ordre stop ou limite ; v1 limitée au dernier cours connu ; GO brut au marché à "
+          "l'ouverture, GO confirmé par ordre stop au déclencheur jusqu'à 11 h 30 New York) · stop à l'entrée après "
+          "TP1 (stratégies et v1) ou stop fixe (GO, r_sans_be) ; ta règle, stop à l'entrée après TP2, en colonne "
+          "r_be_tp2 · sortie au temps : clôture de la séance (actions), 24 h (crypto) · taille : en R du risque prévu, "
+          "et à 20 € de risque chez IBKR (« à 20 € »)")
+OPEN_BUCKETS = ((-1e9, 0.0, "ouverture ≤ entrée"), (0.0, 0.01, "ouverture +0 à +1 %"),
+                (0.01, 0.03, "ouverture +1 à +3 %"), (0.03, 1e9, "ouverture > +3 %"))  # n° 10, bornes hautes comprises
 # n° 6, mesure de Killmode : tranches figées avant tout résultat (bornes basses comprises, hautes exclues).
 TRANCHES = {
     "gap": ((-1e9, -5.0, "gap < −5 %"), (-5.0, -2.0, "gap −5 à −2 %"), (-2.0, -0.5, "gap −2 à −0,5 %"),
@@ -183,14 +205,37 @@ GAP_BUCKETS = ((-1e9, -2.0, "gap ≤ −2 %"), (-2.0, -0.5, "gap −2 à −0,5 
                (0.5, 2.0, "gap +0,5 à +2 %"), (2.0, 1e9, "gap ≥ +2 %"))
 
 
+def _week(day: str) -> str:
+    y, w, _ = date.fromisoformat(day).isocalendar()
+    return f"{y}-W{w:02d}"
+
+
 class Mean:
-    """Moyenne en grappes par jour, en un passage."""
+    """Moyenne en grappes par jour, en un passage ; n° 10 : grappes par `key(jour)` (semaine ISO en crypto), le se
+    naïf par jour publié à côté."""
 
-    __slots__ = ("days", "total", "n")
+    __slots__ = ("days", "total", "n", "key")
 
-    def __init__(self):
+    def __init__(self, key=None):
         self.days: dict = defaultdict(lambda: [0.0, 0])
         self.total, self.n = 0.0, 0
+        self.key = key
+
+    def by(self, key) -> "Mean":
+        """La même moyenne en grappes par `key(jour)` (sensibilité)."""
+        out = Mean(key)
+        out.days, out.total, out.n = self.days, self.total, self.n
+        return out
+
+    def clusters(self) -> dict:
+        if self.key is None:
+            return self.days
+        out: dict = defaultdict(lambda: [0.0, 0])
+        for day, (s, n) in self.days.items():
+            cell = out[self.key(day)]
+            cell[0] += s
+            cell[1] += n
+        return out
 
     def add(self, day: str, r: float | None) -> None:
         if r is None:
@@ -202,23 +247,37 @@ class Mean:
         self.n += 1
 
     def result(self) -> dict:
-        """Espérance, IC 95 % en t à G − 1 degrés de liberté (n° 8, D4 ; G = jours) et statistique m / se
-        (gardée sous la clé « z »)."""
-        m, se, _ = STATS.mean_ci(self.days, self.total, self.n)
+        """Espérance, IC 95 % en t à G − 1 degrés de liberté (n° 8, D4 ; G = grappes : jours, ou semaines) et
+        statistique m / se (gardée sous la clé « z ») ; n° 10 : se, et avec `key` le se naïf par jour (se_jour) et
+        le facteur d'inflation se / se_jour."""
+        groups = self.clusters()
+        m, se, _ = STATS.mean_ci(groups, self.total, self.n)
         ci = None
         if m is not None and se is not None:
-            q = STATS.t_quantile(0.975, len(self.days) - 1)
+            q = STATS.t_quantile(0.975, len(groups) - 1)
             ci = [round(m - q * se, 4), round(m + q * se, 4)]
-        return {"n": self.n, "esperance_r": round(m, 4) if m is not None else None, "ic95": ci,
-                "z": round(m / se, 2) if m is not None and se else None, "jours": len(self.days)}
+        out = {"n": self.n, "esperance_r": round(m, 4) if m is not None else None, "ic95": ci,
+               "z": round(m / se, 2) if m is not None and se else None, "jours": len(self.days),
+               "grappes": len(groups), "se": round(se, 4) if se is not None else None}
+        if self.key is not None:
+            naive = STATS.mean_ci(self.days, self.total, self.n)[1]
+            out |= {"se_jour": round(naive, 4) if naive is not None else None,
+                    "inflation_se": round(se / naive, 2) if se is not None and naive else None}
+        return out
 
 
-def _acc() -> dict:
-    return {"signaux": 0, "declenches": 0, "gagnants": 0, "tp1": 0, "sorties": defaultdict(Mean), "temoin": Mean(),
-            "ecart": Mean(), "regimes": defaultdict(Mean), "rangs": defaultdict(Mean), "manques": 0, "ibkr": Mean(),
-            "commission": Mean(), "frais": defaultdict(Mean), "funding": defaultdict(Mean), "oi": defaultdict(Mean),
-            "ecarts": defaultdict(Mean), "vwap": defaultdict(Mean), "robuste": defaultdict(Mean),
-            "tranches": defaultdict(lambda: defaultdict(Mean))}
+def _acc(market: str | None = None) -> dict:
+    key = _week if market == "crypto" else None  # n° 10 (L5) : semaines ISO en crypto
+
+    def mean() -> Mean:
+        return Mean(key)
+
+    return {"signaux": 0, "declenches": 0, "gagnants": 0, "tp1": 0, "sorties": defaultdict(mean), "temoin": mean(),
+            "ecart": mean(), "regimes": defaultdict(mean), "rangs": defaultdict(mean), "manques": 0, "ibkr": mean(),
+            "commission": mean(), "frais": defaultdict(mean), "funding": defaultdict(mean), "oi": defaultdict(mean),
+            "ecarts": defaultdict(mean), "vwap": defaultdict(mean), "robuste": defaultdict(mean),
+            "tranches": defaultdict(lambda: defaultdict(mean)), "ecart_journee": mean(), "effet_heure": mean(),
+            "tirages": defaultdict(lambda: [0.0, 0])}
 
 
 def _feed(a: dict, r: dict) -> None:
@@ -237,6 +296,7 @@ def _feed(a: dict, r: dict) -> None:
         a["robuste"][c].add(day, values[c] - (0.0 if c in WITH_COMMISSION else comm) if values[c] is not None else None)
     if r["market"] == "stock":
         a["commission"].add(day, comm)
+        a["robuste"]["r_20e"].add(day, values.get("r_20e"))  # n° 10 : candidate_compte, hors de « tient »
     a["frais"][r["frais"]].add(day, ref)
     for c in r["ecarts"]:
         a["ecarts"][c].add(day, r["ecarts"][c])
@@ -250,6 +310,16 @@ def _feed(a: dict, r: dict) -> None:
     if r["ecart_temoin"] is not None:
         a["temoin"].add(day, r["temoin"])
         a["ecart"].add(day, r["ecart_temoin"])
+    if r.get("journee") is not None:  # n° 10, actions : témoin de la journée (d'avant), et l'effet de l'heure
+        x = values[r["refc"]]
+        a["ecart_journee"].add(day, x - r["journee"] if x is not None else None)
+        if r["ecart_temoin"] is not None:
+            a["effet_heure"].add(day, r["temoin"] - r["journee"])
+    for j, x in enumerate(r.get("tirages") or ()):  # n° 10 : R de chaque tirage du témoin
+        if x is not None:
+            cell = a["tirages"][j]
+            cell[0] += x
+            cell[1] += 1
 
 
 def _halves(mean: Mean) -> tuple[float | None, float | None]:
@@ -307,16 +377,41 @@ def _item(market: str, name: str, a: dict, trials: int) -> dict:
         "robuste": {**rob, "moitie_1": halves[0], "moitie_2": halves[1], "tient": holds},
         "ordres_limites_retires": a["manques"],
         "temoin": {"esperance_r": a["temoin"].result()["esperance_r"], "ecart_r": ecart["esperance_r"],
-                   "ic95": ecart["ic95"], "z": ecart["z"], "n": ecart["n"]},
+                   "ic95": ecart["ic95"], "z": ecart["z"], "n": ecart["n"],
+                   "journee": a["ecart_journee"].result() if market == "stock" else None,  # n° 10, descriptifs
+                   "effet_heure": a["effet_heure"].result() if market == "stock" else None,
+                   "dispersion_tirages": _spread(a["tirages"])},
         "regimes": {k: v.result() for k, v in sorted(a["regimes"].items())},
         "echantillon_faible": n < MIN_N,
+        "se": main["se"], "se_ibkr": ibkr["se"] if ibkr else None,  # n° 10 (L5)
     }
     ci = ref["ic95"]
-    item["seuil_t"] = candidate_t(ecart["jours"], trials)  # n° 8, D4
+    item["seuil_t"] = candidate_t(ecart["grappes"], trials)  # n° 8, D4 ; n° 10 : G = semaines en crypto
     item["candidate"] = bool(ci and ci[0] > 0 and passes(ecart["z"], item["seuil_t"]) and n >= MIN_N and holds)
     m20 = item["mise_20e"]
     item["rentable_20e"] = bool(m20 and m20["esperance_r"] is not None and m20["esperance_r"] > 0)
+    if market == "stock":  # n° 10 (L3) : r_20e affiché avec la robustesse, hors de « tient »
+        item["robuste"]["r_20e"] = a["robuste"]["r_20e"].result()["esperance_r"]
+    item["candidate_compte"] = item["candidate"] and (market != "stock" or (item["robuste"]["r_20e"] or 0) > 0)
+    if market == "stock":  # n° 10 (L5) : sensibilité en grappes par semaine, sans effet sur le verdict
+        week, week_gap = a["ibkr"].by(_week).result(), a["ecart"].by(_week).result()
+        item["semaines"] = {"grappes": week["grappes"], "ic95_ibkr": week["ic95"], "ecart_z": week_gap["z"],
+                            "seuil_t": candidate_t(week_gap["grappes"], trials)}
+    else:  # n° 10 (L5) : grappes par semaine ISO ; le se naïf par jour à côté
+        item["grappes_semaine"] = {"semaines": ecart["grappes"], "se_jour": ecart.get("se_jour"),
+                                   "inflation_se": ecart.get("inflation_se"),
+                                   "z_jour": round(ecart["esperance_r"] / ecart["se_jour"], 2)
+                                   if ecart["esperance_r"] is not None and ecart.get("se_jour") else None,
+                                   "inflation_se_esperance": main.get("inflation_se")}
     return item
+
+
+def _spread(cells: dict) -> dict:
+    """n° 10 : dispersion entre tirages du témoin, écart-type des moyennes par tirage (tirage k de chaque trade)."""
+    means = [s / n for s, n in cells.values() if n]
+    sd = math.sqrt(sum((x - sum(means) / len(means)) ** 2 for x in means) / (len(means) - 1)) if len(means) > 1 \
+        else None
+    return {"tirages": len(means), "ecart_type_r": round(sd, 4) if sd is not None else None}
 
 
 def _tranches(acc: dict) -> dict:
@@ -339,7 +434,8 @@ def _strategies(conn: sqlite3.Connection) -> dict:
     out: dict = {}
     sql = (f"SELECT s.market, s.strategy, s.day, s.triggered, s.tp1_hit, s.temoin_r, s.temoin_triggered, s.rank, "
            f"s.entry, s.stop, s.symbol, s.signal_at, s.sur_vwap, s.gap_open_pct, s.atr_pct, s.vol15_adv, "
-           f"s.stop_avant_entree, s.risk_pct, s.confirmation, {', '.join('s.' + c for c in COLUMNS)}, r.label "
+           f"s.stop_avant_entree, s.risk_pct, s.confirmation, {', '.join('s.' + c for c in COLUMNS)}, "
+           "s.temoin_journee_r, s.temoin_journee_triggered, s.temoin_tirages, r.label "
            "FROM strat_trades s LEFT JOIN regimes r ON r.market = s.market AND r.day = s.day")
     acc: dict = {}
     trials = len(ST.trials())
@@ -352,12 +448,15 @@ def _strategies(conn: sqlite3.Connection) -> dict:
         (market, name, day, trig, tp1, wit, wit_trig, rank, entry, stop, symbol, signal_at, above, gap, atr_pct,
          vol15, stop_before, risk_pct, status) = row[:19]
         values = dict(zip(COLUMNS, row[19:19 + len(COLUMNS)]))
+        day_wit, day_wit_trig, draws = row[19 + len(COLUMNS):-1]  # n° 10
         refc = ST.ref_exit(name)
         keys = [(market, name)]
         if name in ST.POST_SEEN and day > ST.SEEN_UNTIL[market]:
             keys.append((market, name, "suivants"))
         for key in keys:
-            acc.setdefault(key, _acc())["signaux"] += 1
+            if key not in acc:
+                acc[key] = _acc(market)
+            acc[key]["signaux"] += 1
         comm = (ibkr_commission_r(entry, stop) or 0.0) if market == "stock" else 0.0
         ref = values[refc] - comm if values[refc] is not None else None
         spec = ST.STRATEGIES.get(name, {})
@@ -374,7 +473,7 @@ def _strategies(conn: sqlite3.Connection) -> dict:
              "ref": ref, "refc": refc, "comm": comm, "frais": _cost_bucket(expected_cost_r(market, entry, stop, rank)),
              "ecarts": {}, "vwap": None, "bandes": {}, "temoin": wit,
              "ecart_temoin": values[refc] - wit if wit_trig and wit is not None and values[refc] is not None
-             else None}
+             else None, "journee": day_wit if day_wit_trig else None, "tirages": json.loads(draws) if draws else None}
         if market == "stock" and "go" not in spec:  # n° 6 : sorties de Gemini, VWAP et mesures de Killmode
             r["ecarts"] = {c: values[c] - values["r_net"] for c in ST.STOCK_EXITS
                            if values[c] is not None and values["r_net"] is not None}
@@ -403,6 +502,7 @@ def _strategies(conn: sqlite3.Connection) -> dict:
             item["jours_vus_jusqu_au"] = ST.SEEN_UNTIL[market]
             item["jours_suivants"] = _item(market, name, sub, trials) if sub else None
             item["candidate"] = bool(item["jours_suivants"] and item["jours_suivants"]["candidate"])
+            item["candidate_compte"] = bool(item["jours_suivants"] and item["jours_suivants"]["candidate_compte"])
         out.setdefault(market, {})[name] = item
     for market, items in out.items():
         out[market] = dict(sorted(items.items(), key=lambda kv: -(kv[1]["esperance_ref_r"]
@@ -562,7 +662,7 @@ def coverage(conn: sqlite3.Connection) -> dict | None:
 def _helps(res: dict, trials: int) -> dict:
     """Écart apparié à une référence ; « aide » si positif avec t ≥ seuil (candidate_t, sur ses jours) et assez
     de trades."""
-    seuil = candidate_t(res["jours"], trials)
+    seuil = candidate_t(res.get("grappes", res["jours"]), trials)  # n° 10 : semaines en crypto
     return res | {"seuil_t": seuil, "aide": bool(res["esperance_r"] is not None and res["esperance_r"] > 0
                                                  and passes(res["z"], seuil) and res["n"] >= MIN_N)}
 
@@ -601,6 +701,107 @@ def diagnostic_v1(conn: sqlite3.Connection) -> dict:
     return out
 
 
+def partial(conn: sqlite3.Connection) -> dict:
+    """I2 : marchés en rattrapage d'une nouvelle déclaration, jours restants et lignes d'une autre déclaration (ou
+    d'avant le suivi, NULL) : tant que le rattrapage n'a pas refait tous les jours, elles sortent du tableau."""
+    from app.lab import rattrapage as RAT  # import tardif : tire runner et generator
+
+    out = {}
+    for market in ("stock", "crypto"):
+        left = sum(RAT.remaining(conn, market).values())
+        if not left:
+            continue
+        decl = ST.CRYPTO_DECLARATION if market == "crypto" else ST.DECLARATION
+        try:
+            old = conn.execute("SELECT COUNT(*) FROM strat_trades WHERE market = ? AND declaration IS NOT ?",
+                               (market, decl)).fetchone()[0]
+        except sqlite3.OperationalError:  # base pas encore migrée (lecture seule) : rien ne dit la déclaration
+            continue
+        out[market] = {"declaration": decl, "jours_rattrapage": left, "lignes_exclues": old}
+    return out
+
+
+@contextmanager
+def declaration_view(conn: sqlite3.Connection, part: dict | None):
+    """I2 : pendant un rattrapage (`part` = partial), une vue temporaire du même nom masque strat_trades pour cette
+    connexion (lecture seule comprise) et ne garde que les lignes de la déclaration en vigueur ; retirée à la sortie.
+    Pour tout ce qui lit strat_trades le temps d'un rapport (tableau, autopsie)."""
+    try:
+        if part:
+            keep = " OR ".join(f"(market = '{m}' AND declaration IS NOT {int(p['declaration'])})" for m, p in part.items())
+            conn.execute("DROP VIEW IF EXISTS temp.strat_trades")
+            conn.execute(f"CREATE TEMP VIEW strat_trades AS SELECT * FROM main.strat_trades WHERE NOT ({keep})")
+        yield
+    finally:
+        conn.execute("DROP VIEW IF EXISTS temp.strat_trades")
+
+
+def _open_bucket(x: float) -> str:
+    return next(label for lo, hi, label in OPEN_BUCKETS if lo < x <= hi)
+
+
+def _pairs() -> dict:
+    return {"paires": 0, "limite_executees": 0, "ouverture_executees": 0, "limite": Mean(), "ouverture": Mean(),
+            "ecart": Mean()}
+
+
+def _pair(g: dict, day: str, limit: float | None, opened: float | None) -> None:
+    g["paires"] += 1
+    g["limite_executees"] += limit is not None
+    g["ouverture_executees"] += opened is not None
+    limit, opened = limit or 0.0, opened or 0.0
+    g["limite"].add(day, limit)
+    g["ouverture"].add(day, opened)
+    g["ecart"].add(day, opened - limit)
+
+
+def _pairs_result(g: dict) -> dict:
+    return {k: g[k].result() if isinstance(g[k], Mean) else g[k] for k in g}
+
+
+def entree_v1_appariee(conn: sqlite3.Connection) -> dict | None:
+    """n° 10 (L4), descriptif : l'entrée de v1 prise de deux façons, plan par plan, en grappes par jour (une branche
+    non exécutée compte 0, après la sortie à stop fixe, r_sans_be).
+    - GO (sans rejeu) : « limite ou rien » (v1) contre l'achat à l'ouverture (go_brut, ramené au risque prévu de v1 :
+      × (ouverture − stop) / (entrée − stop)), par écart ouverture / entrée ; à part, les GO ouverts au-dessus du
+      TP1 (plan gardé du Labo 1 ; en révision 1 du simulateur, go_brut y vendait sous son prix d'achat).
+    - Tous les plans : la même chose avec r_ouverture (n° 10), par gap d'ouverture (le prix d'ouverture n'est pas
+      gardé dans la ligne de v1)."""
+    v1s, gos = {}, {}
+    for origin, symbol, day, name, trig, r, r_open, entry, stop, gap in conn.execute(
+            "SELECT origin, symbol, day, strategy, triggered, r_sans_be, r_ouverture, entry, stop, gap_open_pct "
+            "FROM strat_trades WHERE market = 'stock' AND strategy IN (?, 'go_brut')", (ST.REFERENCE,)):
+        (v1s if name == ST.REFERENCE else gos)[(origin, symbol, day)] = (trig, r, r_open, entry, stop, gap)
+    if not v1s:
+        return None
+    tp1 = {(o, s, d): t / e for o, s, d, e, t in conn.execute(
+        "SELECT origin, symbol, day, json_extract(plan, '$.entry'), json_extract(plan, '$.targets[0].price') "
+        "FROM trades WHERE market = 'stock'") if (o, s, d) in gos and e and t}
+    go, above, by_open = _pairs(), _pairs(), defaultdict(_pairs)
+    plans, by_gap = _pairs(), defaultdict(_pairs)
+    for key, (trig, r, r_open, entry, stop, gap) in v1s.items():
+        if not entry or stop is None or entry <= stop or (trig and r is None):
+            continue
+        day, limit = key[2], r if trig else None
+        _pair(plans, day, limit, r_open)
+        _pair(by_gap[_bucket(gap)], day, limit, r_open)
+        g = gos.get(key)
+        if not g or g[3] is None or g[4] is None or (g[0] and g[1] is None):
+            continue
+        opened = g[1] * (g[3] - g[4]) / (entry - stop) if g[0] else None
+        ratio = g[3] / entry - 1
+        if key in tp1 and ratio >= tp1[key] - 1:
+            _pair(above, day, limit, opened)
+            continue
+        _pair(go, day, limit, opened)
+        _pair(by_open[_open_bucket(ratio)], day, limit, opened)
+    return {"go": _pairs_result(go) | {"par_ouverture": {k: _pairs_result(by_open[k]) for _, _, k in OPEN_BUCKETS
+                                                          if k in by_open},
+                                       "au_dessus_tp1": _pairs_result(above)},
+            "plans": _pairs_result(plans) | {"par_gap": {k: _pairs_result(by_gap[k]) for _, _, k in
+                                                         (*GAP_BUCKETS, (0, 0, "gap inconnu")) if k in by_gap}}}
+
+
 def report(conn: sqlite3.Connection) -> dict:
     # import tardif : kill_complet et plus10 importent ce module
     from app.lab import kill_complet as KC
@@ -610,17 +811,22 @@ def report(conn: sqlite3.Connection) -> dict:
     out = {"declaration": {"numero": ST.LATEST_DECLARATION, "le": ST.REGISTERED_ON, "essais": trials,
                            "z_candidate": candidate_z(), "seuil": "t à G − 1 jours (candidate_t), Bonferroni",
                            "sorties": ST.EXITS, "sorties_actions": ST.STOCK_EXITS,
-                           "robustesse": ST.STRESS, "doc": "docs/labo-strategies.md"},
+                           "robustesse": ST.STRESS, "doc": "docs/labo-strategies.md", "politique": POLICY},
            "scelle": SEAL.describe(), "strategies": {}, "sorties_gemini": None, "killmode": None,
-           "confirmation_go": None, "killmode_complet": None, "potentiel_plus10": None, "diagnostic_v1": {}}
+           "confirmation_go": None, "killmode_complet": None, "potentiel_plus10": None, "diagnostic_v1": {},
+           "entree_v1": None}
     try:  # base pas encore migrée par le worker (lecture seule) : tableau vide plutôt qu'une erreur
-        out["strategies"] = _strategies(conn)
-        out["sorties_gemini"] = out["strategies"].pop("_n6", None)
-        out["killmode"] = out["strategies"].pop("_kill", None)
-        out["confirmation_go"] = out["strategies"].pop("_n7", None)
-        out["killmode_complet"] = KC.report(conn, trials)
-        out["potentiel_plus10"] = P10.report(conn, trials)
-        out["diagnostic_v1"] = diagnostic_v1(conn)
+        # I2 : pendant un rattrapage, le tableau ne lit que les lignes de la déclaration en vigueur (declaration_view).
+        out["partiel"] = partial(conn) or None
+        with declaration_view(conn, out["partiel"]):
+            out["strategies"] = _strategies(conn)
+            out["sorties_gemini"] = out["strategies"].pop("_n6", None)
+            out["killmode"] = out["strategies"].pop("_kill", None)
+            out["confirmation_go"] = out["strategies"].pop("_n7", None)
+            out["killmode_complet"] = KC.report(conn, trials)
+            out["potentiel_plus10"] = P10.report(conn, trials)
+            out["diagnostic_v1"] = diagnostic_v1(conn)
+            out["entree_v1"] = entree_v1_appariee(conn)  # n° 10 (L4)
     except sqlite3.Error as exc:
         out["erreur"] = f"base pas encore prête : {exc}"
     return out
@@ -641,7 +847,11 @@ def signature(conn: sqlite3.Connection) -> list:  # worker seulement (base migr�
     cost = KC.cost_fingerprint()
     sig += [cost, conn.execute("SELECT COUNT(*) FROM kill_complet WHERE cout = ?", (cost,)).fetchone()[0]]
     sig.append(conn.execute("SELECT COUNT(*) FROM progress WHERE job = 'plus10:n9'").fetchone()[0])  # n° 9
-    return sig + [conn.execute("SELECT COUNT(*) FROM earnings_days WHERE status = 'ok'").fetchone()[0]]
+    sig.append(conn.execute("SELECT COUNT(*) FROM earnings_days WHERE status = 'ok'").fetchone()[0])
+    # I3 : lignes réécrites sur place (strat_trades ; trades pour le diagnostic v1) et code des stats
+    from app.lab import empreinte as E
+
+    return sig + E.sig(conn, "trades", "strat")
 
 
 def cached(conn: sqlite3.Connection) -> dict | None:
@@ -687,6 +897,34 @@ def _kill_text(kill: dict) -> str:
     return "Killmode décomposé (n° 6, mesure) : " + " · ".join(parts)
 
 
+def _n10_text(it: dict) -> str:
+    """n° 10, descriptifs : effet de l'heure sur le témoin, dispersion entre tirages, lecture en semaines."""
+    wit, parts = it.get("temoin") or {}, []
+    heure = wit.get("effet_heure") or {}
+    if heure.get("n"):
+        parts.append(f"effet de l'heure {_r(heure['esperance_r'])} R (t {_z(heure['z'])})")
+    spread = (wit.get("dispersion_tirages") or {}).get("ecart_type_r")
+    if spread is not None:
+        parts.append(f"tirages ±{_r(spread).lstrip('+')} R")
+    week = it.get("semaines")
+    if week and week.get("ecart_z") is not None:
+        parts.append(f"en semaines t {_z(week['ecart_z'])} (seuil {_z(week['seuil_t'])})")
+    weeks = it.get("grappes_semaine")
+    if weeks and weeks.get("inflation_se") is not None:
+        parts.append(f"{weeks['semaines']} semaines, se ×{_z(weeks['inflation_se'])} contre les jours "
+                     f"(t par jour {_z(weeks['z_jour'])})")
+    return "".join(f" · {p}" for p in parts)
+
+
+def _entree_text(e: dict) -> str:
+    """n° 10 (L4) : l'entrée de v1, limite ou rien contre l'achat à l'ouverture (mesure, pas un essai)."""
+    go, plans = e["go"], e["plans"]
+    return (f"Entrée de v1 (n° 10, mesure) : achat à l'ouverture − limite ou rien {_r(plans['ecart']['esperance_r'])} R "
+            f"par plan (t {_z(plans['ecart']['z'])}, {plans['paires']} plans, {plans['limite_executees']} limites "
+            f"exécutées) · sur les GO {_r(go['ecart']['esperance_r'])} R (t {_z(go['ecart']['z'])}, {go['paires']} GO"
+            f", {go['au_dessus_tp1']['paires']} ouverts au-dessus du TP1 à part)")
+
+
 def _t(res: dict) -> str:
     """« t x, seuil y » d'un écart jugé par _helps (n° 8, D4)."""
     return f"t {_z(res['z'])}, seuil {_z(res.get('seuil_t'))}"
@@ -720,8 +958,17 @@ def text(rep: dict | None) -> str:
     lines = [f"🧪 **Stratégies du labo v2** · {decl['essais']} essais déclarés (déclaration n° "
              f"{decl.get('numero', 1)}) · espérance nette en R par trade [IC 95 %], actions après commission "
              f"IBKR estimée · ✅ = IC au-dessus de 0, témoin battu à t ≥ seuil (loi de Student sur les jours, "
-             f"{str(decl.get('z_candidate', 2)).replace('.', ',')} sur beaucoup de jours, plus haut sur peu) et "
-             f"robuste (glissement ×2 et ×3, retard, stress de 3 c en actions, deux moitiés des jours)"]
+             f"{str(decl.get('z_candidate', 2)).replace('.', ',')} sur beaucoup de jours, plus haut sur peu), "
+             f"robuste (glissement ×2 et ×3, retard, stress de 3 c en actions, deux moitiés des jours) et positive "
+             f"à 20 € en actions ; ☑️ = la même chose, mais perd à 20 € · crypto en grappes par semaine"]
+    if decl.get("politique"):
+        lines.append(f"Politique mesurée : {decl['politique']}")
+    for market, p in (rep.get("partiel") or {}).items():  # I2
+        n, m = p["jours_rattrapage"], p["lignes_exclues"]
+        old = (f"{m} ligne{'s' if m > 1 else ''} de l'ancienne déclaration exclue{'s' if m > 1 else ''}" if m
+               else "aucune ligne d'une autre déclaration")
+        lines.append(f"⏳ Tableau partiel ({MARKET_FR.get(market, market).lower()}) : {n} jour{'s' if n > 1 else ''} en "
+                     f"rattrapage, {old} (n° {p['declaration']} seule en attendant)")
     for market, items in (rep.get("strategies") or {}).items():
         lines.append(f"**{MARKET_FR.get(market, market)}**")
         for name, it in items.items():
@@ -729,7 +976,8 @@ def text(rep: dict | None) -> str:
             ci = it.get("ic95_ibkr") if ibkr else it.get("ic95")
             ci_txt = f" [{_r(ci[0])} ; {_r(ci[1])}]" if ci else ""
             wit = it.get("temoin") or {}
-            flag = "✅ " if it.get("candidate") else ""
+            flag = ("✅ " if it.get("candidate_compte", it.get("candidate"))  # n° 10 ; tableau d'avant : candidate
+                    else "☑️ avantage, perd à 20 € · " if it.get("candidate") else "")
             comm = f" · commission {_r(-(it.get('commission_ibkr_r') or 0))} R" if ibkr else ""
             m20 = it.get("mise_20e") or {}
             stake = f" · à 20 € {_r(m20.get('esperance_r'))} R" if m20.get("n") else ""
@@ -738,7 +986,8 @@ def text(rep: dict | None) -> str:
                          f"{it['jours']} j · réussite {round(100 * (it['reussite'] or 0))} % · frais "
                          f"{_r(-(it.get('frais_r') or 0)) if it.get('frais_r') is not None else 'n/d'} R{comm}{stake} · "
                          f"vs témoin {_r(wit.get('ecart_r'))} R (t {_z(wit.get('z'))}, seuil {_z(it.get('seuil_t'))})"
-                         + (" · échantillon faible" if it.get("echantillon_faible") else "") + _after_seen(it))
+                         + _n10_text(it) + (" · échantillon faible" if it.get("echantillon_faible") else "")
+                         + _after_seen(it))
     n6 = rep.get("sorties_gemini")
     if n6:
         names = {"r_vwap": "VWAP après 10 h 30", "r_1430": "time stop 14 h 30", "r_spy": "avalement de SPY"}
@@ -772,5 +1021,7 @@ def text(rep: dict | None) -> str:
         gaps = " · ".join(f"{k} {_r(v['esperance_r'])} ({v['n']})" for k, v in diag["par_gap"].items())
         lines.append(f"Diagnostic v1 actions : brut {_r(diag['brut']['esperance_r'])} R, net "
                      f"{_r(diag['net']['esperance_r'])} R · {gaps}")
+    if rep.get("entree_v1"):
+        lines.append(_entree_text(rep["entree_v1"]))
     lines.append(f"🔒 {rep['scelle']['texte']}")
     return "\n".join(lines)

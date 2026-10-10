@@ -25,10 +25,23 @@ Format d'une règle (JSON) — v1 : règles de FILTRE seulement :
   en v1 : la régénération sur les bougies stockées coûterait des heures de calcul par idée sur
   1 cœur ; elle viendra plus tard.
 
+Hors échantillon (avis de GPT et vérification du 10 octobre 2026) : une règle à seuil fixe est imaginée en
+lisant les trades du labo ; la juger sur ces mêmes jours serait un test dans l'échantillon. À la soumission,
+la règle note le dernier jour journalisé par origine et marché (rules.seen_until, même frontière que les
+leçons, lessons.seen_until) : SEULS COMPTENT LES JOURS JOURNALISÉS APRÈS LA SOUMISSION (rejeu pas encore
+calculé et direct ; un jour réécrit ou recalculé ne compte jamais). Tant qu'il n'y en a pas `min_days`, la
+règle reste « en attente » sans consommer d'essai. Le même walk-forward sur les jours déjà vus est gardé à
+part (« exploratoire » dans les mesures, affiché) et ne compte pas dans le verdict. Règles d'avant la
+colonne (seen_until NULL) : tous les jours, comme avant.
+
 Validation « walk-forward » sur les trades de la version de méthode en cours (rejeu et direct) :
-les jours sont coupés en W+1 blocs chronologiques (W = 3) ; fenêtre i : ajustement sur les blocs
-0..i, test sur le bloc i+1 privé de ses premiers jours (embargo d'1 jour : un trade crypto du dernier
-jour d'ajustement se dénoue le lendemain). Les fenêtres de test ne se recouvrent pas.
+les jours de chaque marché sont coupés en W+1 blocs chronologiques (W = 3 ; blocs par marché, les rejeux
+actions et crypto avancent chacun de leur côté) ; fenêtre i : ajustement sur les blocs 0..i, test sur le
+bloc i+1 privé de ses premiers jours (embargo d'1 jour : un trade crypto du dernier jour d'ajustement se
+dénoue le lendemain). Les fenêtres de test ne se recouvrent pas. L'ajustement ne sert qu'au seuil « auto ».
+Chaque fenêtre porte le plus grand trou du calendrier dans son test (trou_max_jours : rejeu interrompu
+puis direct) et son nombre de jours en direct (jours_direct) ; un bloc à cheval sur la frontière rejeu /
+direct n'est pas refusé (le trou agit comme un embargo, il ne crée pas de fuite), il est annoncé.
 
 Critères, tous obligatoires (seuils dans la table lab_config, défauts DEFAULTS) :
 1. au moins 100 trades déclenchés touchés par la règle sur les périodes de test ;
@@ -51,7 +64,9 @@ import logging
 import math
 import re
 import time
+from datetime import date
 from pathlib import Path
+from statistics import NormalDist
 
 from app.lab import stats as STATS
 from app.lab.db import LabDB, now_iso
@@ -60,9 +75,13 @@ log = logging.getLogger(__name__)
 DEFAULTS = {"windows": 3, "embargo_days": 1, "min_affected": 100, "min_improvement_r": 0.05,
             "min_windows_better": 2, "alpha": 0.05, "max_capture_drop": 0.10, "min_days": 60,
             "auto_min_affected": 30, "missing_max": 0.95,
-            # Labo 3 : challenger en direct (trades déclenchés depuis sa création, gardés par lui).
+            # Labo 3 : challenger en direct (trades déclenchés depuis sa création, gardés par lui), jugé à
+            # des regards fixes en jours de trades (method.verdict) ; challenger_max_trades n'est plus qu'affiché.
             "challenger_min_trades": 100, "challenger_max_trades": 300,
-            "challenger_min_gain": 0.02, "challenger_max_days": 90}
+            "challenger_min_gain": 0.02, "challenger_max_days": 100,
+            "challenger_looks_days": [20, 40, 60],
+            # 3 regards fixes, alpha global unilatéral 0,05 (Bonferroni) : z ≥ 2,13.
+            "challenger_min_z": NormalDist().inv_cdf(1 - 0.05 / 3)}
 OPS = {">": ">", ">=": ">=", "<": "<", "<=": "<=", "==": "=", "!=": "<>"}
 SET_OPS = ("in", "not_in")
 ALL_OPS = (*OPS, *SET_OPS, "between", "is_null", "not_null")
@@ -73,8 +92,9 @@ FLAT = {"market": "t.market", "symbol": "t.symbol", "composite": "t.composite", 
         "regime": "r.label", "regime_trend": "r.trend", "regime_vol_tercile": "r.vol_tercile"}
 OUTCOMES = {"triggered", "filled_at", "exit_reason", "r_net", "r_gross", "tp1_hit", "tp2_hit", "tp3_hit",
             "minutes_to_tp1", "minutes_to_tp2", "minutes_to_tp3", "mfe_r", "mae_r", "day_range_pct", "result"}
-# Champs du contexte connus seulement après la décision (au moment de l'exécution ou plus tard).
-LATE_CONTEXT = {"context.gap_open_pct"}
+# Champs du contexte connus seulement après la décision (au moment de l'exécution ou plus tard) ; couverture des
+# bougies de la séance simulée (avis du 10 octobre, I4) : une mesure de la donnée, pas un signal.
+LATE_CONTEXT = {"context.gap_open_pct", "context.barres_seance", "context.ouverture_presente", "context.couverture"}
 # Règle du propriétaire : jamais de filtre de liquidité ni de capitalisation. Le volume en dollars,
 # le rang et le motif d'entrée dans l'univers (classés au volume en dollars) en sont.
 SIZE_FIELDS = {"context.dollar_volume", "context.universe_rank", "context.universe_reason"}
@@ -301,6 +321,24 @@ def windows(days: list[str], n: int = 3, embargo: int = 1) -> list[tuple[set, se
     return out
 
 
+def market_windows(rows: list[tuple], n: int = 3, embargo: int = 1) -> list[tuple[set, set]]:
+    """`windows` sur les jours de chaque marché (les rejeux actions et crypto avancent chacun de leur
+    côté), réunies fenêtre par fenêtre ; clés (marché, jour). Un seul marché : mêmes fenêtres que `windows`."""
+    days: dict[str, set] = {}
+    for r in rows:
+        days.setdefault(r[1], set()).add(r[0])
+    per = [windows(list(d), n, embargo) for d in days.values()]
+    markets = list(days)
+    return [({(m, d) for m, w in zip(markets, per) for d in w[i][0]},
+             {(m, d) for m, w in zip(markets, per) for d in w[i][1]}) for i in range(n)]
+
+
+def gap_days(days) -> int:
+    """Plus grand trou du calendrier (jours) entre deux jours consécutifs ; 0 avec moins de deux jours."""
+    ds = sorted(date.fromisoformat(d) for d in set(days))
+    return max(((b - a).days for a, b in zip(ds, ds[1:])), default=0)
+
+
 def _cmp(op: str, x, thr) -> bool:
     if not isinstance(x, (int, float)) or isinstance(x, bool):
         return False
@@ -328,19 +366,21 @@ def choose_threshold(rows: list[tuple], op: str, kind: str, min_affected: int) -
     return best
 
 
-def walk_forward(rows: list[tuple], movers: set, cfg: dict, kind: str, auto_op: str | None = None) -> dict:
+def walk_forward(rows: list[tuple], movers: set, cfg: dict, kind: str, auto_op: str | None = None,
+                 live: set | None = None) -> dict:
     """Juge une règle sur des lignes (jour, marché, symbole, déclenché, r_net, tp1, touché|valeur).
 
     Sans `auto_op`, la 7e colonne dit si la condition est vraie ; avec, c'est la valeur du champ et
-    le seuil est choisi sur l'ajustement de chaque fenêtre (choose_threshold)."""
-    wins = windows([r[0] for r in rows], cfg["windows"], cfg["embargo_days"])
+    le seuil est choisi sur l'ajustement de chaque fenêtre (choose_threshold). `live` : (marché, jour)
+    journalisés en direct, pour annoter chaque fenêtre (jours_direct)."""
+    wins = market_windows(rows, cfg["windows"], cfg["embargo_days"])
     out_windows, day_sums = [], {}
     cap_before = cap_after = 0
     affected_total = 0
     for fit, test in wins:
         thr = None
         if auto_op:
-            thr = choose_threshold([r for r in rows if r[0] in fit], auto_op, kind, cfg["auto_min_affected"])
+            thr = choose_threshold([r for r in rows if (r[1], r[0]) in fit], auto_op, kind, cfg["auto_min_affected"])
 
         def affected(r) -> bool:
             if auto_op:
@@ -355,7 +395,7 @@ def walk_forward(rows: list[tuple], movers: set, cfg: dict, kind: str, auto_op: 
         n_aff = 0
         mover_state: dict[tuple, list] = {}
         for r in rows:
-            if r[0] not in test:
+            if (r[1], r[0]) not in test:
                 continue
             aff = affected(r)
             key = (r[1], r[0], r[2])
@@ -386,13 +426,19 @@ def walk_forward(rows: list[tuple], movers: set, cfg: dict, kind: str, auto_op: 
         kept_m = kept_s / kept_n if kept_n else None
         delta = (kept_m - base_m) if base_m is not None and kept_m is not None else None
         removed_r = base_s - kept_s
-        out_windows.append({"ajustement": [min(fit), max(fit)] if fit else None,
-                            "test": [min(test), max(test)] if test else None,
+        fit_days, test_days = [d for _, d in fit], [d for _, d in test]
+        by_market: dict[str, list] = {}
+        for m, d in test:
+            by_market.setdefault(m, []).append(d)
+        out_windows.append({"ajustement": [min(fit_days), max(fit_days)] if fit_days else None,
+                            "test": [min(test_days), max(test_days)] if test_days else None,
                             "trades_test": int(base_n), "touches": n_aff,
                             "esperance_avant_r": round(base_m, 4) if base_m is not None else None,
                             "esperance_apres_r": round(kept_m, 4) if kept_m is not None else None,
                             "amelioration_r": round(delta, 4) if delta is not None else None,
-                            "gain_total_r": round(-removed_r, 2), "seuil": thr})
+                            "gain_total_r": round(-removed_r, 2), "seuil": thr,
+                            "trou_max_jours": max((gap_days(ds) for ds in by_market.values()), default=0),
+                            "jours_direct": len(test & live) if live else 0})
     deltas = [w["amelioration_r"] for w in out_windows]
     mean_delta = sum(d or 0.0 for d in deltas) / len(deltas) if deltas else 0.0
     z, pooled = pooled_z(day_sums)
@@ -466,9 +512,27 @@ def champion_filter(conn) -> tuple[str, list]:
     return M.kept_sql(M.champion(conn)["regles"])
 
 
-def load_rows(conn, canon: dict, version: str) -> list[tuple]:
+def frontier_sql(seen: dict | None, unseen: bool = True) -> tuple[str, list]:
+    """Condition SQL (alias t) : trade d'un jour postérieur à la frontière `seen` de la règle (`unseen`),
+    ou d'un jour qu'elle a pu voir ; « 1 » sans frontière (règle d'avant la colonne seen_until)."""
+    if seen is None:
+        return "1", []
+    from app.lab import lessons as L  # import tardif : lessons importe ce module
+
+    cond, params = L.unseen_sql(seen)
+    return (cond, params) if unseen else (f"(NOT {cond})", params)
+
+
+def frontier(conn, h: str) -> dict | None:
+    """Frontière notée à la soumission (dernier jour journalisé par origine et marché) ; None avant la colonne."""
+    row = conn.execute("SELECT seen_until FROM rules WHERE hash = ?", (h,)).fetchone()
+    return json.loads(row[0]) if row and row[0] else None
+
+
+def load_rows(conn, canon: dict, version: str, seen: dict | None = None, unseen: bool = True) -> list[tuple]:
     """(jour, marché, symbole, déclenché, r_net, tp1, touché|valeur) de tous les trades de la version,
-    triés par jour. La condition est évaluée par SQLite (json_extract) : aucun JSON lu en Python."""
+    triés par jour. La condition est évaluée par SQLite (json_extract) : aucun JSON lu en Python.
+    `seen` : frontière de la règle, ne garde que les jours d'après (`unseen`) ou ceux d'avant."""
     cond = canon["cond"]
     if cond.get("value") == "auto":
         col, cparams = _field_sql(cond["field"])
@@ -476,10 +540,11 @@ def load_rows(conn, canon: dict, version: str) -> list[tuple]:
         col, cparams = compile_cond(cond)
         col = f"COALESCE({col}, 0)"
     kept, kparams = champion_filter(conn)
+    fcond, fparams = frontier_sql(seen, unseen)
     sql = (f"SELECT t.day, t.market, t.symbol, t.triggered, t.r_net, t.tp1_hit, {col} "
            "FROM trades t LEFT JOIN regimes r ON r.market = t.market AND r.day = t.day WHERE t.method_version = ? "
-           f"AND {kept}")
-    params = [*cparams, version, *kparams]
+           f"AND {kept} AND {fcond}")
+    params = [*cparams, version, *kparams, *fparams]
     if canon["markets"]:
         sql += f" AND t.market IN ({', '.join('?' * len(canon['markets']))})"
         params += canon["markets"]
@@ -494,11 +559,22 @@ def load_movers(conn, markets: list | None, threshold: float = STATS.MOVE_PCT) -
     return {tuple(r) for r in conn.execute(sql, params)}
 
 
-def missing_share(conn, canon: dict, version: str) -> dict[str, float]:
-    """Part des trades sans valeur pour chaque champ JSON de la règle (marchés de la règle seulement)."""
+def live_days(conn, version: str, markets: list | None) -> set:
+    """(marché, jour) journalisés en direct (annotation des fenêtres du walk-forward)."""
+    sql, params = "SELECT DISTINCT market, day FROM trades WHERE origin = 'live' AND method_version = ?", [version]
+    if markets:
+        sql += f" AND market IN ({', '.join('?' * len(markets))})"
+        params += markets
+    return {tuple(r) for r in conn.execute(sql, params)}
+
+
+def missing_share(conn, canon: dict, version: str, seen: dict | None = None) -> dict[str, float]:
+    """Part des trades sans valeur pour chaque champ JSON de la règle (marchés de la règle seulement ;
+    `seen` : jours postérieurs à sa frontière seulement)."""
     out = {}
     kept, kparams = champion_filter(conn)
-    msql, mparams = f" AND {kept}", list(kparams)
+    fcond, fparams = frontier_sql(seen)
+    msql, mparams = f" AND {kept} AND {fcond}", [*kparams, *fparams]
     if canon.get("markets"):
         msql += f" AND t.market IN ({', '.join('?' * len(canon['markets']))})"
         mparams += list(canon["markets"])
@@ -514,29 +590,58 @@ def missing_share(conn, canon: dict, version: str) -> dict[str, float]:
     return out
 
 
-def evaluate(conn, canon: dict, trial: int, cfg: dict | None = None) -> dict:
+EXPLORE_KEYS = ("touches_test", "amelioration_moyenne_r", "amelioration_globale_r", "fenetres_meilleures", "z", "p")
+
+
+def explore_text(e: dict) -> str:
+    z = f"z {e['z']:.2f}" if e.get("z") is not None else "z n/d"
+    return (f"exploratoire sur les {e['jours']} jours déjà vus (sans effet sur le verdict) : "
+            f"{e['amelioration_moyenne_r']:+.3f} R par trade, meilleure dans {e['fenetres_meilleures']} fenêtres, {z}")
+
+
+def evaluate(conn, canon: dict, trial: int, cfg: dict | None = None, seen: dict | None = None,
+             explore: bool = False) -> dict:
     """Teste une règle canonique ; renvoie {verdict, raisons, mesures}. verdict « attente » si les
-    données ne suffisent pas encore (aucun essai consommé)."""
+    données ne suffisent pas encore (aucun essai consommé). `seen` : frontière de la règle (seuls les
+    jours d'après comptent) ; `explore` : mesurer aussi les jours déjà vus (« exploratoire », sans effet)."""
     cfg = cfg or config(conn)
     version = current_version(conn)
     if not version:
         return {"verdict": "attente", "raisons": ["aucun trade journalisé"], "mesures": {}}
-    missing = missing_share(conn, canon, version)
+    missing = missing_share(conn, canon, version)  # format des données : sur tous les jours
     absent = [f for f, share in missing.items() if share >= cfg["missing_max"]]
     if absent:
         return {"verdict": "invalide", "mesures": {"champs_absents": missing},
                 "raisons": [f"champ presque toujours absent des trades : {', '.join(absent)}"]}
-    rows = load_rows(conn, canon, version)
+    rows = load_rows(conn, canon, version, seen)
     days = {r[0] for r in rows}
-    if len(days) < cfg["min_days"]:
-        return {"verdict": "attente", "mesures": {"jours": len(days)},
-                "raisons": [f"{len(days)} jours de trades, il en faut {cfg['min_days']}"]}
-    movers = load_movers(conn, canon["markets"])
     auto_op = canon["cond"]["op"] if canon["cond"].get("value") == "auto" else None
-    m = walk_forward(rows, movers, cfg, canon["kind"], auto_op)
+    movers, live, explo = None, None, None
+    if seen is not None and explore:
+        old = load_rows(conn, canon, version, seen, unseen=False)
+        old_days = {r[0] for r in old}
+        if len(old_days) >= cfg["min_days"]:
+            movers, live = load_movers(conn, canon["markets"]), live_days(conn, version, canon["markets"])
+            e = walk_forward(old, movers, cfg, canon["kind"], auto_op, live)
+            explo = {"jours": len(old_days), "trades": len(old)} | {k: e[k] for k in EXPLORE_KEYS}
+    extra = ({"frontiere": seen} if seen is not None else {}) | ({"exploratoire": explo} if explo else {})
+    if len(days) < cfg["min_days"]:
+        new = " neufs (journalisés après la soumission)" if seen is not None else ""
+        return {"verdict": "attente", "mesures": {"jours": len(days)} | extra,
+                "raisons": [f"{len(days)} jours de trades{new}, il en faut {cfg['min_days']}"]
+                + ([explore_text(explo)] if explo else [])}
+    if seen is not None:
+        missing = missing_share(conn, canon, version, seen)
+        absent = [f for f, share in missing.items() if share >= cfg["missing_max"]]
+        if absent:
+            return {"verdict": "invalide", "mesures": {"champs_absents": missing} | extra,
+                    "raisons": [f"champ presque toujours absent des trades neufs : {', '.join(absent)}"]}
+    if movers is None:
+        movers, live = load_movers(conn, canon["markets"]), live_days(conn, version, canon["markets"])
+    m = walk_forward(rows, movers, cfg, canon["kind"], auto_op, live)
     verdict, fails, ok = judge(m, cfg, trial)
     m.update(version=version, jours=len(days), trades=len(rows), essai=trial,
-             seuil_p=trial_level(trial, cfg["alpha"]), criteres_tenus=ok)
+             seuil_p=trial_level(trial, cfg["alpha"]), criteres_tenus=ok, **extra)
     return {"verdict": verdict, "raisons": fails, "mesures": m}
 
 
@@ -589,10 +694,13 @@ def submit(db: LabDB, raw, soiree: str | None = None) -> dict:
         return known | {"deja_connue": True}
     name = (raw.get("nom") or raw.get("name") or "") if isinstance(raw, dict) else ""
     note = notes(raw)
-    db.conn.execute("INSERT INTO rules (hash, name, rule, status, submitted_at, pourquoi, council, soiree) "
-                    "VALUES (?, ?, ?, 'en_attente', ?, ?, ?, ?)",
+    from app.lab import lessons as L  # import tardif : lessons importe ce module
+
+    # Frontière hors échantillon : tout ce qui est journalisé à l'ingestion a pu être lu par la routine.
+    db.conn.execute("INSERT INTO rules (hash, name, rule, status, submitted_at, pourquoi, council, soiree, seen_until) "
+                    "VALUES (?, ?, ?, 'en_attente', ?, ?, ?, ?, ?)",
                     (h, str(name)[:120], json.dumps(canon, ensure_ascii=False), now_iso(), note.get("pourquoi"),
-                     note.get("council"), soiree))
+                     note.get("council"), soiree, json.dumps(L.seen_until(db.conn))))
     return get_rule(db.conn, h) | {"deja_connue": False}
 
 
@@ -608,9 +716,15 @@ def run_one(db: LabDB, h: str, cfg: dict | None = None) -> dict:
     rule = get_rule(db.conn, h)
     canon = rule["regle"]
     trial = (db.get("validator", "trials", 0) or 0) + 1
-    res = evaluate(db.conn, canon, trial, cfg)
+    explo = (rule["mesures"] or {}).get("exploratoire")  # jours déjà vus : mesurés une seule fois
+    res = evaluate(db.conn, canon, trial, cfg, frontier(db.conn, h), explore=explo is None)
+    if explo is not None and res["verdict"] != "invalide":
+        res["mesures"]["exploratoire"] = explo
+        if res["verdict"] == "attente":
+            res["raisons"].append(explore_text(explo))
     if res["verdict"] == "attente":
-        db.conn.execute("UPDATE rules SET reason = ? WHERE hash = ?", (json.dumps(res["raisons"], ensure_ascii=False), h))
+        db.conn.execute("UPDATE rules SET reason = ?, metrics = ? WHERE hash = ?",
+                        (json.dumps(res["raisons"], ensure_ascii=False), json.dumps(res["mesures"], ensure_ascii=False), h))
         return get_rule(db.conn, h)
     with db.transaction():
         if res["verdict"] != "invalide":

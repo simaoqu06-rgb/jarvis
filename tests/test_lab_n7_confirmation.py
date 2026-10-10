@@ -127,10 +127,11 @@ def test_plans_go_par_stop():
     # stock_day : les bras viennent avec la ligne v1, rien sans GO.
     v1 = {"plan": PLAN, "decided_at": OPEN - 20 * 60, "entry_until": d_close(), "last_price": 100.0,
           "cost": SIM.costs("stock", 100.0), "go": True, "plancher": None}
-    names = {r["strategy"] for r in ST.stock_day(DAY, "AAA", hist(), bars_from(OPEN, session(CONFIRMED)), daily(), 3, v1)}
+    names = {r["strategy"] for r in ST.stock_day(DAY, "AAA", hist(), bars_from(OPEN, session(CONFIRMED)), daily(), 3, v1,
+                                                 traded=True)}
     assert {"v1", "go_brut", "go_confirme"} <= names and "go_brut_plancher" not in names
     names = {r["strategy"] for r in ST.stock_day(DAY, "AAA", hist(), bars_from(OPEN, session(CONFIRMED)), daily(), 3,
-                                                 v1 | {"go": False})}
+                                                 v1 | {"go": False}, traded=True)}
     assert "v1" in names and not names & set(ST.GO_STRATEGIES)
 
 
@@ -172,7 +173,11 @@ def test_plan_du_direct_identique_a_build_plan(full_db, monkeypatch):  # noqa: F
     now = datetime.fromtimestamp(U.stock_decision_ts(GEN_DAY), timezone.utc)
     plan, floored = G.stock_plans("AAA", inp, T.settings)
     live = _live_plan(monkeypatch, inp, now)
-    assert {k: v for k, v in live.items() if k != "grade"} == floored     # même code, même plan, même note
+    # même code, même plan, même note ; le direct ajoute le grade et sa taille en euros (risque demandé, sans
+    # capital : 20 €), le labo n'en a pas
+    assert ({k: v for k, v in live.items() if k not in ("grade", "sizing")}
+            == {k: v for k, v in floored.items() if k != "sizing"})
+    assert floored["sizing"] is None and live["sizing"]["risk_amount_eur"] == 20.0
     assert floored["stop"] < plan["stop"] and "1/3 de l'ATR journalier" in floored["stop_source"]
     assert G.make_plan("AAA", "stock", inp["bars"], inp["daily"], inp["h4"], inp["moment"], T.settings) == plan
     summary = G.floor_summary(plan, floored)
@@ -240,10 +245,11 @@ def test_tableau_de_la_confirmation():
 
 
 def test_la_crypto_garde_son_rattrapage():
-    # Les n° 7 et 8 ne touchent que les actions : le rattrapage crypto de la n° 6 continue (rien n'y change). Une
-    # déclaration qui ajoute des essais crypto doit remonter CRYPTO_DECLARATION (ce test la rappelle).
-    assert ST.progress_job("stock") == "strats:stock:d8" and ST.progress_job("crypto") == "strats:crypto:d6"
-    assert len([t for t in ST.trials() if t["market"] == "crypto"]) == 49 and ST.CRYPTO_DECLARATION == 6
+    # Les n° 7 et 8 ne touchaient que les actions : le rattrapage crypto de la n° 6 continuait. Une déclaration qui
+    # change les lignes crypto doit remonter CRYPTO_DECLARATION (ce test la rappelle) : la n° 10 corrige le
+    # simulateur (stops serrés), les deux marchés repartent, sans essai crypto de plus.
+    assert ST.progress_job("stock") == "strats:stock:d10" and ST.progress_job("crypto") == "strats:crypto:d10"
+    assert len([t for t in ST.trials() if t["market"] == "crypto"]) == 49 and ST.CRYPTO_DECLARATION == 10
 
 
 def test_reference_des_bras_et_commission():

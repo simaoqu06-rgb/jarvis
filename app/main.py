@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app import alerts, config, needs, scheduler
 from app.lab import brief as lab_brief
@@ -31,6 +31,7 @@ from app.lab import page as lab_page
 from app.lab import stats as lab_stats
 from app.lab import potentiel as lab_potentiel
 from app.lab import autopsie as lab_autopsie
+from app.lab import filtres as lab_filtres
 from app.lab import strat_stats as lab_strategies
 from app.lab import status as lab_status
 from app.lab import summary as lab_summary
@@ -275,8 +276,8 @@ class TradeRequest(BaseModel):
     entry: float | None = None      # vide = dernier cours
     stop: float | None = None       # vide = niveau d'invalidation (dernier creux de swing, 1 à 3 ATR)
     targets: list[float] | None = None  # vide = prochaines résistances (supports pour un short)
-    capital: float | None = None    # vide = JARVIS_CAPITAL ; sert à la taille de position
-    risk_pct: float | None = None   # vide = risque proposé par le grade de JARVIS
+    capital: float | None = None    # en euros ; vide = JARVIS_CAPITAL ; sert à la taille de position
+    risk_pct: float | None = Field(None, ge=0, le=100)  # vide = risque proposé par le grade ; 0 = pas de taille
     note: str | None = None
 
 
@@ -320,8 +321,9 @@ async def trading_list(status: str | None = Query(None, description="open ou clo
 
 @app.get("/api/trading/disagreements")
 async def trading_disagreements():
-    """Trades pris avec et contre l'avis de JARVIS (plans NO GO) : qui avait raison."""
-    return trading.disagreements(scheduler.book)
+    """Trades pris avec et contre l'avis de JARVIS (plans NO GO) : qui avait raison (R nets de frais estimés, IC en
+    grappes par jour, pente de la note au labo)."""
+    return trading.disagreements(scheduler.book, await asyncio.to_thread(trading.note_slopes))
 
 
 @app.get("/api/trading/opinion")
@@ -742,6 +744,18 @@ def lab_autopsie_get():
         conn.close()
 
 
+@app.get("/api/lab/filtres", dependencies=[Depends(lab_key)])
+def lab_filtres_get():
+    """Ce que coûte chaque filtre du scanner de 15 h 10 sur les trades v1 d'actions : passe tout, rate
+    seulement un critère, rate 2 ou plus, et tranches de prix (R net, IC, GO seuls). Mesure seulement.
+    Cache du worker, sinon calcul direct."""
+    conn = _lab_conn()
+    try:
+        return lab_filtres.cached(conn) or lab_filtres.report(conn)
+    finally:
+        conn.close()
+
+
 @app.get("/api/lab/potentiel", dependencies=[Depends(lab_key)])
 def lab_potentiel_get():
     """Potentiel +10 : part des séances qui touchent +8 % (et +10 %) depuis l'ouverture selon le gap, et
@@ -838,7 +852,7 @@ def cockpit_lab(request: Request):
             rules = []
         finally:
             conn.close()
-    proposals = [p for p in reversed(PR.proposals.items) if p.get("kind") in ("labo", "grade")]
+    proposals = [p for p in reversed(PR.proposals.items) if p.get("kind") in ("labo", "grade", "promotion")]
     return HTMLResponse(lab_page.render(st, proposals, rules, lab_morning.shared_state().latest(), lab_morning.dm_on(),
                                         lab_grade.current()))
 

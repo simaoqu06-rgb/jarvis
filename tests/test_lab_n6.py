@@ -97,7 +97,7 @@ def test_avalement_baissier_de_spy():
 
 def test_lignes_actions_et_crypto():
     hist, session, daily = stock_day_bars()
-    rows = ST.stock_day(DAY, "AAA", hist, session, daily, 3, None, spy(30))
+    rows = ST.stock_day(DAY, "AAA", hist, session, daily, 3, None, spy(30), traded=True)
     assert rows and all(r["r_vwap"] is not None and r["r_1430"] is not None and r["r_spy"] is not None for r in rows)
     assert all(r["sur_vwap"] in (0, 1) for r in rows)        # signaux de séance : position connue
     d = day_with(rising())
@@ -140,14 +140,14 @@ async def test_rattrapage_relit_aussi_spy(tmp_path, monkeypatch):
     db.replace_universe("stock", DAY.isoformat(), [{"symbol": "AAA", "rank": 1, "reason": "test"}])
     asked = []
 
-    async def fake_bars(symbols, tf, start, end, transport=None):
-        asked.append(tuple(symbols))
+    async def fake_bars(symbols, tf, start, end, transport=None, adjustment="split"):
+        asked.append((tuple(symbols), adjustment))
         return {"SPY": spy(30)} if symbols == ["SPY"] else {"AAA": hist + session}
 
     monkeypatch.setattr(RAT.SRC, "alpaca_bars", fake_bars)
     monkeypatch.setattr(RAT, "_daily", lambda *a: daily)
     rows = await RAT.stock_rows(db, "replay", DAY)
-    assert ("SPY",) in asked and rows and all(r["r_spy"] is not None for r in rows if r["triggered"])
+    assert (("SPY",), "raw") in asked and rows and all(r["r_spy"] is not None for r in rows if r["triggered"])
 
 
 async def test_rejeu_lit_spy_de_la_seance_et_la_collecte(tmp_path, monkeypatch):
@@ -160,12 +160,13 @@ async def test_rejeu_lit_spy_de_la_seance_et_la_collecte(tmp_path, monkeypatch):
     o, _ = CO.session_ts(start)
     db.put_bars("stock", "SPY", 5, [dict(b, t=o + b["t"] - OPEN) for b in spy(30)])
     await R.replay(start, end, "stock", db, collect=False, now=datetime(2026, 9, 20))
-    got = dict(db.conn.execute("SELECT day, COUNT(r_spy) FROM strat_trades WHERE triggered = 1 GROUP BY day"))
-    assert got.get(start.isoformat(), 0) > 0 and got.get(end.isoformat(), 0) == 0   # SPY seulement le 14
+    # n° 10 : les lignes des actions viennent du rattrapage (prix négociés, SPY relu à la source, test ci-dessus).
+    assert db.conn.execute("SELECT COUNT(*) FROM strat_trades").fetchone()[0] == 0
+    assert RAT.due_days(db, "stock", "replay") == [start, end]
 
     calls = []
 
-    async def record(db_, market, symbols, a, b, now=None, transport=None):
+    async def record(db_, market, symbols, a, b, now=None, transport=None, failed_out=None):
         calls.append((list(symbols), a, b))
         return 0
 

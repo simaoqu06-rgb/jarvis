@@ -25,15 +25,19 @@ déclarer). Comparer les stops aux trades gardés jusqu'à la clôture serait un
 pas fait ici. Les repères (« gain rendu », « stop dans le bruit »…) sont des pistes pour une déclaration,
 jamais des règles : rien ici ne filtre un trade ni ne change un stop. Bloc scellé exclu.
 
-Grade indicatif des GO confirmés (même demande, avis de GPT : trois populations séparées) : la note de la
-politique que Simão trade (GO du scanner confirmés après l'ouverture), calculée par grade.evaluate sur les
+Grade indicatif des GO confirmés (même demande, avis de GPT : trois populations séparées) : la note des GO
+confirmés, stop fixe, vendus à la clôture (≠ ton suivi : stop à l'entrée après TP2, pas de sortie au temps),
+soit les GO du scanner confirmés après l'ouverture, calculée par grade.evaluate sur les
 lignes de la déclaration n° 7 (sortie déclarée r_sans_be), par trade exécuté et par GO de départ (0 R
-quand aucun ordre ne part). Indicatif : il ne change ni le grade officiel ni le risque proposé.
+quand aucun ordre ne part). Indicatif : il ne change ni le grade officiel ni le risque proposé. Sa fenêtre
+(FENETRE_JOURS jours présents dans la base) publie son étendue réelle (stats.span, avis du 10 octobre, I5) :
+elle peut enjamber le trou entre la fin du rejeu et le direct.
 """
 import sqlite3
 from collections import defaultdict
 from datetime import datetime
 
+from app.lab import empreinte as E
 from app.lab import seal as SEAL
 from app.lab import stats as STATS
 from app.lab.db import LabDB, now_iso
@@ -223,11 +227,11 @@ def go_indicatif(conn: sqlite3.Connection) -> dict:
     lo, hi = SEAL.bounds()
     for strat, label in GO_INDICATIF.items():
         col = ST.ref_exit(strat)
-        days = [d for (d,) in conn.execute(
-            f"SELECT DISTINCT day FROM strat_trades WHERE market = 'stock' AND strategy = ? AND triggered = 1 "
-            f"AND {col} IS NOT NULL AND day NOT BETWEEN ? AND ? ORDER BY day DESC LIMIT ?",
-            (strat, lo, hi, GRADE.FENETRE_JOURS))]
-        cutoff = days[-1] if days else "9999"
+        days = conn.execute(
+            f"SELECT day, MAX(origin = 'live') FROM strat_trades WHERE market = 'stock' AND strategy = ? "
+            f"AND triggered = 1 AND {col} IS NOT NULL AND day NOT BETWEEN ? AND ? GROUP BY day ORDER BY day DESC "
+            f"LIMIT ?", (strat, lo, hi, GRADE.FENETRE_JOURS)).fetchall()
+        cutoff = days[-1][0] if days else "9999"
         rows = [(i, day, r, tp1, None, None, None, None, None) for i, day, r, tp1 in conn.execute(
             f"SELECT id, day, {col}, tp1_hit FROM strat_trades WHERE market = 'stock' AND strategy = ? "
             f"AND triggered = 1 AND {col} IS NOT NULL AND day >= ? AND day NOT BETWEEN ? AND ? "
@@ -250,16 +254,26 @@ def go_indicatif(conn: sqlite3.Connection) -> dict:
                                                           "moities_r", "serie_pertes", "serie_attendue",
                                                           "reussite", "tp1", "raison")},
                       "par_go": {"go": n, "jours": len(day_sums),
-                                 "esperance_r": round(mean, 4) if mean is not None else None, "ic95": ci}}
+                                 "esperance_r": round(mean, 4) if mean is not None else None, "ic95": ci},
+                      "fenetre": STATS.span(days)}
     return out
 
 
 def report(conn: sqlite3.Connection) -> dict:
+    from app.lab import strat_stats as SS  # import tardif : comme go_indicatif
     from app.lab import validator as V
 
     version = V.current_version(conn)
-    return {"version": version, "v1": v1_report(conn, version), "strategies": strat_report(conn),
-            "grade_indicatif": go_indicatif(conn),
+    # I2, n° 10 : pendant un rattrapage, les lignes du labo v2 sont celles de la déclaration en vigueur, comme le tableau
+    # (sinon le grade indicatif des GO confirmés mêlait les deux révisions du simulateur pendant des jours).
+    part = SS.partial(conn) or None
+    with SS.declaration_view(conn, part):
+        strategies, indicatif = strat_report(conn), go_indicatif(conn)
+    if part and "stock" in part:  # grade indicatif : actions seulement ; dit avec lui (!grade, API, brief)
+        for res in indicatif.values():
+            res["partiel"] = part["stock"]
+    return {"version": version, "v1": v1_report(conn, version), "strategies": strategies,
+            "grade_indicatif": indicatif, "partiel": part,
             "references": {"elan_1r": "50 % : repère théorique seulement (marche aléatoire, barrières fixes) ; biaisé vers le bas "
                                        "ici (bougies de 5 min, stop remonté à l'entrée) ; la référence valable serait "
                                        "un témoin apparié, pas encore mesuré",
@@ -277,7 +291,7 @@ def report(conn: sqlite3.Connection) -> dict:
 def signature(conn: sqlite3.Connection) -> list:
     a = conn.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM trades").fetchone()
     b = conn.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM strat_trades").fetchone()
-    return [*a, *b]
+    return [*a, *b, *E.sig(conn, "trades", "strat")]
 
 
 def cached(conn: sqlite3.Connection) -> dict | None:
@@ -285,10 +299,12 @@ def cached(conn: sqlite3.Connection) -> dict | None:
 
 
 def step(db: LabDB, now: datetime, max_age: float) -> int | None:
-    """Passage du worker : recalcule quand les trades ont changé et que le cache a plus de `max_age` s."""
+    """Passage du worker : recalcule quand les trades ont changé et que le cache a plus de `max_age` s (tout de
+    suite après un déploiement)."""
     sig = signature(db.conn)
     at = db.get("autopsie", "at", 0) or 0
-    if sig == db.get("autopsie", "signature") or (cached(db.conn) and now.timestamp() - at < max_age):
+    last = db.get("autopsie", "signature")
+    if sig == last or (cached(db.conn) and now.timestamp() - at < max_age and not E.code_changed(last)):
         return None
     data = report(db.conn)
     with db.transaction():
@@ -332,7 +348,7 @@ def compact(data: dict | None, per_market: int = 6) -> dict | None:
             "strategies": {mk: {k: slim(v) for k, v in groups.items() if not v.get("echantillon_faible")}
                            for mk, groups in (data.get("strategies") or {}).items()},
             "grade_indicatif": data.get("grade_indicatif"), "limites": data.get("limites"),
-            "calcule_le": data.get("calcule_le")}
+            "partiel": data.get("partiel"), "calcule_le": data.get("calcule_le")}
 
 
 def indicatif_lines(gi: dict | None) -> list[str]:
@@ -344,9 +360,22 @@ def indicatif_lines(gi: dict | None) -> list[str]:
             continue
         ci = t.get("ic95") or [None, None]
         per_go = f"{g['esperance_r']:+.3f} R par GO de départ" if g.get("esperance_r") is not None else "n/d par GO"
+        win = res.get("fenetre") or {}
+        gap = (f" · fenêtre discontinue : trou de {win['trou_max_jours']} jours, {win['jours_direct']} jours en direct"
+               if (win.get("trou_max_jours") or 0) > STATS.GAP_DAYS else "")
         lines.append(f"-# {res['nom']} : **{t['grade']}** indicatif · {t['esperance_r']:+.3f} R par trade "
-                     f"(IC95 {ci[0]:+.3f} ; {ci[1]:+.3f}) sur {t['trades']} trades / {t['jours']} jours · {per_go}")
+                     f"(IC95 {ci[0]:+.3f} ; {ci[1]:+.3f}) sur {t['trades']} trades / {t['jours']} jours · {per_go}{gap}")
+    part = next((res["partiel"] for res in (gi or {}).values() if res.get("partiel")), None)
+    if part:
+        lines.append(f"-# ⏳ Grade indicatif : {_partial_text(part)}")
     return lines
+
+
+def _partial_text(part: dict) -> str:
+    """I2 : rattrapage d'une nouvelle déclaration en cours, seules ses lignes sont lues."""
+    n = part["jours_rattrapage"]
+    return (f"rattrapage de la déclaration n° {part['declaration']} en cours (encore {n} jour{'s' if n > 1 else ''}), "
+            "seuls les jours déjà refaits comptent")
 
 
 def text(data: dict | None, market: str | None = None) -> str:
@@ -356,6 +385,9 @@ def text(data: dict | None, market: str | None = None) -> str:
                 "après le déploiement).")
     markets = [market] if market else ["stock", "crypto"]
     lines = ["🩺 **Autopsie des trades du labo** (où ils échouent ; pistes à déclarer, jamais des règles)"]
+    for mk, part in (data.get("partiel") or {}).items():
+        if mk in markets:
+            lines.append(f"-# ⏳ Stratégies {MARKET_FR.get(mk, mk)} : {_partial_text(part)}")
     for mk in markets:
         groups = (data.get("v1") or {}).get(mk) or {}
         if not groups:

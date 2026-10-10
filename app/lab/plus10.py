@@ -55,6 +55,9 @@ log = logging.getLogger(__name__)
 JOB = "plus10:n9"
 INACTIVE_KEY = "plus10:inactifs"
 NUMERO = 9
+# Mesure en vigueur (gardée dans chaque séance calculée) : la n° 10 change le simulateur, le témoin et les colonnes ;
+# les séances d'une autre mesure sont recalculées, et le tableau ne lit que celles de MESURE.
+MESURE = 10
 GAP_MIN = 5.0          # en %, gap à l'ouverture (S+10 : ≥ +5 ; Rebond : ≤ −5)
 ATR_MIN = 5.0          # ATR de Wilder 14 j de la veille, en % de sa clôture
 TOP = 5
@@ -77,7 +80,8 @@ LABELS = {"plus10_orb15": "S+10, cassure du range d'ouverture 15 min",
 PRICE_BUCKETS = ((0.0, 1.0, "< 1 $"), (1.0, 5.0, "1-5 $"), (5.0, 20.0, "5-20 $"), (20.0, 1e18, "≥ 20 $"))
 HOUR_BUCKETS = ((0, 15, "avant 9 h 45"), (15, 30, "9 h 45 - 10 h"), (30, 90, "10 h - 11 h"), (90, 10**6, "après 11 h"))
 TRADE_KEYS = ("seances", "gap_pct", "atr_pct", "entry", "stop", "signal_at", "triggered", "exit_reason", "tp1_hit",
-              "mfe_r", "mae_r", "temoin_r", "temoin_triggered", *SS.COLUMNS)
+              "mfe_r", "mae_r", "temoin_r", "temoin_triggered", "temoin_journee_r", "temoin_journee_triggered",
+              "temoin_tirages", *SS.COLUMNS)
 COLUMNS = ("day", "symbol", "essai", "liste", "rang", *TRADE_KEYS)
 SCANS_FILE = "plus10_scans.jsonl"
 
@@ -233,9 +237,9 @@ def last_daily(db: LabDB) -> str | None:
 
 
 def ready_days(db: LabDB, limit: int = 30) -> list[date]:
-    """Séances de l'univers du labo, hors bloc scellé, pas encore calculées, dont le journalier est en base, la plus
-    ancienne d'abord."""
-    done = db.keys(JOB)
+    """Séances de l'univers du labo, hors bloc scellé, pas encore calculées (ou calculées avant la mesure MESURE),
+    dont le journalier est en base, la plus ancienne d'abord."""
+    done = {k for k, v in db.keys(JOB).items() if v.get("absente") or v.get("mesure") == MESURE}
     known = last_daily(db)
     if known is None:
         return []
@@ -351,7 +355,7 @@ async def step(db: LabDB, now: datetime, max_seconds: float, transport=None) -> 
             db.conn.execute("DELETE FROM plus10_trades WHERE day = ?", (day.isoformat(),))
             db.conn.executemany(f"INSERT INTO plus10_trades ({', '.join(COLUMNS)}) VALUES "
                                 f"({', '.join('?' for _ in COLUMNS)})", [tuple(r.get(c) for c in COLUMNS) for r in rows])
-            db.set(JOB, day.isoformat(), stats)
+            db.set(JOB, day.isoformat(), stats | {"mesure": MESURE})
         log.info("Labo : n° 9 %s, %d S+10, %d Rebond, %d lignes", day, len(stats["listes"]["s10"]),
                  len(stats["listes"]["rebond"]), len(rows))
         done += 1
@@ -463,7 +467,8 @@ def report(conn: sqlite3.Connection, trials: int, scans: Path | None = None) -> 
     """Mesures de la déclaration n° 9 ; None avant la première séance calculée."""
     try:
         days = {k: v for k, v in ((k, json.loads(v)) for k, v in conn.execute(
-            "SELECT key, value FROM progress WHERE job = ? ORDER BY key", (JOB,))) if not v.get("absente")}
+            "SELECT key, value FROM progress WHERE job = ? ORDER BY key", (JOB,)))
+                if not v.get("absente") and v.get("mesure") == MESURE}  # n° 10 : séances recalculées seulement
         rows = conn.execute(f"SELECT {', '.join(COLUMNS)} FROM plus10_trades ORDER BY day").fetchall()
     except sqlite3.Error:
         return None
@@ -557,7 +562,8 @@ def text(rep: dict | None) -> str | None:
         return None
     lines = [f"🎯 Potentiel +10 (n° {rep['numero']}, {rep['seances']} séances {rep['du']} → {rep['au']}) :"]
     for e, it in rep["essais"].items():
-        flag = "✅ " if it["candidate"] else ""
+        flag = ("✅ " if it.get("candidate_compte", it["candidate"])  # n° 10
+                else "☑️ avantage, perd à 20 € · " if it["candidate"] else "")
         ci = f" [{SS._r(it['ic95_ibkr'][0])} ; {SS._r(it['ic95_ibkr'][1])}]" if it.get("ic95_ibkr") else ""
         tir = it["classement"]["tirages"]
         lines.append(f"- {flag}{it['nom']} : {SS._r(it['esperance_ref_r'])} R{ci} · {it['declenches']} trades · "

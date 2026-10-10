@@ -195,15 +195,17 @@ def orb_now(d: ST.Day, minutes: int) -> dict | None:
     return ST._cand(d, d.d0 + n - 1, hi + d.tick(hi), lo - d.tick(lo), valid_until=d.orb_until_ts)
 
 
-def _order(c: dict | None, risk_usd: float | None) -> str:
+def _order(c: dict | None, risk_usd: float | None, usd_per_eur: float | None = None) -> str:
     if not c:
         return "pas de niveau (range incomplet sur IEX)"
     entry, stop = c["entry"], c["stop"]
     tps = " / ".join(_num(t) for t in ST._r_targets(entry, stop))
     until = datetime.fromtimestamp(c["entry_until"], NEW_YORK).strftime("%H h %M").replace(" 00", "")
     qty = CF.shares(entry, stop, risk_usd)
+    size = (f" · {qty} actions pour ce risque" if qty else
+            f" · {CF.over_budget(entry, stop, risk_usd / usd_per_eur, usd_per_eur)}" if qty == 0 and usd_per_eur else "")
     return (f"ordre stop d'achat {_num(entry)} · stop {_num(stop)} ({_fr((stop / entry - 1) * 100)} %) · "
-            f"TP {tps} (1/2/3 R) · valable jusqu'à {until} NY" + (f" · {qty} actions pour ce risque" if qty else ""))
+            f"TP {tps} (1/2/3 R) · valable jusqu'à {until} NY" + size)
 
 
 async def confirmed(kind: str, now: datetime | None = None, risk_usd: float | None = None) -> dict:
@@ -289,16 +291,26 @@ def confirmed_text(c: dict) -> str:
             pre = c["gaps_attente"].get(s)
             lines.append(_line(s, m) + (f" (pré-ouverture {_fr(pre)} %)" if pre is not None else " (absente à 9 h 10)"))
             if late:
-                lines.append("range 30 min : " + _order(lv.get("orb30"), c["risk_usd"]))
+                lines.append("range 30 min : " + _order(lv.get("orb30"), c["risk_usd"], c.get("eurusd")))
                 continue
-            lines.append("range 15 min : " + _order(lv.get("orb15"), c["risk_usd"]))
+            lines.append("range 15 min : " + _order(lv.get("orb15"), c["risk_usd"], c.get("eurusd")))
             if liste == "s10":
                 k = lv.get("killmode")
                 why = "; ".join(lv.get("killmode_pourquoi") or [])
-                lines.append("règle Killmode : " + ("✅ " + _order(k, c["risk_usd"]) if k else f"❌ {why or 'pas de signal'}"))
+                lines.append("règle Killmode : " + ("✅ " + _order(k, c["risk_usd"], c.get("eurusd")) if k
+                                                    else f"❌ {why or 'pas de signal'}"))
     if not late and c["listes"]["rebond"]:
         lines.append("-# Rebond, range de 30 min : à 16 h 01.")
-    lines.append("-# Range lu sur IEX en temps réel (le labo rejoue le SIP) ; taille pour le risque de JARVIS_RISK_EUR.")
+    g, risk_eur = c.get("grade"), c.get("risk_eur")
+    off = CF.off_grade(g, risk_eur) if risk_eur else None
+    if off:
+        lines += ["-# Range lu sur IEX en temps réel (le labo rejoue le SIP).", off]
+    elif risk_eur and g:
+        lines.append(f"-# Range lu sur IEX en temps réel (le labo rejoue le SIP) ; taille pour {risk_eur:g} € de "
+                     f"risque (règle de JARVIS : grade {g['grade']}, {g['risque_propose']:g} % proposé).")
+    else:
+        lines.append("-# Range lu sur IEX en temps réel (le labo rejoue le SIP) ; taille pour le risque de "
+                     "JARVIS_RISK_EUR.")
     return "\n".join(lines)
 
 

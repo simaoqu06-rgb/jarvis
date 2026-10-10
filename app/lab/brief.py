@@ -10,6 +10,7 @@ Depuis le 10 octobre 2026 (fil « JARVIS s'améliore-t-il vraiment », choix « 
 analystes ne reçoivent plus seulement des totaux : `detail` (espérance par setup, régime, heure, note et jour,
 calculée par le code avec IC en grappes), `strategies` (tableau du labo v2 en bref, confirmation des GO) et
 `autopsie` (où les trades échouent, élan contre le hasard, grade indicatif des GO confirmés).
+`filtres_scanner` : ce que coûte chaque filtre du scanner de 15 h 10, mesuré sur les trades v1 d'actions (filtres.py).
 """
 import fcntl
 import json
@@ -20,6 +21,7 @@ from zoneinfo import ZoneInfo
 
 from app.lab import autopsie as AUT
 from app.lab import catalysts as CAT
+from app.lab import filtres as FIL
 from app.lab import grade as GRADE
 from app.lab import lessons as L
 from app.lab import method as M
@@ -137,12 +139,14 @@ def _strategies(conn) -> dict | None:
     if not rep:
         return None
     out = {"declaration": {k: (rep.get("declaration") or {}).get(k) for k in ("numero", "essais", "z_candidate")},
+           "partiel": rep.get("partiel"),  # I2 : rattrapage d'une nouvelle déclaration en cours (tableau partiel)
            "marches": {}}
     for market, strats in (rep.get("strategies") or {}).items():
         out["marches"][market] = {
             name: {"n": s.get("declenches"), "jours": s.get("jours"), "esperance_r": s.get("esperance_ref_r"),
                    "ic95": s.get("ic95"), "brut_r": s.get("brut_r"), "frais_r": s.get("frais_r"),
-                   "candidate": s.get("candidate"),
+                   "candidate": s.get("candidate"), "candidate_compte": s.get("candidate_compte"),  # n° 10
+                   "rentable_20e": s.get("rentable_20e"), "mise_20e_r": (s.get("mise_20e") or {}).get("esperance_r"),
                    "temoin_ecart_r": (s.get("temoin") or {}).get("ecart_r"), "temoin_z": (s.get("temoin") or {}).get("z")}
             for name, s in strats.items()}
     conf = (rep.get("confirmation_go") or {})
@@ -226,6 +230,7 @@ def build(conn, now: datetime, db_file: str, morning: dict | None = None, dm: bo
             "regles_recentes": _rules(conn, now), "compteurs": V.counts(conn), "lecons": _lessons(conn),
             "grade": _grade(conn),
             "detail": _detail(conn), "strategies": _strategies(conn), "autopsie": AUT.compact(AUT.cached(conn)),
+            "filtres_scanner": FIL.compact(FIL.cached(conn)),
             "point_du_matin": {k: morning.get(k) for k in ("jour", "etat", "rejetees", "propositions", "texte")}
             if morning else None}
     cut = False
@@ -249,6 +254,8 @@ def build(conn, now: datetime, db_file: str, morning: dict | None = None, dm: bo
             pass
         elif data["autopsie"] and data["autopsie"].get("strategies"):
             data["autopsie"]["strategies"] = None
+        elif data["filtres_scanner"] and data["filtres_scanner"].get("par_prix"):
+            data["filtres_scanner"]["par_prix"] = None
         elif data["lecons"] and len(data["lecons"]["actives"]) > 10:
             data["lecons"]["actives"] = data["lecons"]["actives"][:-5]  # confirmées en tête : on garde celles-là
         else:

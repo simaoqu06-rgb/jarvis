@@ -33,6 +33,7 @@ DEFAULTS: dict = {
     "scan_price_max": None,     # pas de plafond : les fractions d'action rendent le prix indifférent
     "scan_rvol_min": 1.5,       # volume de la veille / moyenne 20 jours
     "scan_gap_min_pct": 2.0,    # ou un gap d'au moins 2 % en pré-ouverture : la valeur est « en jeu »
+    "scan_gap_rvol_min": 0.0,   # volume veille minimal exigé d'une valeur entrée par le gap (0 = aucun)
     "scan_atr_pct_min": 2.5,    # amplitude journalière moyenne : assez de mouvement pour des TP à +5-10 %
     "scan_above_ma20": True,
     "scan_above_ma50": True,

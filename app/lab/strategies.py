@@ -112,6 +112,12 @@ exécuté garde aussi r_3c (stress de 3 cents de Gemini) et r_20e (mise de Simã
 Déclaration n° 9 (9 octobre 2026) : scanner « potentiel +10 » (plus10.py), listes S+10 et Rebond, quatre essais
 (PLUS10_TRIALS) jugés sur ses propres lignes (table plus10_trades) ; les lignes du labo v2 ne changent pas
 (DECLARATION reste 8, pas de rattrapage).
+Déclaration n° 10 (10 octobre 2026) : mesures corrigées, aucun essai de plus, rattrapage complet (actions et crypto) :
+simulateur en révision 2 (SIM_REV : pas entiers, bougie d'entrée symétrique, retour à l'entrée seulement certain dans
+la bougie d'entrée, objectif déjà dépassé vendu au prix d'achat) ; actions aux prix négociés (stock_day `traded`,
+lignes faites par le rattrapage) ; témoin des actions entré 5 à 30 min après l'exécution (witness_window), l'ancien
+gardé (temoin_journee_r) ; WITNESS_DRAWS à 10 ; colonnes descriptives qui ne décident de rien : r_be_tp2, r_ouverture,
+r_20e_deg, r_20e_1s, r_20e_2s (cost_variants), temoin_tirages.
 Objectifs : 1, 2 et 3 R. Fenêtre des signaux : actions de 9 h 45 à 15 h New York (soldé à la
 clôture) ; crypto de 0 h à 20 h UTC (soldé 24 h après le signal).
 v1 est rejouée avec les mêmes sorties et tests, sur ses propres objectifs : c'est la référence.
@@ -129,6 +135,7 @@ Pour chaque déclenchement, une seule ligne (db.STRAT_COLUMNS) avec :
   entre la décision et l'exécution d'un ordre stop, qui n'est pas annulé). Rien ne filtre sur ces colonnes.
 """
 import hashlib
+import json
 import random
 from bisect import bisect_left
 from datetime import date, datetime, time, timezone
@@ -140,15 +147,17 @@ from app.trading import confirm as CF
 from app.trading import indicators as I
 from app.trading import signals as S
 
-REGISTERED_ON = "2026-10-09"
+REGISTERED_ON = "2026-10-10"
 # Déclaration qui fixe les lignes du labo v2 (docs/labo-strategies.md). En changer relance le rattrapage de tous les
-# jours déjà traités (progress_job), pour que chaque stratégie soit mesurée sur les mêmes jours.
-DECLARATION = 8
-# Dernière déclaration (affichée) : la n° 9 (plus10.py) ajoute ses essais sans toucher aux lignes du labo v2.
-LATEST_DECLARATION = 9
-# Dernière déclaration qui change les lignes crypto : les n° 7 et 8 (actions seulement) laissent le rattrapage
-# crypto continuer celui de la n° 6. Une déclaration qui touche la crypto le remonte à son numéro.
-CRYPTO_DECLARATION = 6
+# jours déjà traités (progress_job), pour que chaque stratégie soit mesurée sur les mêmes jours. N° 10 : mesures
+# corrigées (simulateur, témoin, prix négociés), aucun essai de plus.
+DECLARATION = 10
+# Dernière déclaration (affichée).
+LATEST_DECLARATION = 10
+# Dernière déclaration qui change les lignes crypto : la n° 10 les re-mesure aussi (simulateur, révision 2).
+CRYPTO_DECLARATION = 10
+# n° 10 : révision du simulateur des lignes du labo v2 (simulator.simulate, `sim_rev`) ; le Labo 1 reste en 1.
+SIM_REV = 2
 BAR = CO.BASE_TF * 60
 REFERENCE = "v1"
 STRATEGIES = {
@@ -245,7 +254,8 @@ TARGET_BUFFER_ATR = 0.1     # objectif un peu avant la résistance (comme v1)
 MIN_TARGET_R = 0.5
 EXIT_SIGNAL_BARS = 80       # bougies lues par les signes de retournement (divergence RSI sur 60)
 EXIT_CONFIRM_BARS = 6       # n° 3 : délai de confirmation d'un signe de retournement (30 min)
-WITNESS_DRAWS = 5           # n° 3 : tirages du témoin aléatoire, moyennés
+WITNESS_DRAWS = 10          # n° 3 : tirages du témoin aléatoire, moyennés (5 jusqu'à la n° 10)
+WITNESS_SPAN = 6            # n° 10, actions : témoin entré 5 à 30 min après l'exécution (witness_window)
 MISS_DEPTH = 0.001          # ordre limite : traversée de moins de 0,1 % = probablement pas exécuté en réel
 TRAIL_R = 1.0
 STOCK_SIGNAL_FROM_MIN = 15  # actions : signaux à partir de 9 h 45 (après 3 bougies)
@@ -711,7 +721,7 @@ def _sim(d: Day, plan: dict, decided_at: int, entry_until: int, exit_at: int, co
          last_price: float, **kw) -> dict:
     return SIM.simulate(plan, d.after(decided_at), market=d.market, decided_at=decided_at,
                         entry_until=min(entry_until, exit_at), exit_at=exit_at, last_price=last_price,
-                        cost=cost, entry_order=order, **kw)
+                        cost=cost, entry_order=order, sim_rev=SIM_REV, **kw)
 
 
 def _missed(res: dict, d: Day) -> bool:
@@ -820,16 +830,25 @@ def cost_variants(market: str, res: dict) -> dict:
     r_3c : stress de Gemini (3 cents de plus à l'entrée, de moins à chaque sortie au marché : stop, stop à
     l'entrée, clôture ; objectifs au prix de l'ordre ; commission IBKR par action), killmode.stressed_r.
     r_20e : à la mise de Simão (20 € de risque au change EURUSD_DEFAULT, un bracket IBKR par objectif avec son
-    minimum par ordre, plan Fixe, glissement du labo), killmode.real_r. Actions seulement."""
+    minimum par ordre, plan Fixe, glissement du labo), killmode.real_r. Actions seulement.
+    n° 10, descriptives : r_20e_deg (barème IBKR Dégressif) ; r_20e_1s et r_20e_2s (plan Fixe, un seul bracket sur
+    TP2, ou deux sur TP1 et TP3, chacun soldé comme killmode._legs : la sortie du milieu de sa part) ; les deux
+    dernières sur un plan à trois objectifs seulement."""
+    keys = ("r_3c", "r_20e", "r_20e_deg", "r_20e_1s", "r_20e_2s")
     if market != "stock" or not res.get("triggered") or not res.get("exits"):
-        return {"r_3c": None, "r_20e": None}
+        return dict.fromkeys(keys)
     from app.trading import killmode as K  # import tardif : killmode importe ce module
 
     o = res["order_prices"]
     call = {"entry": o["entry"], "stop": o["stop"], "targets": o["targets"] or [o["entry"]]}
     done = {"declenche": True, "remplissage": res["fill_price"], "eurusd": K.EURUSD_DEFAULT, "plan_ibkr": "fixe",
             "sorties": [{"part": e["part"], "prix": e["price"], "raison": e["reason"]} for e in res["exits"]]}
-    return {"r_3c": K.stressed_r(call, done), "r_20e": K.real_r(call, done)}
+    tps = call["targets"]
+    three = len(tps) == 3
+    return {"r_3c": K.stressed_r(call, done), "r_20e": K.real_r(call, done),
+            "r_20e_deg": K.real_r(call, done | {"plan_ibkr": "degressif"}),
+            "r_20e_1s": K.real_r(call | {"targets": tps[1:2]}, done) if three else None,
+            "r_20e_2s": K.real_r(call | {"targets": [tps[0], tps[2]]}, done) if three else None}
 
 
 def measure(d: Day, plan: dict, decided_at: int, entry_until: int, cost: dict, order: str, last_price: float,
@@ -869,13 +888,14 @@ def witness(d: Day, key: tuple, risk_pct: float, multiples: list[float], cost_of
             exit_mode: str = "v1") -> dict:
     """Entrées au marché à WITNESS_DRAWS bougies tirées au hasard dans `window` (indices), chacune avec le
     même stop en % et les mêmes objectifs en R que le trade, même sortie (v1, ou stop fixe pour la n° 7) ;
-    temoin_r = leur moyenne."""
+    temoin_r = leur moyenne. n° 10 : temoin_tirages, le R de chaque tirage dans l'ordre du tirage (JSON, None pour
+    un tirage sans résultat), pour la dispersion entre tirages."""
     lo, hi = window
     if hi <= lo or risk_pct <= 0 or any(m <= 0 for m in multiples):
         return NO_WITNESS
     rng = _seed(*key)
     picks = rng.sample(range(lo, hi), min(WITNESS_DRAWS, hi - lo))
-    rs = []
+    draws: list[float | None] = []
     for k in picks:
         entry = d.o[k]
         stop = entry * (1 - risk_pct / 100)
@@ -883,11 +903,36 @@ def witness(d: Day, key: tuple, risk_pct: float, multiples: list[float], cost_of
         decided = d.t[k]
         res = _sim(d, plan, decided, decided + BAR, d.exit_at(decided), cost_of(entry), "market", entry,
                    exit_mode=exit_mode)
-        if res["triggered"] and res["r_net"] is not None:
-            rs.append(res["r_net"])
+        draws.append(res["r_net"] if res["triggered"] else None)
+    rs = [r for r in draws if r is not None]
     if not rs:
         return {"temoin_r": None, "temoin_triggered": 0}
-    return {"temoin_r": round(sum(rs) / len(rs), 4), "temoin_triggered": 1}
+    return {"temoin_r": round(sum(rs) / len(rs), 4), "temoin_triggered": 1, "temoin_tirages": json.dumps(draws)}
+
+
+def witness_window(d: Day, m: dict) -> tuple[int, int] | None:
+    """n° 10 (L1), actions : entrées 5 à 30 min après la bougie d'exécution (WITNESS_SPAN bougies), jamais sur la
+    dernière bougie de la séance ; None si la fenêtre est vide. Ni avant l'exécution (le témoin d'un trade exécuté
+    achèterait en sachant que le prix monte jusqu'au déclencheur), ni toute la journée (il mêlerait l'heure)."""
+    if not m.get("triggered") or m.get("filled_at") is None:
+        return None
+    lo = bisect_left(d.t, m["filled_at"]) + 1
+    hi = min(lo + WITNESS_SPAN, d.d1 - 1)
+    return (lo, hi) if hi > lo else None
+
+
+def witnesses(d: Day, key: tuple, risk_pct: float, multiples: list[float], cost_of, m: dict,
+              day_window: tuple[int, int], exit_mode: str = "v1") -> dict:
+    """Témoins d'un trade exécuté : en actions (n° 10), à la même heure (witness_window) et, gardé pour mesurer
+    l'effet de l'heure, sur `day_window` (l'ancienne fenêtre : temoin_journee_r) ; en crypto, sur `day_window`."""
+    if not m["triggered"]:
+        return NO_WITNESS
+    if d.market != "stock":
+        return witness(d, key, risk_pct, multiples, cost_of, day_window, exit_mode)
+    near = witness_window(d, m)
+    same = witness(d, key, risk_pct, multiples, cost_of, near, exit_mode) if near else NO_WITNESS
+    day = witness(d, key, risk_pct, multiples, cost_of, day_window, exit_mode)
+    return same | {"temoin_journee_r": day["temoin_r"], "temoin_journee_triggered": day["temoin_triggered"]}
 
 
 def above_vwap(d: Day, decided_at: int) -> int | None:
@@ -957,26 +1002,46 @@ def strategy_rows(d: Day, symbol: str, rank=None, gap: float | None = None, name
         emp = _plan(cand["entry"], cand["stop"], emperor_targets(sd, cand["entry"], cand["stop"]))
         m = measure(d, plan, cand["decided_at"], cand["entry_until"], cost, "stop", sd.c[cand["i"]], res, emp)
         risk_pct = (plan["entry"] - plan["stop"]) / plan["entry"] * 100
-        # n° 6 : le témoin de Killmode tire ses entrées pendant la vie de son ordre (9 h 45-11 h), pas l'après-midi
+        # n° 6 : le témoin de Killmode tire ses entrées pendant la vie de son ordre (9 h 45-11 h), pas l'après-midi ;
+        # n° 10 : en actions, ce témoin « journée » devient temoin_journee_r, temoin_r est pris à la même heure
         window = (d.first, bisect_left(d.t, cand["entry_until"]) if name == "killmode" else d.last)
-        wit = witness(d, (d.market, symbol, d.day, name), risk_pct, list(TARGETS_R),
-                      lambda p: SIM.costs(d.market, p, rank), window) if m["triggered"] else NO_WITNESS
+        wit = witnesses(d, (d.market, symbol, d.day, name), risk_pct, list(TARGETS_R),
+                        lambda p: SIM.costs(d.market, p, rank), m, window)
         rows.append(_row(d, symbol, name, 0, plan, cand["decided_at"], m, wit, gap, rank))
     return rows
 
 
 def v1_row(d: Day, symbol: str, plan: dict, decided_at: int, entry_until: int, last_price: float, cost: dict,
            res: dict | None = None, rank=None, gap: float | None = None, window: tuple[int, int] | None = None) -> dict:
-    """v1 rejouée avec les sorties et tests du labo v2, sur ses propres objectifs (ordre limité)."""
+    """v1 rejouée avec les sorties et tests du labo v2, sur ses propres objectifs (ordre limité).
+    n° 10 : toujours re-simulée en révision 2 (`res`, le résultat du Labo 1 en révision 1, n'est plus repris) ;
+    r_be_tp2 ; en actions, r_ouverture (opening_r) et le témoin à la même heure (`window` : fenêtre « journée »)."""
     targets = [t["price"] for t in plan["targets"]][:3]
     p = _plan(plan["entry"], plan["stop"], targets)
-    m = measure(d, p, decided_at, entry_until, cost, "limit", last_price, res)
+    m = measure(d, p, decided_at, entry_until, cost, "limit", last_price)
+    if m["triggered"]:
+        m["r_be_tp2"] = _sim(d, p, decided_at, entry_until, d.exit_at(decided_at), cost, "limit", last_price,
+                             exit_mode="be_tp2")["r_net"]
+    if d.market == "stock":
+        m["r_ouverture"] = opening_r(d, p, rank)
     risk = plan["entry"] - plan["stop"]
     risk_pct = risk / plan["entry"] * 100 if plan["entry"] else 0
     multiples = [round((t - plan["entry"]) / risk, 4) for t in targets] if risk > 0 else []
-    wit = witness(d, (d.market, symbol, d.day, REFERENCE, decided_at), risk_pct, multiples,
-                  lambda px: SIM.costs(d.market, px, rank), window or (d.first, d.last)) if m["triggered"] else NO_WITNESS
+    wit = witnesses(d, (d.market, symbol, d.day, REFERENCE, decided_at), risk_pct, multiples,
+                    lambda px: SIM.costs(d.market, px, rank), m, window or (d.first, d.last))
     return _row(d, symbol, REFERENCE, decided_at, p, decided_at, m, wit, gap, rank)
+
+
+def opening_r(d: Day, plan: dict, rank=None) -> float | None:
+    """n° 10 (L4), descriptive : le plan v1 acheté au marché à l'ouverture de 9 h 30, déclenché ou non au labo, en R
+    du risque prévu, stop fixe (comme r_sans_be) ; un objectif déjà dépassé à l'achat sort au prix d'achat (révision
+    2). None sans bougie d'ouverture, ou si elle est au stop ou dessous."""
+    if d.d1 <= d.d0 or d.t[d.d0] != d.start_ts or d.o[d.d0] <= plan["stop"]:
+        return None
+    o = d.o[d.d0]
+    res = _sim(d, plan, d.start_ts, d.start_ts + BAR, d.exit_at(d.start_ts), SIM.costs("stock", o, rank), "market", o,
+               exit_mode="sans_be")
+    return res["r_net"] if res["triggered"] else None
 
 
 # --- Déclaration n° 7 : confirmation des GO -------------------------------------------------
@@ -1028,19 +1093,21 @@ def index_move(index5: list[dict] | None, start_ts: int) -> dict[int, float] | N
 def go_measure(d: Day, plan: dict, decided_at: int, entry_until: int, cost: dict, order: str,
                last_price: float) -> dict:
     """n° 7 : la seule sortie déclarée (tiers aux objectifs, stop fixe, reste à la clôture : r_sans_be) et ses
-    tests de robustesse ; r_net (gestion v1) n'est pas mesuré. Ordres au marché ou stop : rien à « manquer »."""
+    tests de robustesse ; r_net (gestion v1) n'est pas mesuré. Ordres au marché ou stop : rien à « manquer ».
+    n° 10, descriptive : r_be_tp2 (stop à l'entrée après le TP2, la règle que suit Simão)."""
     exit_at = d.exit_at(decided_at)
     res = _sim(d, plan, decided_at, entry_until, exit_at, cost, order, last_price, exit_mode="sans_be")
     if not res["triggered"]:
         return dict(NO_TRADE)
     late = _sim(d, plan, decided_at + BAR, entry_until + BAR, exit_at, cost, order, last_price, exit_mode="sans_be")
+    be2 = _sim(d, plan, decided_at, entry_until, exit_at, cost, order, last_price, exit_mode="be_tp2")
     return {"triggered": 1, "filled_at": res["filled_at"], "entry_mode": res["entry_mode"],
             "minutes_to_fill": res["minutes_to_fill"], "exit_reason": res["exit_reason"], "r_net": None,
             "r_gross": res["r_gross"], "tp1_hit": int(bool(res["tp_hits"] and res["tp_hits"][0])),
             "mfe_r": res["mfe_r"], "mae_r": res["mae_r"], "r_sans_be": res["r_net"],
             "r_glisse_x2": SIM.net_r(res, cost, slip_factor=2.0), "r_glisse_x3": SIM.net_r(res, cost, slip_factor=3.0),
             "r_retard": late["r_net"] if late["triggered"] else None, "r_manque": res["r_net"],
-            **cost_variants(d.market, res)}  # n° 8, D2
+            "r_be_tp2": be2["r_net"], **cost_variants(d.market, res)}  # n° 8, D2
 
 
 def go_plans(v1: dict | None) -> dict:
@@ -1097,11 +1164,11 @@ def go_rows(d: Day, symbol: str, plans: dict, rank=None, gap: float | None = Non
             m = (go_measure(d, p, decided, entry_until, cost, order, last) if order and entry > stop
                  else dict(NO_TRADE))
             wit = NO_WITNESS
-            if m["triggered"]:
+            if m["triggered"]:  # n° 10 : à la même heure, `window` gardée pour temoin_journee_r
                 risk = entry - stop
-                wit = witness(d, (d.market, symbol, d.day, name), risk / entry * 100,
-                              [round((t - entry) / risk, 4) for t in targets],
-                              lambda px: SIM.costs("stock", px, rank), window, exit_mode="sans_be")
+                wit = witnesses(d, (d.market, symbol, d.day, name), risk / entry * 100,
+                                [round((t - entry) / risk, 4) for t in targets],
+                                lambda px: SIM.costs("stock", px, rank), m, window, exit_mode="sans_be")
             rows.append(_row(d, symbol, name, 0, p, decided, m, wit, gap, rank) | {"confirmation": statuses[arm]})
     return rows
 
@@ -1122,13 +1189,18 @@ def index_down(index5: list[dict] | None) -> list[int] | None:
 
 
 def stock_day(day: date, symbol: str, hist5: list[dict], session: list[dict], daily: list[dict],
-              rank=None, v1: dict | None = None, index5: list[dict] | None = None) -> list[dict]:
+              rank=None, v1: dict | None = None, index5: list[dict] | None = None, traded: bool = False) -> list[dict]:
     """Lignes du jour pour une action : v1 (si son plan existe) et les stratégies.
 
     `hist5` : bougies de 5 min avant la séance ; `session` : celles de la séance ; `daily` :
     journalier connu avant le jour ; `v1` : {plan, decided_at, entry_until, last_price, cost, result, go,
     plancher} (go et plancher : n° 7, voir go_plans) ; `index5` : bougies de 5 min de SPY pendant la séance
-    (sortie r_spy, déclaration n° 6)."""
+    (sortie r_spy, déclaration n° 6).
+    n° 10 : seulement aux prix négociés (`traded` : bougies de 5 min non ajustées, journalier et plans v1 remis à leur
+    échelle, rattrapage.stock_rows) ; sinon rien. Le générateur passe les bougies de la base, ajustées des divisions
+    survenues depuis : ses lignes viennent du rattrapage."""
+    if not traded:
+        return []
     bars = CO.regular_hours(hist5[-STOCK_WARMUP_BARS * 2:])[-STOCK_WARMUP_BARS:] + session
     d = Day("stock", day, bars, daily)
     d.index_down = index_down(index5)

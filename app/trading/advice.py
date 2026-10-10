@@ -9,7 +9,9 @@ dont ni le TP ni le SL n'est touché, SORTIR, ALLÉGER ou GARDER, avec les faits
   1. résultats trimestriels avant la fin de la prochaine séance → SORTIR (pari binaire hors plan) ;
   2. garder jusqu'au prochain objectif a une espérance négative, rejouée sur l'historique de l'actif
      depuis le prix actuel avec le stop suivi → SORTIR ;
-  3. objectif en retard (3 cas passés sur 4 l'avaient touché) et position qui ne gagne pas → SORTIR ;
+  3. objectif en retard (heure passée à laquelle 3 sur 4 des cas qui l'ont touché l'avaient fait, soit
+     reached_by_p75 de tous les cas) et position qui ne gagne pas, seulement si garder n'est pas mesurable
+     (sinon la règle 2 a déjà jugé depuis le prix actuel, et le retard reste un simple fait) → SORTIR ;
   4. signe de retournement sur une position gagnante → ALLÉGER (moitié dehors, stop à l'entrée) ;
   5. gap de nuit plus grand que la distance au stop dans au moins 10 % des nuits passées → ALLÉGER ;
   6. sinon GARDER, avec le stop à laisser et l'heure estimée du prochain objectif.
@@ -269,8 +271,9 @@ def advise(trade: dict, price: float, bars: list[dict], daily: list[dict] | None
     elif hold and hold["expectancy_r"] < 0:
         decision, why = "SORTIR", (f"garder jusqu'à {hold['target']} perd en moyenne ({_fr(hold['expectancy_r'])} R) : "
                                    "le stop vient plus souvent que l'objectif depuis ce prix")
-    elif late and r_now <= 0:
-        decision, why = "SORTIR", f"{nxt['name']} en retard et la position ne gagne pas : le scénario ne se déroule pas"
+    elif late and r_now <= 0 and hold is None:
+        decision, why = "SORTIR", (f"{nxt['name']} en retard, la position ne gagne pas et garder n'est pas mesurable : "
+                                   "le scénario ne se déroule pas")
     elif signals:
         decision, why = "ALLÉGER", (f"{signals[0][1]} : sors la moitié, remonte le stop à l'entrée "
                                     f"({S._num(trade['entry'])}) et laisse courir le reste")

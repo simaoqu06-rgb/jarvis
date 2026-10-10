@@ -11,7 +11,7 @@ Toutes les ~10 min :
    résumé du soir (après 22 h 30 à Paris). Budgets par période dans LAB2_BUDGET : gros la nuit et
    le week-end, minimes pendant la séance.
 4. Labo 3 (étape « methode ») : décisions de Simão et types de catalyseurs déposés par le serveur,
-   challenger, bascule automatique ou retrait, fichier du champion lu par JARVIS en direct.
+   challenger, regards fixes (promotion proposée à Simão) ou retrait, fichier du champion lu par JARVIS en direct.
 5. Carnet des leçons (étape « lecons », lessons.py) : leçons déposées par la routine du soir,
    re-mesurées quand les trades changent, fichier des leçons confirmées lu par JARVIS en direct.
 6. Grade de JARVIS (étape « grade », grade.py) : avis du council et décisions de Simão, grade de
@@ -35,6 +35,8 @@ Toutes les ~10 min :
    non ajustées relues et gardées en mémoire, hors séance US, plus10_seconds par passage.
 13. « autopsie » (autopsie.py) : où les trades échouent (MFE/MAE contre le hasard) et grade indicatif des GO
    confirmés, recalculés quand les trades changent, au plus toutes les stats_age secondes.
+14. « filtres » (filtres.py) : ce que coûte chaque filtre du scanner de 15 h 10 sur les trades v1 d'actions,
+   recalculé quand les trades ou les réglages changent, au plus toutes les stats_age secondes, hors séance US.
 Le battement (lab.heartbeat) porte l'étape en cours, affichée par /api/lab/status et !labo.
 Le rejeu couvre JARVIS_LAB_REPLAY_DAYS séances (504 ≈ 2 ans) avant le premier lancement du worker ;
 le direct prend le relais à partir de ce jour-là. JARVIS_LAB_ENABLED=off met le worker en veille.
@@ -51,6 +53,8 @@ from app.lab import catalysts as CAT
 from app.lab import collector as CO
 from app.lab import cout as COUT
 from app.lab import derivs as DER
+from app.lab import empreinte as E
+from app.lab import filtres as FIL
 from app.lab import generator as G
 from app.lab import grade as GRADE
 from app.lab import heartbeat
@@ -143,6 +147,14 @@ def replay_seconds(now: datetime, summary_last_day: str | None) -> float:
     return box
 
 
+def rattrapage_seconds(now: datetime, summary_last_day: str | None) -> float:
+    """Durée permise au rattrapage du labo v2 d'un marché à ce passage : RATTRAPAGE_SECONDS de la période, sans déborder
+    sur l'heure du résumé du soir tant qu'il n'est pas fait, comme le rejeu (replay_seconds). Depuis la n° 10, il a des
+    centaines de jours devant lui et prend tout son budget à chaque passage : 2 marchés × 10 min juste avant 22 h 30
+    repoussaient le résumé après la routine du soir."""
+    return min(float(RATTRAPAGE_SECONDS[period(now)]), replay_seconds(now, summary_last_day))
+
+
 def replay_budget(now: datetime) -> int:
     """Nombre de jours de rejeu par passage et par marché."""
     return CHUNK_DAYS[period(now)]
@@ -197,9 +209,10 @@ def warn_missing_keys(now_mono: float | None = None) -> bool:
 
 
 def crypto_windows_due(day: date, now: datetime, done_until: int | None) -> bool:
-    """Un nouveau créneau crypto du jour a-t-il atteint son horizon depuis le dernier passage ?"""
+    """Un nouveau créneau crypto du jour a-t-il atteint son horizon depuis le dernier passage ? Un jour complet
+    encore à journaliser (son calcul complet a échoué) l'est toujours : nouvel essai, puis sauté au 3e (I4)."""
     due = [m for m in G.crypto_moments(day) if m + 86400 <= now.timestamp()]
-    return bool(due) and (done_until is None or due[-1] > done_until)
+    return bool(due) and (done_until is None or due[-1] > done_until or R.day_ready("crypto", day, now))
 
 
 def _history_start(market: str, day: date, stock_sessions: int, crypto_days: int) -> int:
@@ -306,10 +319,12 @@ async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, tra
         heartbeat.beat()
     if "labo2" not in report:
         report["labo2"] = await lab2(db, current(), collect)
-    seconds = RATTRAPAGE_SECONDS[period(current())] if collect else 0
-    if seconds:
+    if collect and RATTRAPAGE_SECONDS[period(current())]:
         report["rattrapage"] = {}
         for market in markets:
+            seconds = rattrapage_seconds(current(), db.get("summary", "last_day"))
+            if not seconds:
+                continue
             heartbeat.beat(f"labo v2 : rattrapage {market}")
             try:
                 report["rattrapage"][market] = await RAT.step(db, market, seconds, transport)
@@ -329,17 +344,19 @@ async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, tra
 
 
 def trades_signature(db: LabDB) -> list:
+    """COUNT et MAX(id) des trades, compteur rev:trades (un trade réécrit sur place) et empreinte du code des stats."""
     row = db.conn.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM trades").fetchone()
-    return [row[0], row[1]]
+    return [row[0], row[1], *E.sig(db.conn, "trades")]
 
 
 def refresh_stats(db: LabDB, now: datetime, max_age: float, force: bool = False) -> dict | None:
     """Recalcule les statistiques de la version en cours si les trades ont changé et que le cache a
-    plus de `max_age` secondes (ou `force`). Renvoie les statistiques à jour, ou None si inchangées."""
+    plus de `max_age` secondes (ou `force`, ou un autre code : déploiement). Renvoie les statistiques à jour,
+    ou None si inchangées."""
     sig = trades_signature(db)
     last = db.get("stats", "signature")
     at = db.get("stats", "at", 0) or 0
-    if not force and (sig == last or now.timestamp() - at < max_age):
+    if not force and (sig == last or (now.timestamp() - at < max_age and not E.code_changed(last))):
         return None
     version = V.current_version(db.conn)
     data = STATS.compute(db.conn, version=version) if version else STATS.compute(db.conn)
@@ -352,11 +369,12 @@ def refresh_stats(db: LabDB, now: datetime, max_age: float, force: bool = False)
 
 def refresh_strategies(db: LabDB, now: datetime, max_age: float) -> int | None:
     """Labo v2 : tableau des stratégies et diagnostic v1 (strat_stats), recalculés quand les lignes ont
-    changé et que le cache a plus de `max_age` secondes. Renvoie le nombre de lignes, ou None."""
+    changé et que le cache a plus de `max_age` secondes (tout de suite après un déploiement). Renvoie le nombre
+    de lignes, ou None."""
     sig = SS.signature(db.conn)
     last = db.get("strats", "signature")
     at = db.get("strats", "at", 0) or 0
-    if sig == last or (SS.cached(db.conn) and now.timestamp() - at < max_age):
+    if sig == last or (SS.cached(db.conn) and now.timestamp() - at < max_age and not E.code_changed(last)):
         return None
     data = SS.report(db.conn)
     with db.transaction():
@@ -407,6 +425,8 @@ async def lab2(db: LabDB, now: datetime, collect: bool = True) -> dict:
     await step("grade", lambda: GRADE.step(db, now))
     await step("strategies", lambda: refresh_strategies(db, now, budget["stats_age"]))
     await step("autopsie", lambda: AUT.step(db, now, budget["stats_age"]))
+    if not CO.CAL.session_open(now):  # un journalier relu par action : pas pendant la séance US
+        await step("filtres", lambda: FIL.step(db, now, budget["stats_age"]))
     summary_day = SUM.due(now, db.get("summary", "last_day"))
     stats = await step("stats", lambda: refresh_stats(db, now, budget["stats_age"], force=bool(summary_day)))
     if stats:

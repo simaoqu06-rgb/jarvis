@@ -304,7 +304,7 @@ Killmode a deux parties, mesurées chacune là où elle peut l'être sans voir l
 Les jours déjà traités sont recalculés par le rattrapage (`progress_job` change avec le numéro).
 
 **Council** (Sceptique, Pragmatique, Critique : GO modifié). Sceptique : « setup complet » ne veut pas dire
-« setup gagnant » ; la note composite de v1, qui compte déjà le catalyseur, n'a rien prédit (GO ≈ NO GO ≈
+« setup gagnant » ; la note composite de v1, sans sa part catalyseur, n'a rien prédit (GO ≈ NO GO ≈
 −0,24 R), donc Killmode est une hypothèse à mesurer, pas un avantage acquis. Pragmatique : une seule stratégie
 de plus (7 essais), qui réutilise bougies, simulateur et témoin ; le rattrapage refait les jours déjà traités,
 comme à la n° 4. Critique : la tonalité des actus est lue par mots-clés et l'univers du labo compte peu de
@@ -854,6 +854,153 @@ d'avantage ».
 Killmode complet ; l'essai mesure ce que le classement et le seuil ajoutent, les rangs 6+ et les tirages le diront.
 Pragmatique : 4 essais, aucune règle de prix nouvelle. Critique : petits prix et Rebond après une mauvaise nouvelle ;
 jugés par le stress de 3 c, le témoin et les tranches de prix. GO, modifié après GPT et Gemini.
+
+## Déclaration n° 10 (10 octobre 2026) : mesures corrigées, sans essai de plus
+
+Écrite avant tout chiffre recalculé : aucune ligne du labo n'a été lue pour l'écrire. Sources : la vérification du code
+du labo (points I1, L1 à L5 et X1) et l'audit `/mnt/project-files/labo/audit-infos-futures-2026-10-10.md` (ligne
+« Bougies ajustées des divisions »). La n° 10 ne crée **aucun essai** : elle corrige la façon de mesurer et re-mesure
+les essais existants, plus des colonnes descriptives qui ne décident de rien et préparent la n° 11. Code :
+`app/lab/simulator.py` (`sim_rev`), `strategies.py`, `rattrapage.py`, `strat_stats.py`.
+
+### Ce qui change, et pourquoi
+
+1. **Simulateur, révision 2** (`strategies.SIM_REV = 2`, toutes les lignes du labo v2, n° 9 et Killmode complet
+   compris) :
+   - prix comparés en pas entiers avec une tolérance (I1) : un objectif à 16,01 $ et un plus haut de 16,02 $ ne
+     comptaient pas (16,01 + 0,01 vaut 16,020000000000003 en flottants), et 23 % des niveaux au cent entre 20 et
+     100 $ demandaient deux pas au lieu d'un ; désormais un pas exact suffit, à tous les cents (objectif, ordre
+     limité, ouverture au-delà d'un objectif) ;
+   - bougie d'entrée symétrique (L2) : un ordre stop rempli en cours de bougie compte les objectifs qu'elle traverse,
+     comme le témoin entré à l'ouverture ; avant, la stratégie prenait le stop de cette bougie mais pas ses objectifs ;
+   - retour à l'entrée dans la bougie d'entrée compté seulement s'il est certain (L2b), pour la stratégie comme pour le
+     témoin ; les bougies suivantes restent jouées au pire ;
+   - un objectif déjà dépassé à l'achat sort au prix d'achat (L4) : acheté 10,30 $ avec un TP1 à 10,05 $, le tiers
+     sortait à 10,05 $ (−0,46 R sur un trade qui n'a rien perdu) ;
+   - nouvelle sortie `be_tp2` (stop à l'entrée après TP2, ta règle de suivi), mesurée seulement (X1).
+   Le Labo 1 (`trades`, generator.py) reste en révision 1 : c'est le benchmark figé, ses chiffres ne bougent pas.
+2. **Témoin des actions à la même heure** (L1) : le témoin tirait son entrée entre 9 h 45 et 15 h, alors que les ORB et
+   les GO entrent tôt ; l'écart au témoin mêlait le signal et l'heure. Désormais, pour chaque trade exécuté (essais de
+   la n° 9 compris), le témoin
+   entre 5 à 30 min **après** l'exécution (`witness_window`, `WITNESS_SPAN` = 6 bougies, jamais la dernière bougie de
+   la séance ; une exécution à 15 h 50 ou 15 h 55 n'a pas de témoin). Jamais avant l'exécution : un tirage d'avant
+   achète sous le déclencheur en « sachant » que le prix va l'atteindre. L'ancien témoin est gardé
+   (`temoin_journee_r`). La crypto garde son témoin (horizon fixe de 24 h).
+3. **Tirages du témoin : 10 au lieu de 5** (`WITNESS_DRAWS`). Coût mesuré sur des journées synthétiques : 12,7 ms par
+   action avec 5 tirages, 14,8 ms avec 10 (+16 %, 40 marches aléatoires) ; 15 à 17 ms contre 19 à 21 ms sur une séance
+   de tendance (+25 %) ; en crypto, +3 à 4 ms par paire. Soit moins d'une seconde de plus par séance de 300 actions,
+   contre plusieurs minutes de téléchargement : gardé. Chaque tirage est publié (`temoin_tirages`).
+4. **Actions aux prix réellement négociés** (audit, divisions) : bougies de 5 min non ajustées (`adjustment=raw`, SPY
+   compris), journalier et plan v1 remis à l'échelle de la dernière clôture brute quand une division a eu lieu depuis
+   (écart de plus de 5 % entre prix brut et prix ajusté, `rattrapage.SPLIT_TOL` ; en deçà, rien n'est touché). Une
+   valeur dont le gap brut et le gap ajusté divergent de plus de 25 % (opération sur titre entre la veille et la
+   séance) est écartée, comme à la n° 9. Avant, le demi-pas, les 3 cents, les actions entières, la commission et le
+   minimum de 1 $ étaient calculés sur des prix qu'aucun trader n'a vus. Le générateur n'écrit plus les lignes des
+   actions : le rattrapage les fait toutes, jusqu'au dernier jour traité (rejeu et direct) dont le journalier est
+   en base (sans lui, l'opération sur titre du jour même ne se voit pas).
+
+### Ce qui ne change pas
+
+Le Labo 1 et ses trades, les stratégies, les seuils, les sorties déclarées, la règle « candidate » (D2 de la n° 8 ;
+en crypto, ses grappes deviennent des semaines, voir plus bas), le bloc scellé (ni lu, ni déplacé). **Essais : 152,
+inchangé.**
+
+### Colonnes descriptives (aucune ne décide)
+
+| Colonne | Ce qu'elle mesure | Ce qu'on y lira |
+|---|---|---|
+| `r_be_tp2` | v1 et bras GO, stop à l'entrée après TP2 (ta règle), reste à la clôture | ce que coûte ou rapporte ta règle face à la sortie déclarée |
+| `r_ouverture` | chaque plan v1 (exécuté ou non) acheté au marché à l'ouverture de 9 h 30, stop fixe | si v1 perd par sa méthode ou par son ordre limité, qui n'achète un gap haussier que s'il échoue |
+| `r_20e_deg` | `r_20e` au barème IBKR Dégressif | l'écart entre Fixe et Dégressif à ta taille |
+| `r_20e_1s`, `r_20e_2s` | `r_20e` avec un seul bracket (TP2) ou deux (TP1 et TP3) au lieu de trois | ce que coûtent les trois brackets à 20 € (minimum de 1 $ par ordre) |
+| `temoin_journee_r` | l'ancien témoin (journée) des actions | l'effet de l'heure |
+| `temoin_tirages` | le R de chaque tirage du témoin | la dispersion entre tirages |
+
+`r_20e_1s` et `r_20e_2s` reprennent les sorties de la simulation à trois objectifs : chaque bracket sort comme la
+part du milieu de sa tranche (`killmode._legs`). C'est le coût des ordres, pas une re-simulation avec un seul
+objectif.
+
+### Lecture du tableau
+
+- **✅ seulement si la stratégie gagne aussi à 20 €** : `candidate` garde sa définition (avantage de la règle) ;
+  `candidate_compte` exige en plus, en actions, une espérance `r_20e` positive. Sinon « ☑️ avantage, perd à 20 € ».
+  Même chose pour le potentiel +10 et la ligne du labo de Killmode ; le brief transmet `rentable_20e` et la valeur.
+- **Crypto en grappes par semaine ISO** (L5) : les positions de 24 h se chevauchent d'un jour à l'autre, des grappes
+  par jour sous-estiment l'erreur. Le seuil en t se prend sur les semaines (environ 75 sur un an et demi : seuil
+  3,56 au lieu de 3,43 sur ~527 jours, à 152 essais). Le se par jour et le facteur d'inflation sont affichés à côté. En actions,
+  la même lecture en semaines est affichée, sans effet sur le verdict.
+- **Effet de l'heure** (écart au témoin de la journée − écart au témoin de la même heure) et **dispersion entre
+  tirages** (écart-type des moyennes par tirage) : affichés, sans effet.
+- **Entrée de v1** : « limite ou rien » contre « ouverture ou rien », plan par plan (une branche non exécutée vaut 0).
+  Sur les GO, avec `go_brut` ramené au risque prévu de v1, par écart ouverture / entrée, les ouvertures au-dessus du
+  TP1 à part ; sur tous les plans, avec `r_ouverture`, par gap d'ouverture.
+- Le se de l'espérance est exposé ; l'écart labo/direct de Killmode s'en sert (avant, un IC en t lu comme un IC
+  normal grossissait le bruit du labo).
+- En tête du tableau, la politique mesurée en une ligne (entrée, break-even, sortie au temps, taille).
+
+### Contrôle de non-biais (test du simulateur)
+
+Sur une marche aléatoire au cent près (aucun avantage par construction), l'écart apparié ordre stop − témoin des
+biais du simulateur (simulé − vrai, le vrai rejoué transaction par transaction) : révision 2 entre −0,017 et
++0,001 R sur huit graines (tolérance 0,02 R, ~2,5 erreurs-types), révision 1 entre +0,025 et +0,079 R en faveur de
+l'ordre stop. **Biais résiduel connu** : avec un stop serré (1 σ d'une bougie), un plus bas sous le stop dans la
+bougie d'exécution compte −1 R alors qu'il a pu venir avant l'exécution : −0,04 à −0,06 R contre l'ordre stop. Il
+peut cacher un avantage, pas en inventer un.
+
+### Effet attendu
+
+L2 et L2b gonflaient les stratégies à ordre stop face à leur témoin : leurs écarts au témoin vont baisser. Le
++0,16 R de la cassure de zone crypto n'est plus une piste avant re-mesure. L4 relève les achats à l'ouverture au-dessus
+des objectifs (`go_brut` les jours de gap haussier). Le témoin à la même heure change l'écart dans un sens qu'on ne
+connaît pas (saisonnalité de la journée). Les prix négociés relèvent surtout les coûts des petites valeurs avant un
+regroupement d'actions.
+
+### Coût
+
+Rattrapage complet des deux marchés (`progress_job` : `strats:stock:d10`, `strats:crypto:d10`), bougies relues à la
+source : plusieurs minutes par séance d'actions, hors séance seulement, et sans déborder sur l'heure du résumé du soir.
+Un jour que la source refuse est retenté aux deux passages suivants, puis calculé sans les symboles en échec, ou
+sauté si plus de la moitié de l'univers manque (ses lignes d'avant sont alors effacées). Les séances de la n° 9 sont
+recalculées (marque `plus10.MESURE`, le tableau ne lit que les recalculées), et celles de Killmode complet aussi
+(l'empreinte de coût comprend la révision du simulateur et change aussi avec les nouvelles variantes). Les jours du
+direct en actions attendent leur journalier (relu au passage de la séance suivante), puis le rattrapage, qui traite
+d'abord l'arriéré du rejeu. Jusqu'à la fin du rattrapage, le tableau, l'autopsie et le grade indicatif des GO
+confirmés ne lisent que les lignes de la n° 10, avec la mention « Tableau partiel : N jours en rattrapage » (et
+« rattrapage … en cours » dans `!autopsie` et `!grade`) : les lignes d'avant sont exclues, jamais mélangées.
+
+### Limites
+
+- Le témoin après exécution détient 5 à 30 min de moins (sortie à la clôture) : négligeable devant le biais d'avant.
+- Une division survenue dans les deux séances d'historique de 5 min n'est pas corrigée (rare).
+- `r_ouverture` se lit par gap d'ouverture : le prix d'ouverture n'est pas gardé dans la ligne de v1.
+- Le journalier brut pour toute la base (tranches de prix et minimum de 5 $ des mesures de la n° 9) n'est pas fait ici.
+- La comparaison du journal de Killmode au labo (`r_ibkr`, `killmode.settle`) rejoue encore en révision 1 : à aligner.
+
+### Hypothèses pour la n° 11, non déclarées
+
+Chacune demande d'abord sa donnée ; rien n'est mesuré ici sous forme d'essai.
+
+| Hypothèse | Donnée à mesurer d'abord |
+|---|---|
+| Continuation après résultats ou guidance vérifiés | heure de publication fiable (part des actus « en retard », `visibilite_finnhub`) et calendrier archivé sur assez de séances |
+| Horizons 15, 30 et 60 min contre témoin apparié (M2) | R à horizon fixe de chaque entrée et de son témoin à la même heure, part de +1 R avant −1 R |
+| Une ou deux sorties au lieu de trois à 20 € | `r_20e_1s` et `r_20e_2s` contre `r_20e`, sur les lignes re-mesurées |
+| RVOL à la même minute | volume cumulé à la minute du signal contre la moyenne des 20 séances à la même minute (bougies de 5 min relues) |
+| Régime VIX / ADX (M1) | clôtures de la veille du VIX et de l'ADX 14 j de SPY, archivées par séance |
+| H1 à H3 du journal des erreurs (rejet de catalyseur, bêta face au secteur, stop sous un plus bas évident) | séances de catalyseur rejetées, bêta et ETF de secteur, marge du stop en ATR journalier |
+| L1 à L10 de Killmode (file d'attente du labo) | les trades `!prends … kill` et Killmode complet aux prix négociés, point par point |
+| Ta règle de sortie (stop à l'entrée après TP2) | `r_be_tp2` contre `r_sans_be` sur les GO |
+| Entrée de v1 à l'ouverture | `r_ouverture` contre « limite ou rien », par gap |
+
+### Council
+
+Position de l'analyste, sur les faits : la n° 10 devrait surtout retirer des candidates (biais connus en faveur des
+stratégies, coûts réels plus hauts, grappes crypto plus larges) ; seul le témoin à la même heure peut jouer dans les
+deux sens. Elle ne choisit rien après coup. **Sceptique** : changer le simulateur et le
+témoin en même temps empêche d'attribuer la baisse à l'un ou l'autre ; accepté, `temoin_journee_r` et le contrôle de
+non-biais séparent les deux. **Pragmatique** : aucun essai, une seule re-mesure de tout. **Critique** : le témoin à la
+même heure n'existe que pour les actions, et un stop serré garde un biais contre la stratégie ; les deux sont écrits.
+GO.
 
 ## Bloc scellé
 

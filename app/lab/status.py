@@ -3,6 +3,10 @@
 Avancement du rejeu, trades par marché et par origine, dernier jour en direct, taille de la base,
 étape en cours du worker et son dernier signe de vie (lab.heartbeat), et quelques chiffres du Labo 2 lus dans le cache du worker : espérance en R avec son intervalle de
 confiance, fiches catalyseurs, règles en attente et testées.
+
+Avis du 10 octobre (I2, I4) : jours sautés (skipped:<D>, retirés des jours faits), jours calculés sans quelques
+symboles que la source n'a pas donnés (missing_symbols), valeurs de l'univers sans trade (absent), et trades par
+révision du code (trades.code_rev) pour voir quand une même version mélange plusieurs codes.
 """
 import json
 import sqlite3
@@ -46,6 +50,22 @@ def _progress(conn: sqlite3.Connection, job: str) -> dict:
     return {k: json.loads(v) for k, v in conn.execute("SELECT key, value FROM progress WHERE job = ?", (job,))}
 
 
+def day_counts(p: dict) -> dict:
+    """Jours sautés, jours calculés sans tous leurs symboles et valeurs de l'univers sans trade, d'un job (rejeu
+    ou direct) lu dans progress."""
+    days = [v for k, v in p.items() if k.startswith("day:") and isinstance(v, dict)]
+    return {"jours_sautes": sum(1 for k in p if k.startswith("skipped:")),
+            "jours_partiels": sum(1 for v in days if v.get("missing")),
+            "absents": sum(v.get("absent") or 0 for v in days)}
+
+
+def code_revisions(conn: sqlite3.Connection) -> dict:
+    """Trades (hors scellé) par version et révision du code ; « inconnue » : calculés avant le suivi."""
+    from app.lab import stats as STATS  # import tardif, comme market_days
+
+    return (STATS.code_revisions(conn) or {}).get("par_version") or {}
+
+
 def _days_between(market: str, start: str, end: str) -> int:
     from app.lab.runner import market_days  # import tardif : le serveur web n'en a besoin qu'ici
 
@@ -65,13 +85,17 @@ def status(path: str | None = None) -> dict:
         for market in ("stock", "crypto"):
             p = _progress(conn, f"replay:{market}")
             total = p.get("days_total") or 0
+            counts = day_counts(p)
             done = _days_between(market, p["start"], p["last_day"]) if p.get("start") and p.get("last_day") else 0
+            done = max(0, done - counts["jours_sautes"])  # I4 : un jour sauté n'est pas fait
             out["replay"][market] = {"start": p.get("start"), "end": p.get("end"), "last_day": p.get("last_day"),
                                      "days_done": done, "days_total": total,
-                                     "pct": round(100 * done / total, 1) if total else 0.0}
-            out["live"][market] = {"last_day": _progress(conn, f"live:{market}").get("last_day")}
+                                     "pct": round(100 * done / total, 1) if total else 0.0, **counts}
+            live = _progress(conn, f"live:{market}")
+            out["live"][market] = {"last_day": live.get("last_day"), **day_counts(live)}
         for market, origin, n in conn.execute("SELECT market, origin, COUNT(*) FROM trades GROUP BY market, origin"):
             out["trades"].setdefault(market, {})[origin] = n
+        out["revisions_code"] = code_revisions(conn)
         out["scelle"] = {**SEAL.describe(), "trades": {}}
         try:  # base d'avant le scellé ouverte en lecture seule : table absente
             for market, n in conn.execute("SELECT market, COUNT(*) FROM trades_sealed GROUP BY market"):
@@ -147,6 +171,19 @@ def _fr(x: float, digits: int = 2) -> str:
     return f"{x:+.{digits}f}".replace(".", ",")
 
 
+def _gaps_text(replay: dict, live: dict | None) -> str:
+    """I4 : jours sautés, jours calculés sans tous leurs symboles, valeurs de l'univers sans trade (rejeu + direct)."""
+    n = {k: (replay.get(k) or 0) + ((live or {}).get(k) or 0) for k in ("jours_sautes", "jours_partiels", "absents")}
+    parts = []
+    if n["jours_sautes"]:
+        parts.append(f"⚠️ {n['jours_sautes']} jour(s) sauté(s)")
+    if n["jours_partiels"]:
+        parts.append(f"{n['jours_partiels']} jour(s) calculé(s) sans tous leurs symboles")
+    if n["absents"]:
+        parts.append(f"{n['absents']} valeur(s) de l'univers sans trade")
+    return "".join(f" · {p}" for p in parts)
+
+
 def text(st: dict) -> str:
     """Résumé en quelques lignes pour Discord."""
     if not st["exists"]:
@@ -158,7 +195,11 @@ def text(st: dict) -> str:
         live = (st["live"].get(market) or {}).get("last_day")
         lines.append(f"{MARKET_FR[market].capitalize()} : rejeu {r.get('pct', 0):g} % ({r.get('days_done', 0)}/"
                      f"{r.get('days_total', 0)} jours) · {t.get('replay', 0)} trades rejoués, {t.get('live', 0)} en direct"
-                     + (f" · dernier jour en direct {live}" if live else ""))
+                     + (f" · dernier jour en direct {live}" if live else "") + _gaps_text(r, st["live"].get(market)))
+    for version, revs in (st.get("revisions_code") or {}).items():
+        if len(revs) > 1:  # I2 : une même version calculée par plusieurs codes
+            lines.append(f"⚠️ Méthode {version} calculée par {len(revs)} révisions du code : "
+                         + ", ".join(f"{rev} {n} trades" for rev, n in revs.items()))
     l2 = st.get("labo2") or {}
     stt = l2.get("stats")
     if stt and stt.get("esperance_r") is not None:

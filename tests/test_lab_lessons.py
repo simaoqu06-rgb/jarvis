@@ -223,28 +223,190 @@ def live_item(i=7, sens="favorable", cond=PIVOT, markets=None):
     return {"id": i, "texte": f"Leçon {i}", "sens": sens, "cond": cond, "markets": markets}
 
 
-async def test_lecon_confirmee_ajuste_la_note_du_plan(db, tmp_path, monkeypatch):
+async def test_lecon_confirmee_affichee_sans_toucher_la_note_du_plan(db, tmp_path, monkeypatch):
     write_live(tmp_path, monkeypatch, [live_item(7), live_item(8, "defavorable", SIGNAL),
                                        live_item(9, markets=["crypto"])])
     p = fake_plan("AAA")
-    before = p["score"]["composite"]
+    before = dict(p["score"])
     adj = await L.apply(p, daily_bars(80, date(2026, 10, 6)), None, NOW, Settings(None))
     assert adj == {"ajustement": 0.5, "lignes": ["+0.5 #7 Leçon 7"]}  # 8 : champ inconnu ; 9 : autre marché
-    assert p["score"]["composite"] == min(10.0, round(before + 0.5, 1)) and p["score"]["lecons"] == adj
-    assert "Leçons du labo (+0.5 sur la note) : +0.5 #7 Leçon 7" in "\n".join(T.score_lines(p))
+    assert p["score"]["composite"] == before["composite"] and p["score"]["decision"] == before["decision"]
+    assert p["score"]["composite_lecons"] == min(10.0, round(before["composite"] + 0.5, 1)) and p["score"]["lecons"] == adj
+    with_lessons = f"{p['score']['composite_lecons']:g}"
+    assert (f"Leçons du labo (affichées, sans effet sur le verdict) : +0.5 #7 Leçon 7 · note avec leçons {with_lessons}"
+            in "\n".join(T.score_lines(p)))
 
 
-async def test_ajustement_plafonne_et_verdict_recalcule(db, tmp_path, monkeypatch):
+async def test_ajustement_plafonne_et_verdict_sur_la_note_brute(db, tmp_path, monkeypatch):
     rvol = {"field": "context.rvol", "op": ">", "value": 2}
     write_live(tmp_path, monkeypatch, [live_item(i, "defavorable", c) for i, c in ((1, PIVOT), (2, rvol), (3, PIVOT | {"op": "!="}))]
                + [live_item(4, "defavorable", {"field": "market", "op": "==", "value": "stock"})])
     s = Settings(None)
     p = fake_plan("AAA")
-    before = p["score"]["composite"]
+    before = dict(p["score"])
     adj = await L.apply(p, daily_bars(80, date(2026, 10, 6)), None, NOW, s)
     assert adj["ajustement"] == -L.ADJ_MAX and len(adj["lignes"]) == 3
-    assert p["score"]["composite"] == round(before - 1, 1)
-    assert p["score"]["go"] == (p["score"]["composite"] >= s["go_min"] and not p["score"]["reasons"])
+    assert p["score"]["composite"] == before["composite"]
+    assert p["score"]["composite_lecons"] == round(before["composite"] - 1, 1)
+    assert p["score"]["go"] == before["go"] and p["score"]["reasons"] == before["reasons"]
+
+
+def test_plan_a_6_5_avec_lecon_favorable_reste_no_go():
+    """Les leçons ne décident rien : vetos, tolérance du R/R et verdict restent sur la note brute."""
+    from app.trading import score as SC
+    from tests.test_score import cat, daily, plan
+
+    s = Settings(None)
+    p = plan(ok=3, tp1_r=0.5, expectancy=-0.1)
+    raw = SC.evaluate(p, daily(), cat(positive=3), s)
+    assert raw["composite"] == 6.5 and raw["decision"] == "NO GO"
+    adj = {"ajustement": L.ADJ_MAX, "lignes": ["+0.5 #1 a", "+0.5 #2 b"]}
+    out = SC.evaluate(p, daily(), cat(positive=3), s, lessons=adj)
+    assert out["decision"] == "NO GO" and out["composite"] == 6.5 and out["composite_lecons"] == 7.5
+    assert out["reasons"] == raw["reasons"] and out["lecons"] == adj
+    # R/R juste sous le minimum : la tolérance (note ≥ go_min + 0,5) se juge sans les leçons.
+    q = plan(rr2=1.9, ok=3)
+    assert SC.evaluate(q, daily(), cat(), s)["composite"] == 7.4
+    out = SC.evaluate(q, daily(), cat(), s, lessons=adj)
+    assert out["decision"] == "NO GO" and out["reasons"] == ["R/R 1.9 sous le minimum de 2"]
+
+
+# --- Jugement par paliers ----------------------------------------------------------------------
+
+def mesure(z, ecart=0.2, n=60, jours=30, moities=(0.1, 0.1)) -> dict:
+    return {"n": n, "jours": jours, "z": z, "ecart_r": ecart, "moities": list(moities), "palier": L.palier(n)}
+
+
+def test_paliers_et_seuil_qui_depense_l_alpha_de_chaque_lecon():
+    assert [L.palier(n) for n in (0, 29, 30, 59, 60, 119, 120, 239, 240, 480)] == [None, None, 0, 0, 1, 1, 2, 2, 3, 4]
+    # Leçon n° 1, premier palier : le plancher CONFIRM_Z ; ensuite le seuil monte avec le palier et l'id.
+    assert L.confirm_z(1, 0) == L.CONFIRM_Z
+    zs = [L.confirm_z(1, p) for p in range(6)]
+    assert zs == sorted(zs) and zs[-1] > 3.0
+    assert L.confirm_z(20, 0) == pytest.approx(3.91, abs=0.01)
+    # En loi de Student à jours − 1 degrés de liberté : plus strict sur peu de jours, la loi normale sur beaucoup.
+    assert L.confirm_z(1, 2, 20) > L.confirm_z(1, 2, 30) > L.confirm_z(1, 2) == pytest.approx(2.87, abs=0.01)
+    assert L.confirm_z(1, 2, 100_000) == pytest.approx(L.confirm_z(1, 2), abs=1e-3)
+    assert L.judge(mesure(3.0), "favorable", essai=1) == "confirmee"  # seuil 2,79 (palier 1, 30 jours)
+    assert L.judge(mesure(3.0), "favorable", essai=20) == "a_confirmer"  # seuil 5,03 pour la 20e leçon
+    # Jamais deux jugements au même palier, ni sur moins de MIN_DAYS jours.
+    assert L.judge(mesure(3.0), "favorable", 1, "a_confirmer", palier_juge=1) == "a_confirmer"
+    assert L.judge(mesure(3.0, n=120), "favorable", 1, "a_confirmer", palier_juge=1) == "a_confirmer"  # seuil 3,12
+    assert L.judge(mesure(3.2, n=120), "favorable", 1, "a_confirmer", palier_juge=1) == "confirmee"
+    assert L.judge(mesure(3.0, jours=L.MIN_DAYS - 1), "favorable", 1) == "a_confirmer"
+    assert L.judge(mesure(-1.5), "favorable", 1, "a_confirmer", palier_juge=1) == "a_confirmer"
+    assert L.judge(mesure(-1.5), "favorable", 1) == "dementie"
+
+
+def test_confirmee_par_hysteresis_et_dementie_definitive():
+    assert L.judge(mesure(0.4, n=70), "favorable", 1, "confirmee", palier_juge=1) == "confirmee"
+    assert L.judge(mesure(-1.0, n=70), "favorable", 1, "confirmee", palier_juge=1) == "dementie"
+    assert L.judge(mesure(1.2, n=70), "defavorable", 1, "confirmee", palier_juge=1) == "dementie"
+    assert L.judge(mesure(6.0, n=5000), "favorable", 1, "dementie", palier_juge=1) == "dementie"
+
+
+def _lecon_nulle_confirmee(rnd, essai=1, days=250, per_day=30, share=0.2) -> bool:
+    """Leçon sans effet (trades en bracket : −1 R, +0,8, +2, +3), regardée chaque jour comme measure_all."""
+    sums, judged, etat, n_hit = {}, None, "a_confirmer", 0
+    for d in range(days):
+        v = [0.0, 0, 0.0, 0]
+        for _ in range(per_day):
+            u = rnd.random()
+            r = -1.0 if u < 0.55 else 0.8 if u < 0.80 else 2.0 if u < 0.93 else 3.0
+            v[0] += r
+            v[1] += 1
+            if rnd.random() < share:
+                v[2] += r
+                v[3] += 1
+        sums[f"{d:04d}"] = v
+        n_hit += v[3]
+        level = L.palier(n_hit)
+        if level is None or (judged is not None and level <= judged) or d + 1 < L.MIN_DAYS:
+            continue  # entre deux paliers, judge ne change rien à une leçon à confirmer
+        m = L.summary(sums)
+        etat = L.judge(m, "favorable", essai, etat, judged)
+        if L.due(m, judged):
+            judged = m["palier"]
+        if etat != "a_confirmer":
+            return etat == "confirmee"
+    return False
+
+
+def test_lecon_nulle_rarement_confirmee_malgre_les_regards_repetes():
+    """Vérification du 10 octobre 2026 : 30 trades par jour, 20 % concernés, un regard par jour pendant
+    250 jours. Avant les paliers, une leçon nulle était confirmée au moins une fois dans ~10 % des cas."""
+    import random
+    rnd = random.Random(2026)
+    n = 1500
+    assert sum(_lecon_nulle_confirmee(rnd) for _ in range(n)) / n <= 0.01
+
+
+def test_effet_reel_toujours_trouve_par_paliers():
+    import random
+    rnd = random.Random(7)
+    sums, judged, etat = {}, None, "a_confirmer"
+    for d in range(120):
+        hit = [rnd.gauss(0.25, 1.0) for _ in range(6)]
+        rest = [rnd.gauss(0.0, 1.0) for _ in range(24)]
+        sums[f"{d:04d}"] = [sum(hit) + sum(rest), 30, sum(hit), 6]
+        m = L.summary(sums)
+        etat = L.judge(m, "favorable", 3, etat, judged)
+        if L.due(m, judged):
+            judged = m["palier"]
+    assert etat == "confirmee" and judged == 4
+
+
+def test_dementie_reste_dementie_mais_mesuree(db):
+    bad = add(db, lesson(texte="Cassure de pivot : moins bonne que le reste", sens="defavorable"))
+    synthetic_trades(db, n_days=60, per_day=20, effect=pivot_effect, first=date(2024, 1, 2))
+    L.measure_all(db)
+    first = L.get(db.conn, bad["id"])
+    assert first["etat"] == "dementie"
+    synthetic_trades(db, n_days=120, per_day=20, effect=lambda c, r: -0.6 if c["setup"] == "cassure_pivot" else 0.0,
+                     first=date(2024, 4, 1), seed=5)  # la suite lui donnerait raison
+    L.measure_all(db)
+    again = L.get(db.conn, bad["id"])
+    assert again["etat"] == "dementie" and again["mesures"]["n"] > first["mesures"]["n"]
+
+
+def test_ancienne_confirmee_rejugee_par_paliers(db):
+    x = add(db, lesson(texte="Signal fort : meilleure espérance", quand=SIGNAL))
+    db.conn.execute("UPDATE lessons SET status = 'confirmee', metrics = ? WHERE id = ?",
+                    (json.dumps({"n": 40, "z": 2.6}), x["id"]))  # confirmée avant les paliers, sans effet réel
+    synthetic_trades(db, n_days=40, per_day=20, seed=8)
+    L.measure_all(db)
+    x = L.get(db.conn, x["id"])
+    assert x["etat"] != "confirmee" and x["mesures"]["palier_juge"] is not None
+
+
+def test_invalide_attend_une_place_au_carnet(db, monkeypatch):
+    a = add(db, lesson(texte="Leçon A sur le signal", quand=SIGNAL))
+    b = add(db, lesson(texte="Leçon B sur le pivot", quand=PIVOT))
+    monkeypatch.setattr(L, "MAX_ACTIVE", 1)
+    db.conn.execute("UPDATE lessons SET status = 'invalide' WHERE id = ?", (b["id"],))
+    db.conn.execute("UPDATE lessons SET status = 'confirmee', metrics = ? WHERE id = ?",
+                    (json.dumps({"palier_juge": 0}), a["id"]))
+    synthetic_trades(db, n_days=10, per_day=10, effect=lambda c, r: 0.8 if c["signal"] > 0.5 else 0.0)
+    L.measure_all(db)
+    assert L.get(db.conn, a["id"])["etat"] == "confirmee"
+    assert L.get(db.conn, b["id"])["etat"] == "invalide" and L.counts(db.conn)["place"] == 0
+    db.conn.execute("UPDATE lessons SET status = 'retiree' WHERE id = ?", (a["id"],))
+    L.measure_all(db)
+    assert L.get(db.conn, b["id"])["etat"] == "a_confirmer"
+
+
+def test_lecon_favorable_qui_perd_encore_est_relative(db, tmp_path, monkeypatch):
+    x = add(db, lesson())
+    db.conn.execute("UPDATE lessons SET status = 'confirmee', metrics = ? WHERE id = ?",
+                    (json.dumps({"n": 240, "esperance_r": -0.15, "esperance_ensemble_r": -0.3, "palier_juge": 3}), x["id"]))
+    x = L.get(db.conn, x["id"])
+    assert L.proof(x).endswith("relative : moins mauvais que la moyenne, perd encore 0,15 R")
+    assert "relative" in L.text(db.conn)
+    assert L.relative("favorable", 0.1) is None and L.relative("defavorable", -0.2) is None
+    L.write_live(db)
+    assert json.loads(L.live_path(db.path).read_text())["lecons"][0]["esperance_r"] == -0.15
+    adj = L.adjustment([live_item(x["id"]) | {"esperance_r": -0.15}])
+    assert adj["lignes"] == [f"+0.5 #{x['id']} Leçon {x['id']} (relative : moins mauvais que la moyenne, perd encore 0,15 R)"]
 
 
 async def test_sans_lecon_ou_en_erreur_plan_inchange(db, tmp_path, monkeypatch, caplog):
