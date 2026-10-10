@@ -816,6 +816,24 @@ def entree_v1_appariee(conn: sqlite3.Connection) -> dict | None:
                                                          (*GAP_BUCKETS, (0, 0, "gap inconnu")) if k in by_gap}}}
 
 
+def revisions(conn: sqlite3.Connection) -> dict:
+    """Lot 2 (C6), descriptif : lignes lues par le tableau, par marché, selon la révision du code (code_rev) et celle du
+    modèle de coût (cout_rev) qui les ont produites ; « inconnue » : écrites avant la colonne. Plusieurs révisions ne
+    disent pas que les chiffres ont changé, seulement qu'il faut le vérifier (un rattrapage dure plusieurs jours, les
+    déploiements sont fréquents)."""
+    out: dict = {}
+    try:
+        rows = conn.execute("SELECT market, code_rev, cout_rev, COUNT(*) FROM strat_trades "
+                            "GROUP BY market, code_rev, cout_rev").fetchall()
+    except sqlite3.OperationalError:  # base pas encore migrée (lecture seule)
+        return out
+    for market, code, cost, n in rows:
+        m = out.setdefault(market, {"code": {}, "cout": {}})
+        for kind, rev in (("code", code), ("cout", cost)):
+            m[kind][rev or "inconnue"] = m[kind].get(rev or "inconnue", 0) + n
+    return out
+
+
 def report(conn: sqlite3.Connection) -> dict:
     # import tardif : kill_complet et plus10 importent ce module
     from app.lab import kill_complet as KC
@@ -828,7 +846,7 @@ def report(conn: sqlite3.Connection) -> dict:
                            "robustesse": ST.STRESS, "doc": "docs/labo-strategies.md", "politique": POLICY},
            "scelle": SEAL.describe(), "strategies": {}, "sorties_gemini": None, "killmode": None,
            "confirmation_go": None, "killmode_complet": None, "potentiel_plus10": None, "diagnostic_v1": {},
-           "entree_v1": None}
+           "entree_v1": None, "revisions": {}}
     try:  # base pas encore migrée par le worker (lecture seule) : tableau vide plutôt qu'une erreur
         # I2 : pendant un rattrapage, le tableau ne lit que les lignes de la déclaration en vigueur (declaration_view).
         out["partiel"] = partial(conn) or None
@@ -841,6 +859,7 @@ def report(conn: sqlite3.Connection) -> dict:
             out["potentiel_plus10"] = P10.report(conn, trials)
             out["diagnostic_v1"] = diagnostic_v1(conn)
             out["entree_v1"] = entree_v1_appariee(conn)  # n° 10 (L4)
+            out["revisions"] = revisions(conn)  # lot 2 (C6), descriptif
     except sqlite3.Error as exc:
         out["erreur"] = f"base pas encore prête : {exc}"
     return out
@@ -939,6 +958,20 @@ def _entree_text(e: dict) -> str:
             f", {go['au_dessus_tp1']['paires']} ouverts au-dessus du TP1 à part)")
 
 
+def _revisions_text(market: str, revs: dict) -> str | None:
+    """Lot 2 (C6) : « N révisions du code / du coût » d'un marché, seulement quand il y en a plus d'une."""
+    code, cost = revs.get("code") or {}, revs.get("cout") or {}
+    if len(code) < 2 and len(cost) < 2:
+        return None
+
+    def detail(d: dict) -> str:
+        return ", ".join(f"{rev} {n:,}".replace(",", " ") for rev, n in sorted(d.items(), key=lambda kv: -kv[1]))
+
+    return (f"ℹ️ Lignes {MARKET_FR.get(market, market).lower()} de {len(code)} révision{'s' if len(code) > 1 else ''} "
+            f"du code ({detail(code)}) / {len(cost)} du coût ({detail(cost)}) : descriptif, à vérifier si les chiffres "
+            "bougent")
+
+
 def _t(res: dict) -> str:
     """« t x, seuil y » d'un écart jugé par _helps (n° 8, D4)."""
     return f"t {_z(res['z'])}, seuil {_z(res.get('seuil_t'))}"
@@ -985,6 +1018,10 @@ def text(rep: dict | None) -> str:
                 else "aucun jour en rattrapage")  # C3 : d'anciennes lignes sans jour à refaire restent exclues
         lines.append(f"⏳ Tableau partiel ({MARKET_FR.get(market, market).lower()}) : {days}, {old} "
                      f"(n° {p['declaration']} seule en attendant)")
+    for market, revs in (rep.get("revisions") or {}).items():  # lot 2 (C6), descriptif
+        line = _revisions_text(market, revs)
+        if line:
+            lines.append(line)
     for market, items in (rep.get("strategies") or {}).items():
         lines.append(f"**{MARKET_FR.get(market, market)}**")
         for name, it in items.items():

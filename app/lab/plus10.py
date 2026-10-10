@@ -42,6 +42,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from app.lab import collector as CO
+from app.lab import empreinte as E
 from app.lab import heartbeat
 from app.lab import seal as SEAL
 from app.lab import sources as SRC
@@ -363,10 +364,12 @@ async def step(db: LabDB, now: datetime, max_seconds: float, transport=None) -> 
                 db.set(JOB, day.isoformat(), {"absente": True})
             continue
         rows, stats = got
+        cost = E.strat_cost_rev("stock")  # lot 2 (C6) : modèle de coût de r_20e et r_3c
         with db.transaction():
             db.conn.execute("DELETE FROM plus10_trades WHERE day = ?", (day.isoformat(),))
-            db.conn.executemany(f"INSERT INTO plus10_trades ({', '.join(COLUMNS)}) VALUES "
-                                f"({', '.join('?' for _ in COLUMNS)})", [tuple(r.get(c) for c in COLUMNS) for r in rows])
+            db.conn.executemany(f"INSERT INTO plus10_trades ({', '.join(COLUMNS)}, cout_rev) VALUES "
+                                f"({', '.join('?' for _ in COLUMNS)}, ?)",
+                                [(*(r.get(c) for c in COLUMNS), cost) for r in rows])
             db.set(JOB, day.isoformat(), stats | {"mesure": MESURE})
         log.info("Labo : n° 9 %s, %d S+10, %d Rebond, %d lignes", day, len(stats["listes"]["s10"]),
                  len(stats["listes"]["rebond"]), len(rows))
