@@ -157,16 +157,19 @@ Quand une déclaration change la façon de mesurer (n° 10 : simulateur révisio
 négociés), le labo réécrit ses anciennes lignes. Avant toute réécriture, le worker les copie **automatiquement**,
 une seule fois, dans `data/archives/labo2-avant-n10.db` (à côté de `lab.db`) : tables `strat_trades`, `kill_complet`
 et `plus10_trades`, plus `archive_info` (heure, ce qui est remplacé, lignes par table). Si la copie échoue (disque
-plein…), le worker ne réécrit rien et le dit dans `docker compose logs jarvis-lab` (« archive d'audit en échec »).
+plein…), le worker ne réécrit rien (rattrapage, Killmode complet, n° 9 et recalcul du direct attendent) et le dit en
+tête de `!labo` et dans `/api/lab/status` (« ⚠️ Archive d'audit en échec depuis … (raison) »), avec le détail dans
+`docker compose logs jarvis-lab`. Il réessaie à chaque passage : une fois la place libérée, l'alerte s'en va seule.
 L'archive sert seulement à l'audit (`!strategies`, section « Audit », et `GET /api/lab/strategies/audit`) : rien
 ne la lit pour décider. Le fichier fait à peu près la taille des lignes remplacées ; `data/` n'est jamais effacé
 par le ménage.
 
-En secours (worker arrêté ou ancienne version du code), la même copie à la main, depuis le dossier de JARVIS. Elle
-ne crée une table que si elle manque (l'image n'a pas l'outil `sqlite3`, d'où Python) :
+En secours (worker arrêté ou ancienne version du code), la même copie à la main, depuis le dossier de JARVIS
+(`docker compose run` lance un conteneur à part sur la même image, le même `.env` et le même `data/`, que le worker
+tourne ou non). Elle ne crée une table que si elle manque (l'image n'a pas l'outil `sqlite3`, d'où Python) :
 
 ```bash
-docker compose exec -T jarvis-lab python - <<'EOF'
+docker compose run --rm --no-deps -T jarvis-lab python - <<'EOF'
 import os, sqlite3
 db = os.getenv("JARVIS_LAB_DB", "data/lab.db")
 out = os.path.join(os.path.dirname(db) or ".", "archives", "labo2-avant-n10.db")

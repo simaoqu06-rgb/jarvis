@@ -275,7 +275,10 @@ class LabDB:
         try:
             yield self
         except BaseException:
-            self.conn.execute("ROLLBACK")
+            # SQLite annule parfois seul la transaction (disque plein…) : un ROLLBACK de plus lèverait « no transaction
+            # is active » à la place de la vraie cause.
+            if self.conn.in_transaction:
+                self.conn.execute("ROLLBACK")
             raise
         else:
             self.conn.execute("COMMIT")

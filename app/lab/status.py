@@ -12,10 +12,11 @@ révision du code (trades.code_rev) pour voir quand une même version mélange p
 Deuxième tour d'avis du 10 octobre : garde du Labo 1 (garde_v1, empreinte v1 calculée au démarrage du worker ; en
 pause, une alerte en tête de !labo) et recalcul ponctuel des séances du direct d'avant une rupture (recalcul_v1 ;
 une séance « non recalculable » est dite).
+Relecture de la fusion (W1) : archive d'audit en échec (archive_line), alerte en tête de !labo tant qu'elle dure.
 """
 import json
 import sqlite3
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from app.lab import heartbeat
@@ -128,6 +129,8 @@ def status(path: str | None = None) -> dict:
         out["live_start"] = json.loads(live_start[0]) if live_start else None
         guard = conn.execute("SELECT value FROM progress WHERE job = 'lab' AND key = 'garde_v1'").fetchone()
         out["garde_v1"] = json.loads(guard[0]) if guard else None
+        arch = conn.execute("SELECT value FROM progress WHERE job = 'lab' AND key = 'archive_audit'").fetchone()
+        out["archive_audit"] = json.loads(arch[0]) if arch else None  # relecture W1 : archive d'audit en échec
         out["recalcul_v1"] = {k: v for k, v in _progress(conn, "recalcul").items() if not k.startswith("attempts:")}
         out["labo2"] = headline(conn)
         from app.trading import visibilite as VIS  # import tardif, comme runner
@@ -198,6 +201,21 @@ def declaration_line(n: dict | None) -> str | None:
     return f"⏳ {head} : " + ", ".join(parts)
 
 
+def archive_line(arch: dict | None, numero: int | None = None) -> str | None:
+    """Relecture W1 : archive d'audit en échec (worker, progress lab/archive_audit) ; tant qu'elle n'est pas faite, rien
+    de ce qu'une nouvelle déclaration réécrit n'avance. None si rien n'est en échec."""
+    if not arch or arch.get("etat") != "echec":
+        return None
+    try:
+        when = datetime.fromisoformat(arch["depuis"]).astimezone(timezone.utc)
+        since = when.strftime(" depuis le %d/%m/%Y à %H:%M UTC")
+    except (KeyError, TypeError, ValueError):
+        since = ""
+    rattrapage = f"rattrapage de la n° {numero}" if numero else "rattrapage"
+    return (f"⚠️ Archive d'audit en échec{since} ({arch.get('raison') or 'raison inconnue'}) : {rattrapage}, Killmode "
+            "complet, n° 9 et recalcul du direct à l'arrêt, rien n'est réécrit (docker compose logs jarvis-lab)")
+
+
 def headline(conn: sqlite3.Connection) -> dict:
     """Chiffres clés du Labo 2 (cache des statistiques, fiches, règles) ; vide sur une base du Labo 1."""
     from app.lab import stats as STATS
@@ -244,6 +262,24 @@ def _gaps_text(replay: dict, live: dict | None) -> str:
     return "".join(f" · {p}" for p in parts)
 
 
+def _jours(n: int) -> str:
+    return f"{n} jour{'s' if n > 1 else ''}"
+
+
+def _rattrapage_text(left: dict) -> str:
+    """Relecture W6 : jours du rejeu à rattraper et jours du direct en attente de calcul, à part. En actions, chaque
+    jour du direct passe par le rattrapage (journalier de la séance suivante) : « rattrapage : 1 jours actions » à côté
+    de « n° 10 : complète » se contredisaient à la lecture."""
+    replay = {m: (left.get(m) or {}).get("replay", 0) for m in ("stock", "crypto")}
+    live = {m: (left.get(m) or {}).get("live", 0) for m in ("stock", "crypto")}
+    out = ""
+    if any(replay.values()):
+        out += f" · rattrapage : {_jours(replay['stock'])} actions, {_jours(replay['crypto'])} crypto"
+    if any(live.values()):
+        out += " · direct en attente de calcul : " + ", ".join(f"{_jours(n)} {MARKET_FR[m]}" for m, n in live.items() if n)
+    return out
+
+
 def text(st: dict) -> str:
     """Résumé en quelques lignes pour Discord."""
     if not st["exists"]:
@@ -254,6 +290,9 @@ def text(st: dict) -> str:
     pause = E.guard_text(st.get("garde_v1"))
     if pause:  # garde du Labo 1 : rien de ce qui suit n'avance côté v1
         lines.append(f"{pause} : rejeu et direct arrêtés, aucune ligne v1 écrite ; Labo 2, rattrapage et grade continuent")
+    arch = archive_line(st.get("archive_audit"), (st.get("n10") or {}).get("numero"))
+    if arch:  # relecture W1 : sans elle, le rattrapage arrêté n'avait aucune cause visible
+        lines.append(arch)
     for market in ("stock", "crypto"):
         r = st["replay"].get(market) or {}
         t = st["trades"].get(market) or {}
@@ -285,10 +324,8 @@ def text(st: dict) -> str:
                      f"en attente, {regles.get('validee', 0) + regles.get('rejetee', 0)} testées")
     v2 = st.get("labo_v2")
     if v2 and (v2.get("lignes") or any(sum(r.values()) for r in (v2.get("rattrapage") or {}).values())):
-        left = {m: sum(r.values()) for m, r in (v2.get("rattrapage") or {}).items()}
         lines.append(f"Labo v2 : {sum((v2.get('lignes') or {}).values())} lignes de stratégies (`!strategies`)"
-                     + (f" · rattrapage : {left.get('stock', 0)} jours actions, {left.get('crypto', 0)} jours crypto"
-                        if any(left.values()) else ""))
+                     + _rattrapage_text(v2.get("rattrapage") or {}))
     if st.get("n10"):  # 2e tour d'avis (C4)
         lines.append(declaration_line(st["n10"]))
     if st.get("archive_actus"):
