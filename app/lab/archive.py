@@ -17,8 +17,9 @@ l'heure où le labo pose l'ordre de Killmode (fin du range de 15 min) :
 3. Calendrier des résultats : toutes les sociétés, une date par appel, de D − 10 à D + 30 pour chaque séance
    D archivée (fenêtre de catalyst.check), une fois la date passée de EARNINGS_SETTLE_DAYS jours.
 4. Profil : nom de chaque société (catalyst._about reconnaît une actu par le ticker ou par le nom).
-Ordre : calendrier (peu d'appels), puis actus de la séance la plus ancienne d'abord (c'est elle qui sort la
-première de la profondeur), puis profils. Jamais pendant la séance US ni dans l'heure d'avant (le scanner de
+Ordre : calendrier (peu d'appels), puis profils des séances dont toutes les actus sont archivées (Killmode
+complet peut alors les rejouer sans attendre la fin de l'archive), puis actus de la séance la plus ancienne
+d'abord (c'est elle qui sort la première de la profondeur), puis les autres profils. Jamais pendant la séance US ni dans l'heure d'avant (le scanner de
 9 h 10 a besoin de Finnhub), avec son propre débit (JARVIS_LAB_ARCHIVE_PER_MINUTE, 30 par défaut, le reste
 des 60 par minute de Finnhub gratuit allant au direct) et une durée par passage du worker.
 
@@ -250,11 +251,17 @@ async def fetch_news(db: LabDB, now: datetime, budget: _Budget) -> dict:
     return report
 
 
-async def fetch_profiles(db: LabDB, budget: _Budget) -> dict:
-    """Nom, secteur et capitalisation (aujourd'hui) de chaque gapper archivé, une fois par symbole."""
+READY_SYMBOLS_SQL = ("SELECT DISTINCT symbol FROM gap_news WHERE day NOT IN "
+                     "(SELECT DISTINCT day FROM gap_news WHERE status = 'a_chercher') ORDER BY symbol")
+
+
+async def fetch_profiles(db: LabDB, budget: _Budget, ready_only: bool = False) -> dict:
+    """Nom, secteur et capitalisation (aujourd'hui) de chaque gapper archivé, une fois par symbole. `ready_only` :
+    seulement les gappers des séances dont toutes les actus sont archivées."""
     report = {"appels": 0, "profils": 0, "erreurs": 0}
     done = db.keys(PROFILE_JOB)
-    for (symbol,) in db.conn.execute("SELECT DISTINCT symbol FROM gap_news ORDER BY symbol").fetchall():
+    sql = READY_SYMBOLS_SQL if ready_only else "SELECT DISTINCT symbol FROM gap_news ORDER BY symbol"
+    for (symbol,) in db.conn.execute(sql).fetchall():
         if symbol in done:
             continue
         if not budget.left():
@@ -289,14 +296,16 @@ async def fetch_profiles(db: LabDB, budget: _Budget) -> dict:
 async def step(db: LabDB, now: datetime, seconds: float, collect: bool = True,
                days: int = POPULATION_DAYS) -> dict:
     """Étape du worker : gappers de `days` séances de plus (base seule), puis, hors séance US et dans la durée
-    permise, calendrier des résultats, actus et profils."""
+    permise, calendrier des résultats, profils des séances aux actus complètes, actus et autres profils."""
     report: dict = {"seances": populate(db, now, days)}
     if not collect or seconds <= 0 or quiet(now) or not secret(finnhub.KEY_NAME):
         return report
     budget = _Budget(min(seconds, seconds_before_quiet(now)))
     report["resultats"] = await fetch_earnings(db, now, budget)
+    first = await fetch_profiles(db, budget, ready_only=True)
     report["actus"] = await fetch_news(db, now, budget)
-    report["profils"] = await fetch_profiles(db, budget)
+    rest = await fetch_profiles(db, budget)
+    report["profils"] = {k: first[k] + rest[k] for k in first}
     return report
 
 

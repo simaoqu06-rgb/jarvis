@@ -164,6 +164,25 @@ async def test_profils(db, monkeypatch):
     assert (await ARC.fetch_profiles(db, ARC._Budget(60)))["appels"] == 0
 
 
+async def test_profils_des_seances_completes_d_abord(db, monkeypatch):
+    _only_d(db, monkeypatch)
+    later = (D + timedelta(days=1)).isoformat()
+    db.conn.execute("UPDATE gap_news SET status = 'ok'")                         # séance D : actus complètes
+    db.conn.execute("INSERT INTO gap_news (day, symbol, gap_pct, atr_pct, cutoff_ts, status) "
+                    "VALUES (?, 'LATE', 6.0, 7.0, 0, 'a_chercher')", (later,))   # séance suivante : en cours
+    asked = []
+
+    async def profile(symbol):
+        asked.append(symbol)
+        return {"name": f"{symbol} Inc", "industry": None, "market_cap": None}
+
+    monkeypatch.setattr(finnhub, "profile", profile)
+    await ARC.fetch_profiles(db, ARC._Budget(60), ready_only=True)
+    assert sorted(asked) == ["GAP38", "GAP5"]                                    # Killmode complet peut rejouer D
+    await ARC.fetch_profiles(db, ARC._Budget(60))
+    assert asked[-1] == "LATE"
+
+
 def test_fenetre_calme():
     assert ARC.quiet(datetime(2026, 10, 8, 14, tzinfo=timezone.utc))          # 10 h New York, jeudi
     assert ARC.quiet(datetime(2026, 10, 8, 12, 45, tzinfo=timezone.utc))      # 8 h 45 : scanner de 9 h 10
