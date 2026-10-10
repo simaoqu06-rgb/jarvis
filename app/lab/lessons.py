@@ -18,10 +18,16 @@ Format (POST /api/lab/lessons, mis en file, lu par le worker) :
 - retirer une leçon : {"retirer": 12, "raison": "doublon de la 7"}.
 
 Mesure (trades déclenchés de la version de génération gardés par le champion, comme le validateur,
-et journalisés APRÈS la création de la leçon : base_trade_id) : espérance en R et taux de TP1 des
-trades concernés contre l'ensemble, écart et z en grappes par jour (validator.pooled_z), et le même
-écart sur chaque moitié chronologique des jours. Les trades qui ont inspiré la leçon ne comptent pas :
-la confirmer sur eux, re-mesurée chaque nuit, donnerait de fausses confirmations (hors échantillon).
+et d'un jour que la leçon n'a pas pu voir) : espérance en R et taux de TP1 des trades concernés contre
+l'ensemble, écart et z en grappes par jour (validator.pooled_z), et le même écart sur chaque moitié
+chronologique des jours. Les trades qui ont inspiré la leçon ne comptent pas : la confirmer sur eux,
+re-mesurée chaque nuit, donnerait de fausses confirmations (hors échantillon).
+« Pas pu voir » se lit sur le jour du trade, pas sur son id (avis de GPT sur l'audit du 10 octobre 2026) :
+à la création, la leçon note le dernier jour journalisé par origine et marché (seen_until) ; ne comptent
+que les jours postérieurs. Un jour réécrit, rejoué ou recalculé après la leçon ne compte donc jamais, quel
+que soit son id. Le direct crypto réécrit les créneaux du jour en cours : ce jour-là entier est exclu.
+Leçons d'avant seen_until : dernier jour des trades d'id ≤ base_trade_id, et pour le direct au moins le
+jour UTC de la création (un jour crypto réécrit depuis a perdu ses anciens id).
 - à confirmer : moins de MIN_N trades concernés, ou effet pas encore net ;
 - confirmée : z ≥ CONFIRM_Z dans le sens annoncé, écart ≥ MIN_EFFECT R, et même sens sur les deux
   moitiés (un effet qui n'existe que sur une période n'est pas une leçon) ;
@@ -174,12 +180,47 @@ def add(db: LabDB, canon: dict, soiree: str | None = None) -> dict | None:
         return None
     base = db.conn.execute("SELECT COALESCE(MAX(id), 0) FROM trades").fetchone()[0]
     cur = db.conn.execute(
-        "INSERT INTO lessons (hash, text, cond, markets, sens, pourquoi, status, soiree, created_at, base_trade_id) "
-        "VALUES (?, ?, ?, ?, ?, ?, 'a_confirmer', ?, ?, ?)",
+        "INSERT INTO lessons (hash, text, cond, markets, sens, pourquoi, status, soiree, created_at, base_trade_id, "
+        "seen_until) VALUES (?, ?, ?, ?, ?, ?, 'a_confirmer', ?, ?, ?, ?)",
         (h, canon["texte"], json.dumps(canon["cond"], ensure_ascii=False),
          json.dumps(canon["markets"]) if canon["markets"] else None, canon["sens"], canon.get("pourquoi"), soiree,
-         now_iso(), base))
+         now_iso(), base, json.dumps(seen_until(db.conn))))
     return get(db.conn, cur.lastrowid)
+
+
+def seen_until(conn, base_id: int | None = None) -> dict[str, str]:
+    """Dernier jour journalisé par origine et marché (« replay:stock » → « 2025-11-17 »), parmi les trades
+    d'id ≤ `base_id` si donné."""
+    sql = "SELECT origin, market, MAX(day) FROM trades" + (" WHERE id <= ?" if base_id is not None else "")
+    return {f"{o}:{m}": d for o, m, d in conn.execute(sql + " GROUP BY origin, market",
+                                                       () if base_id is None else (base_id,))}
+
+
+def _seen(conn, lesson: dict) -> dict[str, str] | None:
+    """Frontière de ce que la leçon a pu voir ; None pour une leçon sans base (tout compte)."""
+    if lesson.get("vu_jusqu") is not None:
+        return lesson["vu_jusqu"]
+    if lesson.get("apres_trade") is None:
+        return None
+    seen = seen_until(conn, lesson["apres_trade"])
+    created = datetime.fromisoformat(lesson["creee_le"]).astimezone(timezone.utc).date().isoformat()
+    for market in ("stock", "crypto"):
+        seen[f"live:{market}"] = max(seen.get(f"live:{market}", ""), created)
+    return seen
+
+
+def unseen_sql(seen: dict[str, str]) -> tuple[str, list]:
+    """Condition SQL (alias t) : trade d'un jour postérieur à la frontière de son origine et de son marché."""
+    if not seen:
+        return "1", []
+    keys = list(seen)
+    parts = [f"(t.origin || ':' || t.market) NOT IN ({', '.join('?' * len(keys))})"]
+    params: list = list(keys)
+    for key in keys:
+        origin, market = key.split(":", 1)
+        parts.append("(t.origin = ? AND t.market = ? AND t.day > ?)")
+        params += [origin, market, seen[key]]
+    return "(" + " OR ".join(parts) + ")", params
 
 
 def retire(db: LabDB, lid: int, reason: str | None) -> bool:
@@ -232,9 +273,11 @@ def measure(conn, lesson: dict, version: str) -> dict:
            "ON r.market = t.market AND r.day = t.day WHERE t.method_version = ? AND t.triggered = 1 "
            f"AND t.r_net IS NOT NULL AND {kept}")
     args = [*params, version, *kparams]
-    if lesson.get("apres_trade") is not None:  # hors échantillon : trades journalisés après la leçon
-        sql += " AND t.id > ?"
-        args.append(lesson["apres_trade"])
+    seen = _seen(conn, lesson)
+    if seen is not None:  # hors échantillon : jours que la leçon n'a pas pu voir
+        cond, cparams = unseen_sql(seen)
+        sql += f" AND {cond}"
+        args += cparams
     if lesson["markets"]:
         sql += f" AND t.market IN ({', '.join('?' * len(lesson['markets']))})"
         args += lesson["markets"]
@@ -266,7 +309,7 @@ def measure(conn, lesson: dict, version: str) -> dict:
             "esperance_ensemble_r": round(m_all, 4) if m_all is not None else None,
             "tp1": round(tp_hit / n_hit, 4) if n_hit else None, "tp1_ensemble": round(tp_all / n_all, 4) if n_all else None,
             "ecart_r": round(delta, 4) if delta is not None else None, "z": round(z, 3) if z is not None else None,
-            "moities": halves, "version": version, "apres_trade": lesson.get("apres_trade")}
+            "moities": halves, "version": version, "apres_trade": lesson.get("apres_trade"), "vu_jusqu": seen}
 
 
 def judge(m: dict, sens: str) -> str:
@@ -325,15 +368,17 @@ def step(db: LabDB, now: datetime, max_age: float) -> dict:
 # --- Lecture -------------------------------------------------------------------------------------
 
 COLUMNS = ("id, hash, text, cond, markets, sens, pourquoi, status, metrics, soiree, created_at, measured_at, "
-           "retired_at, retired_reason, base_trade_id")
+           "retired_at, retired_reason, base_trade_id, seen_until")
 
 
 def _row(r) -> dict:
-    (lid, h, text, cond, markets, sens, why, status, metrics, soiree, created, measured, retired, rreason, base) = r
+    (lid, h, text, cond, markets, sens, why, status, metrics, soiree, created, measured, retired, rreason, base,
+     seen) = r
     return {"id": lid, "empreinte": h, "texte": text, "cond": json.loads(cond),
             "markets": json.loads(markets) if markets else None, "sens": sens, "pourquoi": why, "etat": status,
             "mesures": json.loads(metrics) if metrics else None, "soiree": soiree, "creee_le": created,
-            "mesuree_le": measured, "retiree_le": retired, "raison_retrait": rreason, "apres_trade": base}
+            "mesuree_le": measured, "retiree_le": retired, "raison_retrait": rreason, "apres_trade": base,
+            "vu_jusqu": json.loads(seen) if seen else None}
 
 
 def get(conn, lid: int) -> dict | None:

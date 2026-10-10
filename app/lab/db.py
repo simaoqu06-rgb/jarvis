@@ -183,7 +183,7 @@ STRAT_MIGRATIONS = (("r_emperor", "REAL"), ("r_emperor_alerte", "REAL"), ("r_emp
 MIGRATIONS = {
     "rules": (("pourquoi", "TEXT"), ("council", "TEXT"), ("soiree", "TEXT"), ("decision", "TEXT"),
               ("decided_at", "TEXT")),
-    "lessons": (("base_trade_id", "INTEGER"),),
+    "lessons": (("base_trade_id", "INTEGER"), ("seen_until", "TEXT")),
     "method_versions": (("base", "TEXT"), ("rules", "TEXT"), ("role", "TEXT"), ("started_ts", "INTEGER"),
                         ("decided_at", "TEXT"), ("note", "TEXT")),
     # Labo v2, déclarations n° 2 et 3 : sorties EmperorBTC ; n° 6 : sorties de Gemini, VWAP à la décision et
@@ -324,23 +324,34 @@ class LabDB:
 
     # --- Trades -----------------------------------------------------------------------------
     def replace_trades(self, origin: str, version: str, market: str, planned_at: list[int], rows: list[dict]) -> None:
-        """Remplace les trades de ces créneaux (rejouer un jour ne crée jamais de doublon)."""
+        """Remplace les trades de ces créneaux (rejouer un jour ne crée jamais de doublon).
+
+        Un trade déjà journalisé garde son id : l'id reste l'ordre de PREMIÈRE journalisation, celui que lisent
+        les mesures hors échantillon (leçons, grade). Le direct crypto réécrit les créneaux du jour à chaque
+        nouveau créneau échu : un DELETE puis INSERT leur donnait un id neuf, comme s'ils n'avaient jamais été vus."""
         from app.lab import seal  # import tardif : seal n'importe rien, mais garde db sans dépendance
 
+        cols = ["origin", "method_version", "market", "symbol", "side", "day", "planned_at",
+                "plan", "context", "result", *TRADE_FLAT]
+        updates = ", ".join(f"{c} = excluded.{c}" for c in cols[4:])
         with self.transaction():
-            for t in planned_at:
+            kept: dict[int, list[str]] = {t: [] for t in planned_at}
+            for r in rows:
+                if r["planned_at"] in kept:
+                    kept[r["planned_at"]].append(r["symbol"])
+            for t, symbols in kept.items():
                 for table in ("trades", "trades_sealed"):
                     self.conn.execute(f"DELETE FROM {table} WHERE origin = ? AND method_version = ? AND market = ? "
-                                      "AND planned_at = ?", (origin, version, market, t))
+                                      f"AND planned_at = ? AND symbol NOT IN ({', '.join('?' * len(symbols))})",
+                                      (origin, version, market, t, *symbols))
             for r in rows:
                 table = "trades_sealed" if seal.sealed(origin, r["day"]) else "trades"
-                cols = ["origin", "method_version", "market", "symbol", "side", "day", "planned_at",
-                        "plan", "context", "result", *TRADE_FLAT]
                 values = [origin, version, market, r["symbol"], r["side"], r["day"], r["planned_at"],
                           json.dumps(r["plan"], ensure_ascii=False), json.dumps(r["context"], ensure_ascii=False),
                           json.dumps(r["result"], ensure_ascii=False)] + [r["flat"].get(k) for k in TRADE_FLAT]
                 self.conn.execute(
-                    f"INSERT OR REPLACE INTO {table} ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", values)
+                    f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))}) "
+                    "ON CONFLICT (origin, method_version, market, symbol, planned_at) DO UPDATE SET " + updates, values)
 
     def replace_strat(self, origin: str, market: str, day: str, rows: list[dict], symbols: list[str] | None = None) -> None:
         """Remplace les lignes des stratégies du jour (toutes, ou celles de `symbols`) : rejouer un jour

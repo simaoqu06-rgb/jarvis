@@ -502,6 +502,21 @@ def test_scelle_range_les_trades_a_part(vrai_scelle):
     assert db.conn.execute("SELECT COUNT(*) FROM strat_trades_sealed").fetchone()[0] == 0
 
 
+def test_rejouer_un_creneau_garde_les_id_et_retire_ce_qui_disparait():
+    db = LabDB(":memory:")
+    row = {"symbol": "AAA", "side": "long", "day": "2026-03-02", "planned_at": 1, "plan": {}, "context": {},
+           "result": {}, "flat": {"triggered": 1, "r_net": 2.0}}
+    db.replace_trades("live", "v1", "crypto", [1], [row, {**row, "symbol": "BBB"}])
+    ids = dict(db.conn.execute("SELECT symbol, id FROM trades").fetchall())
+    db.replace_trades("live", "v1", "crypto", [1], [{**row, "flat": {"triggered": 1, "r_net": 1.5}},
+                                                    {**row, "symbol": "CCC"}])
+    now = {s: (i, r) for s, i, r in db.conn.execute("SELECT symbol, id, r_net FROM trades")}
+    assert now["AAA"] == (ids["AAA"], 1.5)  # mis à jour sur place : même id
+    assert "BBB" not in now and now["CCC"][0] != ids["AAA"]
+    db.replace_trades("live", "v1", "crypto", [1], [])
+    assert db.count_trades() == 0
+
+
 def test_etat_montre_le_scelle_sans_ses_resultats(tmp_path, vrai_scelle):
     path = tmp_path / "lab.db"
     db = LabDB(str(path))
