@@ -148,3 +148,35 @@ def test_etat_d_archive_illisible_ou_sans_echec():
     assert STATUS.archive_line({"etat": "echec", "raison": "OSError: x", "depuis": "pas une date"}) == (
         "⚠️ Archive d'audit en échec (OSError: x) : rattrapage, Killmode complet, n° 9 et recalcul du direct à l'arrêt, "
         "rien n'est réécrit (docker compose logs jarvis-lab)")
+
+
+# --- W2 : audit apparié sans la séance du direct recalculée -----------------------------------------------------------
+
+def _ancienne(db, origin, day, symbol, r):
+    db.conn.execute("INSERT INTO strat_trades (origin, market, symbol, day, strategy, slot, triggered, r_net, entry, "
+                    "stop) VALUES (?, 'stock', ?, ?, 'v1', 0, 1, ?, 10.0, 9.0)", (origin, symbol, day, r))
+
+
+def test_audit_sans_la_seance_du_direct_aux_plans_recalcules(tmp_path, monkeypatch):
+    """review/skep-cxd (S1) : le direct d'actions du 06/10/2026 est archivé sur les plans d'avant b595c12, puis
+    recalcul_v1 réécrit ses plans et le rattrapage refait ses lignes n° 10 sur les nouveaux : ses paires ne sont pas
+    « les mêmes trades » (stops 41,753 → 41,755…). Elles sont exclues, et le texte le dit."""
+    from app.lab import empreinte as E
+
+    db = LabDB(str(tmp_path / "lab.db"))
+    _ancienne(db, "replay", "2025-03-10", "AAA", -0.4)
+    _ancienne(db, "live", "2026-10-06", "BBB", -0.4)
+    _ancienne(db, "live", "2026-10-07", "CCC", -0.4)               # autre séance du direct : gardée
+    assert AUD.step(db)
+    db.replace_strat("replay", "stock", "2025-03-10", [_row("AAA", r=0.1)])
+    db.replace_strat("live", "stock", "2026-10-06", [_row("BBB", r=0.1, stop=9.01)])
+    db.replace_strat("live", "stock", "2026-10-07", [_row("CCC", r=0.1)])
+    assert AUD.report(db.conn)["marches"]["stock"]["appariees"] == 3   # conftest : V1_RECALCULS vide, rien d'exclu
+    monkeypatch.setattr(E, "V1_RECALCULS", (("stock", "b595c12", "2026-10-06"),))
+    rep = AUD.report(db.conn)
+    mk = rep["marches"]["stock"]
+    assert mk["archivees"] == 3 and mk["appariees"] == 2 and mk["strategies"]["v1"]["paires"] == 2
+    assert rep["seances_exclues"] == [{"marche": "stock", "jour": "2026-10-06", "raison": "plans v1 recalculés"}]
+    text = AUD.text(rep)
+    assert "séance du direct actions du 06/10/2026 exclue (plans v1 recalculés)" in text
+    assert "Actions : 2 lignes appariées sur 3 archivées" in text

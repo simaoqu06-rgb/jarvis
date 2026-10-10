@@ -28,7 +28,9 @@ référence (strategies.ref_exit, nette de la commission IBKR en actions comme l
 déclenchements avant et après, et sur les paires déclenchées des deux côtés, moyenne de (nouveau − ancien) pour
 l'espérance, le témoin et l'écart stratégie − témoin, avec IC en grappes par jour (semaines en crypto,
 strat_stats.Mean). C'est la mesure sur données réelles du biais du simulateur en révision 1 (+0,23 R annoncé, mesuré
-seulement en rejeu à blanc) et de l'« Effet attendu » déclaré de la n° 10, sur les mêmes trades.
+seulement en rejeu à blanc) et de l'« Effet attendu » déclaré de la n° 10, sur les mêmes trades. Sauf les séances du
+direct aux plans v1 recalculés (empreinte.V1_RECALCULS, excluded) : archivées sur les anciens plans, refaites sur les
+nouveaux, elles sont exclues de l'appariement et le texte le dit.
 
 L'archive ne sert JAMAIS à décider : ni « candidate », ni le grade, ni le brief, ni les leçons ne la lisent. Seuls ce
 module, la route GET /api/lab/strategies/audit et la section « Audit » de `!strategies` y touchent
@@ -37,6 +39,7 @@ module, la route GET /api/lab/strategies/audit et la section « Audit » de `!st
 import json
 import logging
 import sqlite3
+from datetime import date
 from pathlib import Path
 
 from app.lab import empreinte as E
@@ -194,6 +197,14 @@ def _col(x: str) -> str:
     return f"(CASE WHEN {x}.strategy IN ({go}) THEN {x}.r_sans_be ELSE {x}.r_net END)"
 
 
+def excluded() -> list[dict]:
+    """Relecture W2 : séances du direct dont les plans v1 ont été recalculés (empreinte.V1_RECALCULS, le 06/10/2026 en
+    actions). Leurs lignes archivées partent des plans d'avant la rupture, leurs lignes n° 10 des plans recalculés : ce
+    ne sont pas « les mêmes trades », elles sortent de l'appariement."""
+    return [{"marche": m, "jour": date.fromisoformat(d).isoformat(), "raison": "plans v1 recalculés"}
+            for m, d in sorted({(m, d) for m, _, d in E.V1_RECALCULS})]
+
+
 def _sql(markets: list[str]) -> str:
     both = "a.triggered = 1 AND n.triggered = 1"
     wit = f"{both} AND a.temoin_triggered = 1 AND n.temoin_triggered = 1"
@@ -203,10 +214,15 @@ def _sql(markets: list[str]) -> str:
     sums = ", ".join(f"SUM(CASE WHEN {cond} THEN {expr} END), COUNT(CASE WHEN {cond} THEN {expr} END)"
                      for cond, expr in diffs.values())
     on = " AND ".join(f"a.{c} = n.{c}" for c in STRAT_KEY)
+    # Constantes du code (marché connu, jour relu par date.fromisoformat) : rien d'injecté.
+    skip = " OR ".join(f"(n.market = '{x['marche']}' AND n.day = '{x['jour']}')" for x in excluded()
+                       if x["marche"] in ("stock", "crypto"))
     return (f"SELECT n.market, n.strategy, n.day, COUNT(*), SUM(a.triggered = 1), SUM(n.triggered = 1), "
             f"SUM({both}), {sums} FROM main.strat_trades n JOIN {ALIAS}.strat_trades a ON {on} "
             f"WHERE n.market IN ({', '.join('?' * len(markets))}) AND n.declaration = CASE n.market WHEN 'crypto' "
-            f"THEN {int(ST.CRYPTO_DECLARATION)} ELSE {int(ST.DECLARATION)} END GROUP BY n.market, n.strategy, n.day")
+            f"THEN {int(ST.CRYPTO_DECLARATION)} ELSE {int(ST.DECLARATION)} END"
+            + (f" AND NOT (n.origin = 'live' AND ({skip}))" if skip else "")
+            + " GROUP BY n.market, n.strategy, n.day")
 
 
 DIFFS = ("esperance", "r_net", "temoin", "ecart")  # dans l'ordre des colonnes de _sql
@@ -259,7 +275,7 @@ def report(conn: sqlite3.Connection, uri: bool = False) -> dict | None:
     files: dict[int, list[str]] = {}
     for market in ("stock", "crypto"):
         files.setdefault(declaration(market), []).append(market)
-    out: dict = {"declaration": ST.LATEST_DECLARATION, "marches": {}, "archives": {}}
+    out: dict = {"declaration": ST.LATEST_DECLARATION, "marches": {}, "archives": {}, "seances_exclues": excluded()}
     for decl, markets in files.items():
         path = archive_path(main, decl)
         if not path.exists():
@@ -341,6 +357,9 @@ def text(rep: dict | None) -> str | None:
         return None
     lines = [f"🔎 **Audit de la n° {rep['declaration']} (ancien → nouveau, mêmes trades)** : pour audit, jamais pour "
              "décider · nouveau − ancien sur les paires déclenchées des deux côtés, IC en grappes"]
+    for x in rep.get("seances_exclues") or []:  # relecture W2
+        lines[0] += (f" · séance du direct {SS.MARKET_FR.get(x['marche'], x['marche']).lower()} du "
+                     f"{date.fromisoformat(x['jour']).strftime('%d/%m/%Y')} exclue ({x['raison']})")
     if not rep["marches"]:
         lines.append("Aucune ligne archivée n'est encore refaite par la n° " f"{rep['declaration']}.")
     for market, m in rep["marches"].items():
