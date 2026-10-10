@@ -412,6 +412,70 @@ def test_regle_d_avant_la_frontiere_garde_tous_les_jours(db):
     assert res["etat"] == "validee" and res["mesures"]["jours"] == 200 and "frontiere" not in res["mesures"]
 
 
+def test_jours_par_categorie_rejeu_non_consulte_et_direct(db):
+    """Trois étiquettes de preuve (avis de GPT du 10 octobre) : jours vus, rejeu jamais lu, direct ; en jours
+    distincts, dans les mesures, et dites dans la preuve du matin."""
+    from app.lab import method as M
+
+    synthetic_trades(db, n_days=60, per_day=30, seed=41)  # lus par la routine
+    frontier = last_day(db)
+    rule = V.submit(db, SIGNAL_RULE)
+    synthetic_trades(db, n_days=70, per_day=30, seed=12, effect=hidden(), first=frontier + timedelta(days=1))
+    synthetic_trades(db, n_days=5, per_day=30, seed=13, effect=hidden(), first=date(2026, 10, 5), origin="live")
+    res = V.run_one(db, rule["empreinte"])
+    m = res["mesures"]
+    assert m["jours"] == 75 and m["jours_par_categorie"] == {"historique_exploratoire": 60,
+                                                             "historique_non_consulte": 70, "prospectif": 5}
+    text = M.proof_fr(res)
+    assert "Jours de test : 70 historiques jamais lus (rejeu), 5 du direct." in text
+    assert "historique seulement" not in text
+    if res["etat"] == "validee":  # écart relatif dit comme tel, avec l'espérance des trades gardés
+        assert "Écart relatif : les trades gardés font encore" in text and "avant commission IBKR à 20 €" in text
+    # Sans jour du direct : validée sur l'historique seulement, le challenger décidera.
+    no_live = res | {"mesures": m | {"jours_par_categorie": {"historique_exploratoire": 60,
+                                                             "historique_non_consulte": 75, "prospectif": 0}}}
+    assert ("Jours de test : 75 historiques jamais lus (rejeu), 0 du direct ; validée sur l'historique seulement : "
+            "le challenger en direct décidera.") in M.proof_fr(no_live)
+
+
+def test_jours_par_categorie_sans_walk_forward_exploratoire(db):
+    """Le compte des jours vus ne dépend pas de l'exploratoire : sous 60 jours vus (pas d'exploratoire) et au
+    2e passage (evaluate appelé sans exploration), il reste juste ; une règle en attente le porte aussi."""
+    synthetic_trades(db, n_days=40, per_day=30, seed=1)
+    frontier = last_day(db)
+    rule = V.submit(db, SIGNAL_RULE)
+    synthetic_trades(db, n_days=30, per_day=30, seed=2, first=frontier + timedelta(days=1))
+    res = V.run_one(db, rule["empreinte"])
+    assert res["etat"] == "en_attente" and "exploratoire" not in res["mesures"]
+    assert res["mesures"]["jours_par_categorie"] == {"historique_exploratoire": 40, "historique_non_consulte": 30,
+                                                     "prospectif": 0}
+    db2 = LabDB(str(db.path).replace("lab.db", "lab2.db"))
+    synthetic_trades(db2, n_days=70, per_day=30, seed=1)
+    frontier = last_day(db2)
+    rule = V.submit(db2, SIGNAL_RULE)
+    assert V.run_one(db2, rule["empreinte"])["mesures"]["exploratoire"]["jours"] == 70  # 1er passage
+    synthetic_trades(db2, n_days=65, per_day=30, seed=2, first=frontier + timedelta(days=1))
+    res = V.run_one(db2, rule["empreinte"])  # 2e passage : evaluate(explore=False)
+    assert res["etat"] in ("validee", "rejetee")
+    assert res["mesures"]["jours_par_categorie"]["historique_exploratoire"] == 70
+    assert res["mesures"]["jours_par_categorie"]["historique_non_consulte"] == 65
+
+
+def test_regle_sans_frontiere_tout_est_exploratoire(db):
+    """seen_until NULL : rien ne prouve que la règle n'a pas vu ses jours, pas de « non consulté »."""
+    from app.lab import method as M
+
+    synthetic_trades(db, n_days=60, per_day=30, seed=12, effect=hidden())
+    synthetic_trades(db, n_days=5, per_day=30, seed=13, first=date(2026, 10, 5), origin="live")
+    rule = V.submit(db, SIGNAL_RULE)
+    db.conn.execute("UPDATE rules SET seen_until = NULL WHERE hash = ?", (rule["empreinte"],))
+    res = V.run_one(db, rule["empreinte"])
+    assert res["mesures"]["jours_par_categorie"] == {"historique_exploratoire": 65, "historique_non_consulte": 0,
+                                                     "prospectif": 0}
+    assert "65 jours qui ont pu être lus avant la règle (sans frontière) ; validée sur l'historique seulement" in \
+        M.proof_fr(res)
+
+
 def test_readme_cite_la_formule_du_code():
     """Le seuil de p que lit Simão est celui que le code applique (6·α/(π²·n²), pas 0,05 / n)."""
     from pathlib import Path

@@ -33,6 +33,11 @@ calculé et direct ; un jour réécrit ou recalculé ne compte jamais). Tant qu'
 règle reste « en attente » sans consommer d'essai. Le même walk-forward sur les jours déjà vus est gardé à
 part (« exploratoire » dans les mesures, affiché) et ne compte pas dans le verdict. Règles d'avant la
 colonne (seen_until NULL) : tous les jours, comme avant.
+Trois étiquettes de preuve (avis de GPT sur la réaction du 10 octobre 2026), comptées en jours distincts dans
+les mesures (`jours_par_categorie`, sans effet sur le verdict, dites dans la preuve du matin) : historique
+exploratoire (jours que la règle a pu voir), historique non consulté (rejeu journalisé après la soumission :
+univers reconstruit, prix ajustés, ce n'est pas un test prospectif) et prospectif (jours du direct). Aucun jour
+du direct n'est exigé : le challenger, jugé sur le direct seul, est la barrière prospective.
 
 Validation « walk-forward » sur les trades de la version de méthode en cours (rejeu et direct) :
 les jours de chaque marché sont coupés en W+1 blocs chronologiques (W = 3 ; blocs par marché, les rejeux
@@ -568,6 +573,35 @@ def live_days(conn, version: str, markets: list | None) -> set:
     return {tuple(r) for r in conn.execute(sql, params)}
 
 
+def seen_day_count(conn, canon: dict, version: str, seen: dict) -> int:
+    """Jours distincts que la règle a pu voir (au plus tard sa frontière `seen`), trades de la version gardés par le
+    champion, marchés de la règle : l'historique exploratoire."""
+    kept, kparams = champion_filter(conn)
+    fcond, fparams = frontier_sql(seen, unseen=False)
+    sql = ("SELECT COUNT(DISTINCT t.day) FROM trades t LEFT JOIN regimes r ON r.market = t.market AND r.day = t.day "
+           f"WHERE t.method_version = ? AND {kept} AND {fcond}")
+    params = [version, *kparams, *fparams]
+    if canon.get("markets"):
+        sql += f" AND t.market IN ({', '.join('?' * len(canon['markets']))})"
+        params += list(canon["markets"])
+    return conn.execute(sql, params).fetchone()[0] or 0
+
+
+def day_categories(conn, canon: dict, version: str, rows: list[tuple], seen: dict | None, live: set) -> dict:
+    """Trois étiquettes de preuve (avis de GPT du 10 octobre 2026), en jours DISTINCTS : historique exploratoire
+    (jours que la règle a pu voir : au plus tard sa frontière), historique non consulté (rejeu journalisé après la
+    soumission) et prospectif (jours du direct après la frontière). `rows` : les lignes jugées (load_rows, après la
+    frontière) ; `live` : (marché, jour) du direct. Règle sans frontière (seen_until NULL) : rien ne prouve qu'elle
+    n'a pas vu un jour, tous ses jours sont exploratoires. Ne dépend pas du walk-forward exploratoire (calculé une
+    seule fois, et seulement à partir de min_days jours vus). Sans effet sur le verdict."""
+    days = {r[0] for r in rows}
+    if seen is None:
+        return {"historique_exploratoire": len(days), "historique_non_consulte": 0, "prospectif": 0}
+    direct = {r[0] for r in rows if (r[1], r[0]) in live}
+    return {"historique_exploratoire": seen_day_count(conn, canon, version, seen),
+            "historique_non_consulte": len(days - direct), "prospectif": len(direct)}
+
+
 def missing_share(conn, canon: dict, version: str, seen: dict | None = None) -> dict[str, float]:
     """Part des trades sans valeur pour chaque champ JSON de la règle (marchés de la règle seulement ;
     `seen` : jours postérieurs à sa frontière seulement)."""
@@ -616,15 +650,17 @@ def evaluate(conn, canon: dict, trial: int, cfg: dict | None = None, seen: dict 
     rows = load_rows(conn, canon, version, seen)
     days = {r[0] for r in rows}
     auto_op = canon["cond"]["op"] if canon["cond"].get("value") == "auto" else None
-    movers, live, explo = None, None, None
+    movers, explo = None, None
+    live = live_days(conn, version, canon["markets"])
     if seen is not None and explore:
         old = load_rows(conn, canon, version, seen, unseen=False)
         old_days = {r[0] for r in old}
         if len(old_days) >= cfg["min_days"]:
-            movers, live = load_movers(conn, canon["markets"]), live_days(conn, version, canon["markets"])
+            movers = load_movers(conn, canon["markets"])
             e = walk_forward(old, movers, cfg, canon["kind"], auto_op, live)
             explo = {"jours": len(old_days), "trades": len(old)} | {k: e[k] for k in EXPLORE_KEYS}
     extra = ({"frontiere": seen} if seen is not None else {}) | ({"exploratoire": explo} if explo else {})
+    extra["jours_par_categorie"] = day_categories(conn, canon, version, rows, seen, live)
     if len(days) < cfg["min_days"]:
         new = " neufs (journalisés après la soumission)" if seen is not None else ""
         return {"verdict": "attente", "mesures": {"jours": len(days)} | extra,
@@ -637,7 +673,7 @@ def evaluate(conn, canon: dict, trial: int, cfg: dict | None = None, seen: dict 
             return {"verdict": "invalide", "mesures": {"champs_absents": missing} | extra,
                     "raisons": [f"champ presque toujours absent des trades neufs : {', '.join(absent)}"]}
     if movers is None:
-        movers, live = load_movers(conn, canon["markets"]), live_days(conn, version, canon["markets"])
+        movers = load_movers(conn, canon["markets"])
     m = walk_forward(rows, movers, cfg, canon["kind"], auto_op, live)
     verdict, fails, ok = judge(m, cfg, trial)
     m.update(version=version, jours=len(days), trades=len(rows), essai=trial,
