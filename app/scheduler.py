@@ -21,6 +21,7 @@ from app.sources import alpaca, twelvedata
 from app.trading import calendar as CAL
 from app.trading import advice, paper, scanner
 from app.trading import plus10 as PLUS10
+from app.trading import visibilite as VIS
 from app.trading import confirm as CONFIRM
 from app.trading import proposals as PR
 from app.trading.proposals import proposals
@@ -352,6 +353,19 @@ async def tick_plus10(now: datetime | None = None) -> None:
         _kick_outbox()
 
 
+async def tick_visibilite(now: datetime | None = None) -> None:
+    """Audit anti-fuite : actus Finnhub des gappers vues à 9 h 46 New York, relues à 11 h (rien n'est envoyé)."""
+    now = now or datetime.now(timezone.utc)
+    kind = VIS.due(now)
+    if not kind:
+        return
+    try:
+        await VIS.run(kind, now)
+    except Exception as exc:
+        log.warning("Visibilité Finnhub : passage %s en échec : %s", kind, exc)
+        VIS.mark_done(kind, now)  # une mesure manquée ne se rattrape pas : pas de nouvel essai chaque minute
+
+
 def report_due(now: datetime) -> bool:
     now_ny = now.astimezone(NEW_YORK)
     week = now_ny.strftime("%G-W%V")
@@ -422,6 +436,7 @@ CORE_JOBS = [
     ("forward-test sur le compte fictif", tick_paper, 2 * MINUTE, True),
     ("contrôle des GO après l'ouverture", tick_confirm, MINUTE, False),  # prend le verrou lui-même pour écrire
     ("potentiel +10 confirmé", tick_plus10, MINUTE, False),  # n° 9 ; prend le verrou lui-même pour envoyer
+    ("visibilité des actus Finnhub", tick_visibilite, MINUTE, False),  # mesure seule, rien n'est envoyé
 ]
 # Seulement avec les notifications actives.
 JOBS = [

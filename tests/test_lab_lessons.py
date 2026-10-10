@@ -138,6 +138,43 @@ def test_trades_d_avant_la_lecon_ne_la_confirment_pas(db):
     assert seen["apres_trade"] == db.conn.execute("SELECT MAX(id) FROM trades").fetchone()[0]
 
 
+def _reecrit(db, where: str = "1") -> None:
+    """Supprime puis réinsère des trades : mêmes trades, id neufs (backfill, recalcul, ancien direct crypto)."""
+    cols = [r[1] for r in db.conn.execute("PRAGMA table_info(trades)") if r[1] != "id"]
+    rows = db.conn.execute(f"SELECT {', '.join(cols)} FROM trades WHERE {where}").fetchall()
+    db.conn.execute(f"DELETE FROM trades WHERE {where}")
+    db.conn.executemany(f"INSERT INTO trades ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", rows)
+
+
+def test_jours_vus_reecrits_apres_la_lecon_ne_la_confirment_pas(db):
+    synthetic_trades(db, n_days=120, per_day=20, effect=pivot_effect)  # rejeu vu par la leçon
+    synthetic_trades(db, n_days=10, per_day=10, effect=pivot_effect, market="crypto", origin="live",
+                     first=date(2026, 9, 1))  # direct vu, dont le jour en cours
+    seen = add(db, lesson())
+    assert seen["vu_jusqu"] == {"replay:stock": "2024-06-17", "live:crypto": "2026-09-10"}
+    _reecrit(db)  # tout reçoit un id plus grand que la base de la leçon
+    synthetic_trades(db, n_days=120, per_day=20, effect=pivot_effect, first=date(2024, 6, 18), seed=2)  # rejeu suivant
+    L.measure_all(db)
+    m = L.get(db.conn, seen["id"])["mesures"]
+    assert m["n_total"] == db.conn.execute("SELECT COUNT(*) FROM trades WHERE origin = 'replay' AND day >= '2024-06-18' "
+                                           "AND triggered = 1").fetchone()[0]
+    assert m["vu_jusqu"] == seen["vu_jusqu"]
+
+
+def test_lecon_d_avant_la_frontiere_exclut_le_direct_reecrit(db):
+    synthetic_trades(db, n_days=10, per_day=10, effect=pivot_effect, market="crypto", origin="live",
+                     first=date(2026, 9, 1))
+    old = add(db, lesson())
+    db.conn.execute("UPDATE lessons SET seen_until = NULL WHERE id = ?", (old["id"],))  # leçon d'avant la colonne
+    _reecrit(db)  # ancien direct crypto : jour réécrit, id neufs au-dessus de base_trade_id
+    synthetic_trades(db, n_days=120, per_day=20, effect=pivot_effect)  # rejeu jamais vu
+    L.measure_all(db)
+    m = L.get(db.conn, old["id"])["mesures"]
+    assert m["n_total"] == db.conn.execute("SELECT COUNT(*) FROM trades WHERE origin = 'replay' "
+                                           "AND triggered = 1").fetchone()[0]
+    assert m["vu_jusqu"]["live:crypto"] >= "2026-09-10"
+
+
 def test_sans_effet_dementie_apres_assez_de_trades_et_petit_echantillon_a_confirmer(db):
     null = add(db, lesson(texte="Signal fort : meilleure espérance", quand=SIGNAL))
     rare = add(db, lesson(texte="Un seul symbole : meilleure espérance", quand={"field": "symbol", "op": "==", "value": "S001"},

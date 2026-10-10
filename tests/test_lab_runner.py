@@ -88,8 +88,7 @@ async def test_journee_en_direct_idempotente(db):
     rows = db.conn.execute("SELECT id, symbol, r_net FROM trades ORDER BY symbol").fetchall()
     await R.run_live_day(END, db, markets=("stock",), collect=False, now=NOW)
     assert db.count_trades(origin="live") == 3
-    assert [r[1:] for r in db.conn.execute("SELECT id, symbol, r_net FROM trades ORDER BY symbol")] == \
-        [r[1:] for r in rows]
+    assert db.conn.execute("SELECT id, symbol, r_net FROM trades ORDER BY symbol").fetchall() == rows  # mêmes id
     assert db.get("live:stock", "last_day") == END.isoformat()
 
 
@@ -100,9 +99,14 @@ async def test_crypto_en_direct_complete_les_creneaux(tmp_path):
     noon_next = datetime.fromtimestamp(CO.utc_midnight(day) + 86400 + 12 * 3600 + 60, timezone.utc)
     await R.run_live_day(day, db, markets=("crypto",), collect=False, now=noon_next)
     assert db.count_trades(market="crypto") == 4 and db.get("live:crypto", "last_day") is None
+    first = db.conn.execute("SELECT planned_at, id FROM trades ORDER BY planned_at").fetchall()
     later = datetime.fromtimestamp(CO.utc_midnight(day) + 2 * 86400, timezone.utc)
     await R.run_live_day(day, db, markets=("crypto",), collect=False, now=later)
     assert db.count_trades(market="crypto") == 6 and db.get("live:crypto", "last_day") == day.isoformat()
+    # Les créneaux déjà journalisés, réécrits avec le jour, gardent leur id (ordre de première journalisation,
+    # lu par les mesures hors échantillon) ; les deux nouveaux viennent après.
+    after = db.conn.execute("SELECT planned_at, id FROM trades ORDER BY planned_at").fetchall()
+    assert after[:4] == first and min(i for _, i in after[4:]) > max(i for _, i in first)
 
 
 def test_version_de_methode_figee(tmp_path):

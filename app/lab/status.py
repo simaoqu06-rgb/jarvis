@@ -21,14 +21,21 @@ LIMITATIONS = [
     "Actions : seules les valeurs retirées de la cote encore connues d'Alpaca sont dans l'univers.",
     "Catalyseur (actus, résultats) non rejoué pour v1 et les stratégies : note composite sans sa part catalyseur. "
     "Killmode complet (n° 8) le rejoue sur l'archive des actus Finnhub, de octobre 2025 à aujourd'hui seulement, "
-    "avec le calendrier des résultats et les profils tels que Finnhub les donne au moment de l'archive.",
+    "avec le calendrier des résultats et les profils tels que Finnhub les donne au moment de l'archive. "
+    "Disponibilité historique des actus non vérifiée : l'archive se fie à l'heure de publication de Finnhub, qui ne "
+    "prouve pas que l'actu était en ligne à 9 h 45 (le délai se mesure en direct depuis le 10 octobre 2026 : "
+    "visibilite_finnhub). Calendrier des résultats : limite non vérifiable, une date déplacée après coup ne se voit pas "
+    "et peut changer le veto « résultats dans 24 h ».",
     "Univers actions approché (volume, variation et volume relatif de la veille) : le screener Alpaca "
     "du direct ne se rejoue pas. Killmode n'y voit qu'une partie des actions en gap ≥ 4 % : la part est "
     "comptée dans le tableau des stratégies (couverture).",
     "Actions : bougies ajustées des splits connus aujourd'hui ; avant un regroupement d'actions, le prix "
     "paraît plus élevé, d'où un glissement, une commission en R et un pas de cotation sous-estimés sur les "
-    "petites valeurs (l'inverse avant une division). Le scanner +10 (n° 9) et Killmode complet (n° 8) "
-    "s'exécutent, eux, aux prix réellement négociés.",
+    "petites valeurs (l'inverse avant une division) ; le pas de cotation pèse aussi sur le déclenchement et les "
+    "objectifs touchés. Le scanner +10 (n° 9) et Killmode complet (n° 8) s'exécutent, eux, aux prix réellement "
+    "négociés. Sauf deux mesures sans essai du scanner +10, lues sur le journalier ajusté : les tranches de prix de "
+    "la veille et le minimum de 5 $ des filtres de 15 h 10 rejoués (avant un regroupement, un titre à moins de 5 $ "
+    "y paraît au-dessus : le coût de ce minimum est sous-estimé).",
     "Confirmation des GO (n° 7) : le plan au stop plancher du direct n'existe que pour les jours rejoués depuis "
     "la n° 7 (le rattrapage n'a pas l'historique de 15 min pour le refaire) ; les GO du labo ne passent ni par "
     "les filtres du scanner, ni par le catalyseur, ni par les leçons.",
@@ -82,6 +89,9 @@ def status(path: str | None = None) -> dict:
         live_start = conn.execute("SELECT value FROM progress WHERE job = 'lab' AND key = 'live_start'").fetchone()
         out["live_start"] = json.loads(live_start[0]) if live_start else None
         out["labo2"] = headline(conn)
+        from app.trading import visibilite as VIS  # import tardif, comme runner
+
+        out["visibilite_finnhub"] = VIS.summary(VIS.journal_path(path))
     except sqlite3.Error as exc:
         out["error"] = f"base illisible : {exc}"
     finally:
@@ -172,6 +182,10 @@ def text(st: dict) -> str:
         from app.lab import archive as ARC
 
         lines.append(ARC.line(st["archive_actus"]))
+    if st.get("visibilite_finnhub"):
+        from app.trading import visibilite as VIS
+
+        lines.append(VIS.line(st["visibilite_finnhub"]))
     sc = st.get("scelle")
     if sc:
         n = sum((sc.get("trades") or {}).values())
