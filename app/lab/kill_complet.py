@@ -389,7 +389,7 @@ def text(rep: dict | None) -> str | None:
              (f"témoins propres {SS._r(g['temoin_propre']['r_20e']['esperance_r'])} R "
               f"({g['temoin_propre']['declenches']})"),
              (f"écart apparié {SS._r(gap['esperance_r'])} R sur {gap['jours']} séances (t {SS._z(gap['z'])}, seuil "
-              f"{SS._z(gap['seuil_t'])}" + (", ✅ le catalyseur aide" if gap.get("aide") else "") + ")"),
+              f"{SS._z(gap['seuil_t'])}" + SS._relative(gap.get("aide"), main["esperance_r"]) + ")"),  # lot 2 (C7)
              (f"témoins avec veto {SS._r(g['temoin_autre']['r_20e']['esperance_r'])} R "
               f"({g['temoin_autre']['declenches']})")]
     if g["donnees"]["signaux"] or g["fenetre_coupee"]["signaux"] or rep.get("operations_sur_titre"):

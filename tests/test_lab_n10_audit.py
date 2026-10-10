@@ -566,3 +566,78 @@ def test_ligne_du_labo_dit_le_tableau_partiel(monkeypatch):
     for partial in (None, {"crypto": {"declaration": 10, "jours_rattrapage": 3, "lignes_exclues": 0}}):
         rep["partiel"] = partial                                         # rien en actions : la ligne d'avant
         assert "partiel" not in K.lab_line(K.lab_item())
+
+
+# --- C7 : textes du tableau ----------------------------------------------------------------------------------------
+
+def _helps(m, aide=True, n=60):
+    return {"esperance_r": m, "z": 4.0, "seuil_t": 3.5, "n": n, "jours": 40, "aide": aide}
+
+
+def test_jugements_relatifs_sans_coche_et_ce_que_perd_le_bras_a_20e():
+    """✅ réservé à candidate_compte : « la confirmation aide », « le filtre aide » disent « ↗ aide (relatif) », et ce
+    que le bras amélioré perd encore à 20 € quand il ne gagne pas."""
+    res = {"go": 80, "ecart_par_go": _helps(0.15), "par_statut": {},
+           "filtres": {"v2": {"ecart_au_confirme": _helps(0.08), "statuts": {}},
+                       "v3": {"ecart_au_confirme": _helps(0.3, aide=False), "statuts": {}}}}
+    items = {"go_confirme": {"mise_20e": {"esperance_r": -0.123, "n": 40}},
+             "go_confirme_v2": {"mise_20e": {"esperance_r": 0.05, "n": 30}}}
+    text = SS._go_text("origine", res, items)
+    assert "✅" not in text
+    assert "par GO (t 4, seuil 3,5, ↗ aide (relatif), perd encore 0,12 R à 20 €)" in text
+    assert "filtré − confirmé +0,08 R par GO (t 4, seuil 3,5, ↗ aide (relatif))" in text     # bras gagnant à 20 €
+    assert "filtré − confirmé +0,30 R par GO (t 4, seuil 3,5)" in text                        # n'aide pas
+    assert SS._go_text("origine", res).count("↗ aide (relatif)") == 2                       # sans le tableau
+    kill = {"figee": True, "seances": 40, "du": "2026-01-05", "au": "2026-03-02", "a_recalculer": 0,
+            "groupes": {g: {"signaux": 10, "declenches": 8, "r_20e": {"esperance_r": -0.2}}
+                        for g in ("kill", "temoin_propre", "temoin_autre", "donnees", "fenetre_coupee")},
+            "principal": {"esperance_r": -0.05, "ic95": [-0.3, 0.2], "n": 50, "jours": 40, "z": 0.5, "seuil_t": 3.5,
+                          "r_3c": -0.1, "candidate": False},
+            "ecart_temoin_propre": _helps(0.25)}
+    line = KC.text(kill)
+    assert "✅" not in line and "(t 4, seuil 3,5, ↗ aide (relatif), perd encore 0,05 R à 20 €)" in line
+
+
+def _item(**kw):
+    return {"nom": "Pullback", "declenches": 60, "jours": 40, "reussite": 0.5, "frais_r": 0.05,
+            "esperance_ibkr_r": -0.1, "ic95_ibkr": [-0.3, 0.1], "commission_ibkr_r": 0.01, "seuil_t": 3.5,
+            "mise_20e": {"esperance_r": -0.2, "n": 60}, "temoin": {"ecart_r": 0.0, "z": 0.1},
+            "ecarts_sorties": {"r_vwap": _helps(0.05)}, "candidate": False, "candidate_compte": False} | kw
+
+
+def test_sorties_de_gemini_legende_et_note_de_rebond_confirme():
+    rep = {"declaration": {"essais": 152, "numero": 10},
+           "strategies": {"stock": {"pullback": _item(), "orb15": _item(nom="ORB 15",
+                                                                           mise_20e={"esperance_r": 0.3, "n": 60}),
+                                    "rebond_confirme": _item(nom="Rebond", ecarts_sorties={})}},
+           "sorties_gemini": {"ecarts": {"r_vwap": {"esperance_r": 0.05, "z": 2.5, "n": 120}}, "par_vwap": {}},
+           "scelle": {"texte": "bloc scellé"}}
+    text = SS.text(rep)
+    assert ("VWAP après 10 h 30 +0,05 R (z 2,5, ↗ aide (relatif) sur 2 stratégies, dont pullback perd encore "
+            "≈ 0,15 R à 20 €)") in text
+    assert ("témoin non battu = pas d'avantage d'horaire après le signal ; ne dit rien du choix de l'action ou du "
+            "jour") in text.splitlines()[0]
+    lines = text.splitlines()
+    i = next(k for k, x in enumerate(lines) if x.startswith("Rebond :"))
+    assert lines[i + 1] == "   ↳ anticipation connue ≈ +0,01 R sous H0 (bougie ambiguë), corrigée en n° 11"
+    assert sum("anticipation connue" in x for x in lines) == 1
+    assert not any(x.startswith("✅") for x in lines)
+
+
+def test_go_brut_lignes_sans_temoin():
+    """go_brut ouvert au-dessus du TP1 : pas de témoin (NO_WITNESS) ; ces lignes sortent de l'écart, pas de
+    l'espérance : le tableau les compte."""
+    db = LabDB(":memory:")
+    for i, day in enumerate(("2025-03-10", "2025-03-11", "2025-03-12")):
+        db.replace_strat("replay", "stock", day, [
+            _strat("AAA", strategy="go_brut", r_sans_be=0.4, temoin_r=0.1, temoin_triggered=1),
+            _strat("BBB", strategy="go_brut", r_sans_be=0.9, **ST.NO_WITNESS),
+            _strat("CCC", strategy="pullback", temoin_r=0.1, temoin_triggered=1)])
+    rep = SS.report(db.conn)
+    item = rep["strategies"]["stock"]["go_brut"]
+    assert item["temoin"]["sans_temoin"] == 3 and item["temoin"]["n"] == 3 and item["declenches"] == 6
+    assert rep["strategies"]["stock"]["pullback"]["temoin"]["sans_temoin"] == 0
+    line = next(x for x in SS.text(rep).splitlines() if x.startswith(item["nom"]))
+    assert "· 3 lignes sans témoin (hors de l'écart)" in line
+    assert "sans témoin" not in next(x for x in SS.text(rep).splitlines()
+                                     if x.startswith(rep["strategies"]["stock"]["pullback"]["nom"]))

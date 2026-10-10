@@ -446,7 +446,7 @@ def test_tableau_killmode_complet():
     assert gap["n"] == 40 and gap["esperance_r"] == pytest.approx(0.5, abs=0.01) and gap["aide"]
     assert rep["groupes"]["temoin_autre"]["r_20e"]["esperance_r"] == pytest.approx(-0.3)
     assert rep["motifs"]["fond"]["n"] == 80 and rep["autre_empreinte"] == 0
-    assert "✅ 🔪 KILL +0,50 R à 20 €" in KC.text(rep) and "✅ le catalyseur aide" in KC.text(rep)
+    assert "✅ 🔪 KILL +0,50 R à 20 €" in KC.text(rep) and ", ↗ aide (relatif))" in KC.text(rep)
     db.conn.execute("UPDATE kill_complet SET r_3c = -0.05 WHERE groupe = 'kill'")
     assert not KC.report(db.conn, 148)["principal"]["candidate"]           # le stress de 3 c décide aussi
     _kill_rows(db, [d.isoformat() for d in CO.trading_days(date(2026, 1, 12), date(2026, 1, 16))], other_fp=True)
