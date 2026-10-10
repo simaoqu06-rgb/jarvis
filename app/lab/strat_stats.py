@@ -972,17 +972,24 @@ def _entree_text(e: dict) -> str:
 
 
 def _revisions_text(market: str, revs: dict) -> str | None:
-    """2e tour d'avis (C6) : « N révisions du code / du coût » d'un marché, seulement quand il y en a plus d'une."""
+    """2e tour d'avis (C6) : « N révisions du code / du coût » d'un marché, seulement quand il y en a plus d'une.
+    Relecture W4/W7 : les lignes sans révision du coût (écrites avant la colonne cout_rev, n° 10 de la PR #53, même
+    modèle de coût) ne comptent pas pour une révision ; elles sont dites à part, sans alerte."""
     code, cost = revs.get("code") or {}, revs.get("cout") or {}
-    if len(code) < 2 and len(cost) < 2:
-        return None
+    known = {rev: n for rev, n in cost.items() if rev != "inconnue"}
+    unknown = cost.get("inconnue", 0)
+    mk = MARKET_FR.get(market, market).lower()
 
     def detail(d: dict) -> str:
         return ", ".join(f"{rev} {n:,}".replace(",", " ") for rev, n in sorted(d.items(), key=lambda kv: -kv[1]))
 
-    return (f"ℹ️ Lignes {MARKET_FR.get(market, market).lower()} de {len(code)} révision{'s' if len(code) > 1 else ''} "
-            f"du code ({detail(code)}) / {len(cost)} du coût ({detail(cost)}) : descriptif, à vérifier si les chiffres "
-            "bougent")
+    before = f"{unknown:,}".replace(",", " ") + f" ligne{'s' if unknown > 1 else ''}"
+    if len(code) < 2 and len(known) < 2:
+        return f"ℹ️ {before} {mk} sans révision du coût (écrites avant son suivi)" if unknown else None
+    return (f"ℹ️ Lignes {mk} de {len(code)} révision{'s' if len(code) > 1 else ''} du code ({detail(code)})"
+            + (f" / {len(known)} du coût ({detail(known)})" if known else "")
+            + " : descriptif, à vérifier si les chiffres bougent"
+            + (f" · {before} sans révision du coût (écrites avant son suivi)" if unknown else ""))
 
 
 def _lost(arm_20e: float | None, approx: bool = False) -> str:

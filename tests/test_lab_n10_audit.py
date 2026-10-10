@@ -193,7 +193,8 @@ def test_revisions_du_code_et_du_cout_affichees_quand_plusieurs(monkeypatch):
     assert rep["revisions"]["stock"] == {"code": {first: 2, "autrecode": 1},
                                          "cout": {KC.cost_fingerprint(): 2, "inconnue": 1}}
     text = SS.text(rep)
-    assert "ℹ️ Lignes actions de 2 révisions du code" in text and "/ 2 du coût" in text and "inconnue 1" in text
+    assert "ℹ️ Lignes actions de 2 révisions du code" in text and "/ 1 du coût" in text   # « inconnue » n'en est pas une
+    assert "· 1 ligne sans révision du coût (écrites avant son suivi)" in text
 
 
 async def test_cout_rev_des_lignes_de_la_n9(monkeypatch):

@@ -180,3 +180,37 @@ def test_audit_sans_la_seance_du_direct_aux_plans_recalcules(tmp_path, monkeypat
     text = AUD.text(rep)
     assert "séance du direct actions du 06/10/2026 exclue (plans v1 recalculés)" in text
     assert "Actions : 2 lignes appariées sur 3 archivées" in text
+
+
+# --- W4, W7 : lignes n° 10 écrites avant le suivi du coût, sans fausse alerte -------------------------------------------
+
+def test_lignes_sans_revision_du_cout_ne_font_pas_d_alerte():
+    """review/skep-deploiement/coutrev2.py et skeptic-invariants-textes/revs.py : les lignes n° 10 écrites par la PR #53
+    n'ont pas de cout_rev (colonne ajoutée après), même modèle de coût vérifié ; elles comptaient pour une révision
+    « inconnue » et !strategies affichait en permanence « 2 du coût (…, inconnue …) : à vérifier si les chiffres
+    bougent »."""
+    from app.lab import empreinte as E
+    from app.lab import strat_stats as SS
+
+    db = LabDB(":memory:")
+    for m in ("stock", "crypto"):
+        db.replace_strat("replay", m, "2025-03-10", [_row("AAA"), _row("BBB"), _row("CCC")])
+    db.conn.execute("UPDATE strat_trades SET cout_rev = NULL")             # écrites avant la colonne
+    for m in ("stock", "crypto"):
+        db.replace_strat("replay", m, "2025-03-11", [_row("DDD")])         # écrites après le déploiement
+    rep = SS.report(db.conn)
+    assert rep["revisions"]["stock"] == {"code": {E.code_rev("strat"): 4},
+                                         "cout": {E.strat_cost_rev("stock"): 1, "inconnue": 3}}   # données inchangées
+    lines = SS.text(rep).splitlines()
+    assert "ℹ️ 3 lignes actions sans révision du coût (écrites avant son suivi)" in lines
+    assert "ℹ️ 3 lignes crypto sans révision du coût (écrites avant son suivi)" in lines
+    assert not any("à vérifier si les chiffres bougent" in line for line in lines)
+    # Une vraie seconde révision du coût reste dite, les lignes sans révision à part.
+    rep["revisions"]["stock"]["cout"]["autrecout"] = 2
+    assert SS._revisions_text("stock", rep["revisions"]["stock"]) == (
+        f"ℹ️ Lignes actions de 1 révision du code ({E.code_rev('strat')} 4) / 2 du coût (autrecout 2, "
+        f"{E.strat_cost_rev('stock')} 1) : descriptif, à vérifier si les chiffres bougent · 3 lignes sans révision du "
+        "coût (écrites avant son suivi)")
+    assert SS._revisions_text("stock", {"code": {"a": 1}, "cout": {"inconnue": 1}}) == (
+        "ℹ️ 1 ligne actions sans révision du coût (écrites avant son suivi)")
+    assert SS._revisions_text("stock", {"code": {"a": 1}, "cout": {"b": 1}}) is None
