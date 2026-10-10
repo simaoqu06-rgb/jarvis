@@ -17,8 +17,9 @@ le journal du labo (generator.py) :
   closes, comme l'univers du labo), regime (universe.regime sur SPY), catalyst_replayed = false ;
 - regime, regime_trend, regime_vol_tercile : regime.series sur ~500 jours de SPY (table regimes du labo) ;
 - weekday, hour_utc, market, symbol, side : du jour et de l'heure du plan.
-Crypto (crypto_row) : la ligne de lessons.crypto_row (contexte du générateur), le symbole au nom du labo (paire
-OKX « XXX-USDT ») et le régime de BTC (context.regime, regime*) sur ses bougies journalières, comme
+Crypto (crypto_row) : la ligne de lessons.crypto_row (contexte du générateur), ramenée au créneau du labo qui
+précède le plan (heure et window_utc : 00, 04… 20 h UTC), le symbole au nom du labo (paire OKX « XXX-USDT ») et le
+régime de BTC (context.regime, regime*) sur ses bougies journalières, comme
 generator.crypto_day ; BTC indisponible : les règles sur le régime ne s'appliquent pas, comme sans SPY.
 Champs du labo absents en direct (traités comme « non vérifiés », COALESCE … 0) : universe_reason,
 universe_rank, dollar_volume et gap_open_pct (de toute façon interdits dans les règles), sector (vide
@@ -172,6 +173,12 @@ def crypto_row(plan: dict, daily: list[dict] | None, index_daily: list[dict] | N
 
     row = L.crypto_row(plan, daily, now)
     row["symbol"] = lab_symbol(row["symbol"])
+    # Le labo crypto ne planifie qu'aux créneaux CRYPTO_HOURS_UTC (00, 04… 20 h UTC) : le plan du direct est ramené
+    # au créneau qui le précède (même jour UTC), sinon une règle sur hour_utc ou context.window_utc ne le reconnaît pas.
+    utc = now.astimezone(timezone.utc)
+    slot = utc.replace(hour=max(h for h in G.CRYPTO_HOURS_UTC if h <= utc.hour), minute=0, second=0, microsecond=0)
+    row["planned_at"] = int(slot.timestamp())
+    row["context"]["window_utc"] = slot.strftime("%H:%M")
     if index_daily:
         day = date.fromisoformat(row["day"])
         row["context"]["regime"] = U.regime(index_daily, CO.utc_midnight(day), G.ANNUAL_DAYS["crypto"])

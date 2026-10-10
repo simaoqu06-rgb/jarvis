@@ -335,15 +335,36 @@ def test_ligne_crypto_au_nom_du_labo_avec_le_regime_de_btc():
     row = LIVE.crypto_row(p, daily, btc, NOW)
     base = L.crypto_row(p, daily, NOW)
     assert row["symbol"] == "ETH-USDT" and LIVE.lab_symbol("btc-usdt") == "BTC-USDT"
-    assert {k: v for k, v in row.items() if not k.startswith("regime") and k not in ("symbol", "context")} == \
-        {k: v for k, v in base.items() if k not in ("symbol", "context")}
-    assert row["context"] == base["context"] | {"regime": U.regime(btc, CO.utc_midnight(day), 365)}
+    assert {k: v for k, v in row.items() if not k.startswith("regime") and k not in ("symbol", "context", "planned_at")} \
+        == {k: v for k, v in base.items() if k not in ("symbol", "context", "planned_at")}
+    # 13 h 10 UTC : créneau du labo de 12 h (voir test_plan_crypto_au_creneau_du_labo)
+    assert row["planned_at"] == int(datetime(2026, 10, 7, 12, tzinfo=timezone.utc).timestamp())
+    assert row["context"] == base["context"] | {"regime": U.regime(btc, CO.utc_midnight(day), 365), "window_utc": "12:00"}
     assert row["context"]["regime"] is not None
     label = REG.series(btc, "crypto", [day])["2026-10-07"]
     assert (row["regime_label"], row["regime_trend"], row["regime_vol_tercile"]) == \
         (label["label"], label["trend"], label["vol_tercile"]) and row["regime_trend"] == "haussier"
     # Sans BTC : pas de régime (les règles qui le lisent ne s'appliquent pas, voir plus haut).
     assert "regime_label" not in LIVE.crypto_row(p, daily, None, NOW)
+
+
+async def test_plan_crypto_au_creneau_du_labo(champ_file):
+    """Le labo crypto ne planifie qu'à 00, 04… 20 h UTC : le plan du direct est ramené au créneau qui le précède
+    (même jour UTC), pour qu'une règle sur hour_utc ou context.window_utc le juge comme le labo l'a mesurée."""
+    p = fake_plan("SOL") | {"market": "crypto"}
+    write_champion(champ_file, [rule({"field": "context.window_utc", "op": "==", "value": "00:00"}, name="pas minuit")
+                                | {"markets": ["crypto"]}])
+    for hm in ((0, 0), (0, 1), (0, 30), (3, 59)):
+        assert not (await LIVE.plan_verdict(p, None, datetime(2026, 10, 7, *hm, tzinfo=timezone.utc)))["garde"], hm
+    assert (await LIVE.plan_verdict(p, None, datetime(2026, 10, 7, 4, 0, tzinfo=timezone.utc)))["garde"]
+    write_champion(champ_file, [rule({"field": "hour_utc", "op": "in", "value": [8, 12]}, kind="keep",
+                                     name="journée") | {"markets": ["crypto"]}])
+    for hm, kept in (((8, 15), True), ((9, 30), True), ((12, 5), True), ((13, 0), True), ((7, 59), False),
+                     ((16, 0), False), ((23, 59), False)):
+        assert (await LIVE.plan_verdict(p, None, datetime(2026, 10, 7, *hm, tzinfo=timezone.utc)))["garde"] is kept, hm
+    row = LIVE.crypto_row(p, None, None, datetime(2026, 10, 7, 23, 59, 30, tzinfo=timezone.utc))
+    assert row["day"] == "2026-10-07" and row["context"]["window_utc"] == "20:00"
+    assert row["planned_at"] == int(datetime(2026, 10, 7, 20, tzinfo=timezone.utc).timestamp())
 
 
 async def test_plan_crypto_ecarte_sur_le_regime_de_btc(champ_file, monkeypatch):
