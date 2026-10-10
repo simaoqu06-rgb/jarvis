@@ -98,11 +98,15 @@ bougie de l'historique de l'actif et mesure le temps qu'il a fallu pour toucher 
 stop : médiane, fourchette 25-75 %, heure estimée (Paris), part des cas où le TP a été atteint
 avant le stop et espérance en R. Crypto : bougies d'1 h sur 30 jours (Kraken), horizon 24 h.
 Actions : bougies de 15 min sur environ 190 séances (Twelve Data), horizon 2 séances, en ne
-comptant que les heures de cotation.
+comptant que les heures de cotation. Les départs voisins se chevauchent : la part « touché avant le
+stop » porte un IC 95 % de Wilson calculé sur au moins départs ÷ horizon fenêtres indépendantes,
+et le « 3 sur 4 » de l'heure au plus tard ne vaut que pour les cas qui ont touché le TP (la part de
+tous les cas est affichée à côté).
 
 **Suivi.** Chaque minute pour la crypto, et toutes les 2 minutes pendant la séance pour les actions (limite gratuite de Twelve Data), les bougies d'1 minute disent si un TP ou le stop a été touché ;
 Discord reçoit l'alerte avec le prochain TP et son délai, sur le salon et en message privé (bot configuré). Le stop reste en place après le TP1 et
-remonte à l'entrée après le TP2. Un TP en retard sur ce que 3 cas passés sur 4 avaient fait, ou un
+remonte à l'entrée après le TP2. Un TP en retard (l'alerte dit quelle part de tous les cas passés
+l'avait atteint à cette heure, et la chance restante parmi ceux encore en vie), ou un
 signe de retournement (divergence, anomalie de volume, bougie de retournement), déclenche une
 alerte de sortie anticipée. Les trades sont gardés dans `data/trades.json` (`JARVIS_TRADES_PATH`).
 

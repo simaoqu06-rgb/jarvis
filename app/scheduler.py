@@ -303,8 +303,9 @@ async def tick_confirm(now: datetime | None = None) -> None:
     if now >= close + timedelta(minutes=2):
         bars = {s: CONFIRM.session_bars(b, day_open, now) for s in confirm_state["gos"]
                 if (b := await _bars_5min(s))}
+        rate = await _usd_per_eur()  # change du jour pour confirme_r20 (1,15 si la source ne répond pas)
         async with _lock:
-            CONFIRM.close_day(confirm_state, bars)
+            CONFIRM.close_day(confirm_state, bars, rate=rate)
             CONFIRM.save(confirm_state)
         return
     pending = [s for s, g in confirm_state["gos"].items() if g["status"] in CONFIRM.PENDING]

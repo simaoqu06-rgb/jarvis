@@ -12,6 +12,7 @@ par défaut prend le dernier prix.
 """
 from dataclasses import dataclass, field
 from datetime import datetime
+from math import sqrt
 from statistics import median
 
 from app.trading import indicators as I
@@ -185,6 +186,15 @@ def _quantile(sorted_values: list[float], q: float) -> float:
     return sorted_values[index]
 
 
+def wilson(p: float, n: int, z: float = 1.96) -> list[float]:
+    """Intervalle de Wilson (95 % par défaut) d'une proportion `p` observée sur `n` tirages indépendants."""
+    if n <= 0:
+        return [0.0, 1.0]
+    centre = (p + z * z / (2 * n)) / (1 + z * z / n)
+    half = z * sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / (1 + z * z / n)
+    return [round(max(0.0, centre - half), 3), round(min(1.0, centre + half), 3)]
+
+
 def historical_timing(candles: list[dict], levels: Levels, horizon_bars: int,
                       lookback: int | None = None) -> dict:
     """Rejoue le plan (mêmes écarts en %) depuis chaque bougie passée.
@@ -197,6 +207,14 @@ def historical_timing(candles: list[dict], levels: Levels, horizon_bars: int,
     (médiane, 25 % et 75 % des cas). Le TP est compté au milieu de la bougie qui le touche
     (j - 0,5) : on ne sait pas à quel moment de la bougie il a été atteint, la fin la
     surestimerait d'une bougie au pire.
+
+    Les départs se chevauchent (deux départs voisins partagent presque toute leur fenêtre) :
+    `effective_starts` = starts // horizon_bars (1 au moins), au moins autant de fenêtres indépendantes, sert
+    aux IC de Wilson (`hit_ci95`, `stop_first_ci95`). Le p75 des délais ne porte que sur les départs
+    qui ont touché le TP : `reached_by_p75` le ramène à tous les départs, `still_after_p75` est la
+    part touchée plus tard parmi les départs encore en vie à p75 (ni TP ni stop), et
+    `reached_by_p75_given_prev` (TP2, TP3) la part touchée à p75 parmi les départs qui ont touché
+    le TP précédent : la population de l'alerte de retard une fois ce TP pris.
     """
     sign = levels.sign
     if not levels.entry or levels.risk == 0:
@@ -209,6 +227,8 @@ def historical_timing(candles: list[dict], levels: Levels, horizon_bars: int,
     if starts < 30:
         raise ValueError("historique trop court pour estimer les délais")
     hits: list[list[float]] = [[] for _ in target_pcts]
+    hit_at: list[list[float | None]] = [[None] * starts for _ in target_pcts]  # délai de chaque TP, par départ
+    stop_at: list[float | None] = [None] * starts
     stopped_before = [0] * len(target_pcts)
     stops = 0
     for i in range(starts):
@@ -220,6 +240,7 @@ def historical_timing(candles: list[dict], levels: Levels, horizon_bars: int,
             bar = candles[i + j]
             if bar["l"] <= stop_px if sign == 1 else bar["h"] >= stop_px:
                 stops += 1
+                stop_at[i] = j - 0.5
                 for k in range(reached, len(target_px)):
                     stopped_before[k] += 1
                 break
@@ -227,21 +248,36 @@ def historical_timing(candles: list[dict], levels: Levels, horizon_bars: int,
                 bar["h"] >= target_px[reached] if sign == 1 else bar["l"] <= target_px[reached]
             ):
                 hits[reached].append(j - 0.5)
+                hit_at[reached][i] = j - 0.5
                 reached += 1
             if reached == len(target_px):
                 break
+    n_eff = max(1, starts // horizon_bars)
     out = []
-    for bars, stopped in zip(hits, stopped_before):
+    for k, (bars, stopped) in enumerate(zip(hits, stopped_before)):
         bars.sort()
-        out.append({
+        p75 = _quantile(bars, 0.75) if bars else None
+        item = {
             "hit_rate": round(len(bars) / starts, 3),
+            "hit_ci95": wilson(len(bars) / starts, n_eff),
             "stop_rate": round(stopped / starts, 3),
             "bars_median": median(bars) if bars else None,
             "bars_p25": _quantile(bars, 0.25) if bars else None,
-            "bars_p75": _quantile(bars, 0.75) if bars else None,
+            "bars_p75": p75,
             "samples": len(bars),
-        })
-    return {"starts": starts, "stop_first_rate": round(stops / starts, 3), "targets": out}
+            "reached_by_p75": None, "still_after_p75": None, "reached_by_p75_given_prev": None,
+        }
+        if p75 is not None:
+            by_p75 = sum(b <= p75 for b in bars)
+            alive = sum((h is None or h > p75) and (s is None or s > p75) for h, s in zip(hit_at[k], stop_at))
+            later = sum(h is not None and h > p75 for h in hit_at[k])
+            prev = len(hits[k - 1]) if k else 0
+            item["reached_by_p75"] = round(by_p75 / starts, 3)
+            item["still_after_p75"] = round(later / alive, 3) if alive else None
+            item["reached_by_p75_given_prev"] = round(by_p75 / prev, 3) if prev else None
+        out.append(item)
+    return {"starts": starts, "effective_starts": n_eff, "stop_first_rate": round(stops / starts, 3),
+            "stop_first_ci95": wilson(stops / starts, n_eff), "targets": out}
 
 
 def expectancy(r_multiple: float, hit_rate: float, stop_rate: float) -> dict:

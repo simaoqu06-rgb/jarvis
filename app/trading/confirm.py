@@ -15,7 +15,11 @@ Mesure, à la clôture : chaque GO est rejoué deux fois sur les bougies du jour
 l'ouverture) et « confirmé » (acheté au déclenchement de l'ordre stop, s'il a été touché), avec la
 gestion habituelle (un tiers par objectif, stop fixe, reste vendu à la clôture ; une bougie qui touche
 objectif et stop compte comme stop). Gains en R avant frais, gardés dans data/confirmations.jsonl,
-lus par `!confirmations`. Rien ne change dans la note ni dans les plans.
+lus par `!confirmations`. Rien ne change dans la note ni dans les plans. Deux colonnes de plus : la
+même gestion avec le stop remonté à l'entrée après TP2 (`_be2`, la règle du suivi de Simão, sans sa
+sortie libre dans le temps) et le confirmé à la taille de Simão (`confirme_r20` : actions entières pour
+JARVIS_RISK_EUR, un bracket IBKR par objectif, commission de chaque ordre). Chaque ligne garde aussi
+les indicateurs du scanner (`features`) et les sous-notes (`parts`) du GO.
 """
 from __future__ import annotations
 
@@ -64,10 +68,13 @@ def register(state: dict, result: dict, day: str) -> list[str]:
         plan = p["plan"]
         if not plan["score"]["go"] or not plan.get("targets"):
             continue
+        features = p.get("features") or {}
         gos[p["symbol"]] = {
             "status": "attente", "entry": plan["entry"], "stop": plan["stop"],
             "targets": [t["price"] for t in plan["targets"]], "composite": plan["score"]["composite"],
             "last_bar": None, "events": [],
+            "features": {k: features.get(k) for k in ("rsi", "rvol", "gap_pct")},
+            "parts": {k: v["score"] for k, v in (plan["score"].get("parts") or {}).items()},
         }
     state.clear()
     state.update({"day": day, "gos": gos, "closed": False})
@@ -171,29 +178,64 @@ def expired_text(symbols: list[str]) -> str:
 
 # --- Mesure à la clôture ------------------------------------------------------------------
 
-def simulate(entry: float, stop: float, targets: list[float], bars: list[dict]) -> float | None:
-    """R d'un achat à `entry` géré par tiers (stop fixe, reste à la clôture), avant frais."""
+def simulate(entry: float, stop: float, targets: list[float], bars: list[dict], be_after: int | None = None,
+             detail: bool = False) -> float | None | tuple[float | None, list[dict]]:
+    """R d'un achat à `entry` géré par tiers (reste à la clôture), avant frais. Stop fixe, ou remonté à l'entrée
+    à partir de la bougie qui suit la touche du `be_after`-ième objectif (2 : la règle du suivi de Simão).
+    `detail` : renvoie (R, sorties), une sortie par tiers {prix, raison : tp1…, stop, stop_be, cloture}."""
     risk = entry - stop
     if risk <= 0 or not bars:
-        return None
-    legs, hit, total = len(targets), 0, 0.0
+        return (None, []) if detail else None
+    legs, hit, total, lvl, exits = len(targets), 0, 0.0, stop, []
+
+    def done(r: float):
+        return (round(r / legs, 2), exits) if detail else round(r / legs, 2)
+
     for b in bars:
-        if b["l"] <= stop:
-            return round((total + (legs - hit) * -1.0) / legs, 2)
+        if b["l"] <= lvl:
+            exits.extend({"prix": lvl, "raison": "stop" if lvl == stop else "stop_be"} for _ in range(legs - hit))
+            return done(total + (legs - hit) * (lvl - entry) / risk)
         while hit < legs and b["h"] >= targets[hit]:
-            total += (targets[hit] - entry) / risk
+            total += (max(targets[hit], entry) - entry) / risk
+            exits.append({"prix": max(targets[hit], entry), "raison": f"tp{hit + 1}"})
             hit += 1
         if hit == legs:
-            return round(total / legs, 2)
-    return round((total + (legs - hit) * (bars[-1]["c"] - entry) / risk) / legs, 2)
+            return done(total)
+        if be_after and hit >= be_after:
+            lvl = entry
+    exits.extend({"prix": bars[-1]["c"], "raison": "cloture"} for _ in range(legs - hit))
+    return done(total + (legs - hit) * (bars[-1]["c"] - entry) / risk)
 
 
-def outcome(go: dict, bars: list[dict]) -> dict:
-    """Brut (acheté à l'ouverture) et confirmé (acheté au déclenchement de l'ordre stop)."""
-    raw = None
+def at_size(trigger: float, stop: float, filled: float, exits: list[dict], rate: float | None = None) -> float | None:
+    """R du confirmé à la taille de Simão, sur le risque prévu (trigger − stop) : actions entières pour
+    JARVIS_RISK_EUR (killmode.shares, change `rate` ou 1,15), un bracket IBKR par objectif (killmode._legs, comme le
+    journal de Killmode), commission de chaque ordre avec son minimum et son plafond (entrée et sortie de chaque
+    bracket ; le reste vendu à la clôture part en un seul ordre). Sans glissement."""
+    from app.trading import killmode as K  # import tardif : killmode tire le labo, qui importe ce module
+
+    risk = trigger - stop
+    if risk <= 0 or not exits:
+        return None
+    q = K.shares(risk, rate)
+    plan = K.IBKR_PLANS.get(K.IBKR_PLAN, K.IBKR_PLANS["fixe"])
+    legs = K._legs(q, len(exits), [e | {"part": 1 / len(exits)} for e in exits])
+    pnl = sum(n * (e["prix"] - filled) - K.order_commission(n, filled, plan)
+              - (0.0 if e["raison"] == "cloture" else K.order_commission(n, e["prix"], plan)) for n, e in legs)
+    closing = [(n, e["prix"]) for n, e in legs if e["raison"] == "cloture"]
+    if closing:
+        pnl -= K.order_commission(sum(n for n, _ in closing), closing[0][1], plan)
+    return round(pnl / (q * risk), 2)
+
+
+def outcome(go: dict, bars: list[dict], rate: float | None = None) -> dict:
+    """Brut (acheté à l'ouverture) et confirmé (acheté au déclenchement de l'ordre stop), stop fixe et stop à
+    l'entrée après TP2 (`_be2`) ; le confirmé aussi à la taille de Simão (`confirme_r20`, frais compris)."""
+    raw = raw_be = None
     if bars and bars[0]["o"] > go["stop"]:
         raw = simulate(bars[0]["o"], go["stop"], go["targets"], bars)
-    confirmed = filled = None
+        raw_be = simulate(bars[0]["o"], go["stop"], go["targets"], bars, be_after=2)
+    confirmed = confirmed_be = confirmed_20 = filled = None
     if go["status"] == "confirmé":
         after = [b for b in bars if b["t"] > go["confirm_bar"]]
         # Comme le message du direct : l'ordre non déclenché est annulé à 11 h 30 New York.
@@ -205,12 +247,18 @@ def outcome(go: dict, bars: list[dict]) -> dict:
             if b["h"] >= go["trigger"]:
                 filled = max(go["trigger"], b["o"])
                 # bougie du déclenchement : on ne sait pas si le stop vient avant ; il compte s'il est touché
-                confirmed = simulate(filled, go["stop"], go["targets"], after[i:])
+                confirmed, exits = simulate(filled, go["stop"], go["targets"], after[i:], detail=True)
+                confirmed_be = simulate(filled, go["stop"], go["targets"], after[i:], be_after=2)
+                confirmed_20 = at_size(go["trigger"], go["stop"], filled, exits, rate)
                 break
-    return {"brut_r": raw, "confirme_r": confirmed, "rempli": filled}
+    return {"brut_r": raw, "brut_r_be2": raw_be, "confirme_r": confirmed, "confirme_r_be2": confirmed_be,
+            "confirme_r20": confirmed_20, "rempli": filled}
 
 
-def close_day(state: dict, bars_by_symbol: dict[str, list[dict]], path: str | None = None) -> list[dict]:
+def close_day(state: dict, bars_by_symbol: dict[str, list[dict]], path: str | None = None,
+              rate: float | None = None) -> list[dict]:
+    """Mesure du jour, une ligne par GO dans confirmations.jsonl (avec ses indicateurs et sous-notes du scanner).
+    `rate` : change EUR→USD de la taille de `confirme_r20` (1,15 par défaut, comme Killmode)."""
     rows = []
     for symbol, go in state.get("gos", {}).items():
         bars = bars_by_symbol.get(symbol)
@@ -218,7 +266,8 @@ def close_day(state: dict, bars_by_symbol: dict[str, list[dict]], path: str | No
             continue
         rows.append({"day": state["day"], "symbol": symbol, "status": go["status"],
                      "composite": go["composite"], "entry": go["entry"], "stop": go["stop"],
-                     "targets": go["targets"], "trigger": go.get("trigger"), **outcome(go, bars)})
+                     "targets": go["targets"], "trigger": go.get("trigger"),
+                     "features": go.get("features"), "parts": go.get("parts"), **outcome(go, bars, rate)})
     if rows:
         p = Path(path or LOG_PATH)
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -240,8 +289,24 @@ def _mean(xs: list[float]) -> str:
     return f"{sum(xs) / len(xs):+.2f} R" if xs else "n/d"
 
 
+def _col(rows: list[dict], key: str, n: int) -> str:
+    """Moyenne d'une colonne ; le nombre de lignes mesurées s'il diffère de `n` (lignes écrites avant la colonne)."""
+    xs = [r[key] for r in rows if r.get(key) is not None]
+    return _mean(xs) + (f" sur {len(xs)}" if xs and len(xs) != n else "")
+
+
 def report_text(rows: list[dict], state: dict | None = None) -> str:
-    lines = ["🔎 **GO du scanner : confirmés ou pas** (R avant frais, un tiers par objectif)"]
+    from app.trading.killmode import RISK_EUR  # import tardif : killmode tire le labo, qui importe ce module
+
+    lines = ["🔎 **GO du scanner : confirmés ou pas** (R avant frais, un tiers par objectif)",
+             "-# Politique mesurée : brut = achat à l'ouverture ; confirmé = ordre stop d'achat au déclencheur, annulé "
+             "à 11 h 30 New York s'il n'est pas touché. Un tiers par objectif, stop fixe (ou remonté à l'entrée après "
+             f"TP2 : « BE TP2 »), reste vendu à la clôture du jour. « À {RISK_EUR:g} € » : actions entières pour "
+             f"{RISK_EUR:g} € de risque, un bracket IBKR par objectif, commissions comprises, sans glissement. "
+             "≠ ton suivi `!prends` : stop à l'entrée après TP2 mais pas de vente à la clôture.",
+             "-# Pour juger la confirmation sur les mêmes GO, compare brut et ordre confirmé sur la ligne « confirmé ». "
+             "Le brut de tous les GO mélange les annulés et les expirés, où l'on n'entre pas : un gain compté par GO "
+             "de départ (0 R sans ordre) vient surtout de là, en n'entrant pas."]
     if state and state.get("gos"):
         today = " · ".join(f"{s} {g['status']}" for s, g in state["gos"].items())
         lines.append(f"Aujourd'hui ({state['day']}) : {today}")
@@ -250,17 +315,24 @@ def report_text(rows: list[dict], state: dict | None = None) -> str:
         return "\n".join(lines)
     days = len({r["day"] for r in rows})
     raw = [r["brut_r"] for r in rows if r["brut_r"] is not None]
-    lines.append(f"{len(rows)} GO sur {days} séance(s) · brut (achat à l'ouverture) : {_mean(raw)} sur {len(raw)}")
+    lines.append(f"{len(rows)} GO sur {days} séance(s) · brut (achat à l'ouverture) : {_mean(raw)} sur {len(raw)}"
+                 f" · BE TP2 {_col(rows, 'brut_r_be2', len(raw))}")
     for status in ("confirmé", "annulé", "expiré"):
         group = [r for r in rows if r["status"] == status]
         if not group:
             continue
         g_raw = [r["brut_r"] for r in group if r["brut_r"] is not None]
-        line = f"• {status} : {len(group)} · brut {_mean(g_raw)}"
+        line = f"• {status} : {len(group)} · brut {_mean(g_raw)} (BE TP2 {_col(group, 'brut_r_be2', len(g_raw))})"
         if status == "confirmé":
             conf = [r["confirme_r"] for r in group if r["confirme_r"] is not None]
-            line += f" · avec l'ordre confirmé {_mean(conf)} ({len(conf)} déclenchés)"
+            line += (f" · avec l'ordre confirmé {_mean(conf)} ({len(conf)} déclenchés ; BE TP2 "
+                     f"{_col(group, 'confirme_r_be2', len(conf))} ; à {RISK_EUR:g} € "
+                     f"{_col(group, 'confirme_r20', len(conf))})")
         lines.append(line)
+    old = sum("brut_r_be2" not in r for r in rows)
+    if old:
+        lines.append(f"-# {old} ligne(s) écrite(s) avant le 10 octobre 2026 : brut compté avec un objectif sous "
+                     "l'achat en perte, donc le brut global et celui des annulés y sont un peu pessimistes.")
     if len(rows) < 30:
         lines.append(f"-# Lecture à partir de 30 GO ({len(rows)} pour l'instant) : avant, c'est du bruit.")
     return "\n".join(lines)

@@ -468,6 +468,18 @@ function updateCard(t) {
   });
 }
 
+/* Retard : part de TOUS les cas passés qui avaient touché l'objectif à cette heure (ceux qui avaient touché le TP
+   précédent, une fois ce TP pris), et chance restante parmi les cas encore en vie. */
+function lateText(t, i) {
+  const x = t.targets[i], p0 = (v) => `${Math.round(v * 100)} %`;
+  const given = i && i === (t.targets_hit || 0) ? x.reached_by_p75_given_prev : null;
+  const share = given ?? x.reached_by_p75;
+  if (share == null) return `3 sur 4 des cas passés qui l'ont touché l'avaient fait à ${when(x.eta_latest)}`;
+  const who = given != null ? `des cas passés qui avaient touché ${esc(t.targets[i - 1].name)}` : "des cas passés";
+  return `à ${when(x.eta_latest)}, ${p0(share)} ${who} l'avaient atteint`
+    + (x.still_after_p75 != null ? ` ; parmi ceux encore en vie, ${p0(x.still_after_p75)} l'ont touché ensuite` : "");
+}
+
 function tick() {
   const now = Date.now();
   $("#clock").textContent = new Date().toLocaleTimeString("fr-FR", TZ);
@@ -485,7 +497,7 @@ function tick() {
       eta.innerHTML = now < med
         ? `⏱ ${countdown(med - now)}<div class="meta">vers ${when(x.eta_median)} · au plus tard ${when(x.eta_latest)}</div>`
         : now < late ? `<span class="warn">⏳ ${when(x.eta_latest)} max</span><div class="meta">médiane dépassée, encore dans la fourchette</div>`
-        : `<span class="warn">⌛ en retard</span><div class="meta">3 cas sur 4 l'avaient atteint à ${when(x.eta_latest)}</div>`;
+        : `<span class="warn">⌛ en retard</span><div class="meta">${lateText(t, i)}</div>`;
     });
   }
   updateKpis();

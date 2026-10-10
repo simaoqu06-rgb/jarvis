@@ -255,6 +255,8 @@ def plan_from_bars(
             "name": f"TP{i}", "price": target.price, "source": target.source,
             "pct": round(levels.pct(target.price), 2), "r_multiple": r_multiple,
             "hit_rate": t["hit_rate"], "stop_rate": t["stop_rate"], "samples": t["samples"],
+            "hit_ci95": t["hit_ci95"], "reached_by_p75": t["reached_by_p75"],
+            "still_after_p75": t["still_after_p75"], "reached_by_p75_given_prev": t["reached_by_p75_given_prev"],
             **P.expectancy(r_multiple, t["hit_rate"], t["stop_rate"]),
             "minutes_median": None, "minutes_p25": None, "minutes_p75": None,
             "eta_median": None, "eta_latest": None, "eta_text": "jamais atteint dans l'historique",
@@ -270,7 +272,8 @@ def plan_from_bars(
             item["eta_text"] = (
                 f"~{duration_fr(item['minutes_median'])}{clock_word} (entre {duration_fr(item['minutes_p25'])} "
                 f"et {duration_fr(item['minutes_p75'])}), vers {time_fr(eta_med, now)}, "
-                f"au plus tard {time_fr(eta_late, now)} dans 3 cas sur 4"
+                f"au plus tard {time_fr(eta_late, now)} pour 3 sur 4 des cas qui l'ont touché "
+                f"({t['reached_by_p75'] * 100:.0f} % de tous les cas)"
             )
         estimates.append(item)
     if capital is None:
@@ -280,13 +283,13 @@ def plan_from_bars(
         "entry": levels.entry, "stop": levels.stop, "stop_source": levels.stop_source,
         "stop_pct": round(-abs(levels.pct(levels.stop)), 2), "atr": P.round_price(atr_value),
         "targets": estimates,
-        "stop_first_rate": timing["stop_first_rate"],
+        "stop_first_rate": timing["stop_first_rate"], "stop_first_ci95": timing["stop_first_ci95"],
         "checklist": check,
         "sizing": sizing(levels.entry, levels.stop, capital, RISK_PCT if risk_pct is None else risk_pct),
         "method": (
-            f"Délais mesurés en rejouant ce plan depuis chacune des {timing['starts']} bougies de "
-            f"{step} min de l'historique ({cfg['label']}), horizon {cfg['horizon_bars'] * step // 60} h{clock_word}. "
-            f"Heures de Paris."
+            f"Délais mesurés en rejouant ce plan sur {timing['starts']} départs qui se chevauchent "
+            f"(≈ {timing['effective_starts']} fenêtres indépendantes au moins), bougies de {step} min de l'historique "
+            f"({cfg['label']}), horizon {cfg['horizon_bars'] * step // 60} h{clock_word}. Heures de Paris."
         ),
         "created_at": now.isoformat(timespec="seconds"),
         "catalyst": cat,
@@ -552,9 +555,12 @@ def plan_text(p: dict) -> str:
     if p.get("score"):
         lines += score_lines(p)
     for t in p["targets"]:
+        ci = t.get("hit_ci95")
+        ci_text = f" (IC 95 % : {ci[0] * 100:.0f}-{ci[1] * 100:.0f} %)" if ci else ""
         lines.append(
             f"🎯 {t['name']} {_num(t['price'])} ({t['pct']:+.2f} %, {t['r_multiple']:g} R, {t['source']}) · "
-            f"{t['eta_text']} · touché avant le stop {t['hit_rate']:.0%}, espérance {t['expectancy_r']:+.2f} R"
+            f"{t['eta_text']} · touché avant le stop {t['hit_rate'] * 100:.0f} %{ci_text}, "
+            f"espérance {t['expectancy_r']:+.2f} R"
         )
     lines += confirmation_lines(p)
     marks = {True: "✅", False: "❌", None: "➖"}
@@ -705,13 +711,26 @@ def apply_bars(trade: dict, bars: list[dict], now: datetime) -> list[str]:
                     stop_text = f"Stop inchangé à {_num(trade['stop_current'])} (pas de break-even précipité)."
                 text += f"\nProchain : {nxt['name']} {_num(nxt['price'])}, {nxt['eta_text']}. {stop_text} Garde le reste."
             messages.append(text)
-    # Objectif en retard sur le délai à 75 % : l'élan faiblit peut-être.
+    # Objectif en retard sur le délai à 75 % des cas qui l'ont touché : l'élan faiblit peut-être. Avant le TP
+    # précédent, la population est celle de tous les cas passés ; après, celle des cas qui l'ont touché.
     if trade["status"] == "open" and trade["targets_hit"] < len(trade["targets"]):
-        nxt = trade["targets"][trade["targets_hit"]]
+        k = trade["targets_hit"]
+        nxt = trade["targets"][k]
         if nxt["eta_latest"] and nxt["name"] not in trade["late_warned"] and now >= datetime.fromisoformat(nxt["eta_latest"]):
             trade["late_warned"].append(nxt["name"])
-            messages.append(f"⏳ **{trade['symbol']}** : {nxt['name']} ({_num(nxt['price'])}) pas encore touché alors que "
-                            f"3 cas passés sur 4 l'avaient atteint. Dernier prix {_num(trade['last_price'])}.")
+            given = nxt.get("reached_by_p75_given_prev") if k else None
+            share, still = given if given is not None else nxt.get("reached_by_p75"), nxt.get("still_after_p75")
+            if share is None:  # trade suivi avant ces mesures : seul le p75 des cas qui l'ont touché
+                why = "3 sur 4 des cas passés qui l'ont touché l'avaient déjà fait à cette heure"
+            else:
+                who = "des cas passés" + (f" qui avaient touché {trade['targets'][k - 1]['name']}" if given is not None
+                                          else "")
+                why = f"à cette heure, {share * 100:.0f} % {who} l'avaient atteint"
+                if still is not None:
+                    why += (f" ; parmi ceux encore en vie (ni objectif ni stop), {still * 100:.0f} % l'ont touché "
+                            "ensuite")
+            messages.append(f"⏳ **{trade['symbol']}** : {nxt['name']} ({_num(nxt['price'])}) pas encore touché ; "
+                            f"{why}. Dernier prix {_num(trade['last_price'])}.")
     return messages
 
 
