@@ -864,6 +864,11 @@ def practical(risk: float) -> str:
     return f"{risk:g} %"
 
 
+def allowed(risk: float) -> str:
+    """« risque permis 3 % », ou « risque 5 % permis, 4 % en pratique (budget total) » (sans « permis » en double)."""
+    return f"risque {practical(risk)}" if risk > RISQUE_OUVERT_MAX else f"risque permis {practical(risk)}"
+
+
 def text(data: dict | None, hist: list[dict] | None = None, now: datetime | None = None) -> str:
     """`!grade` : grade de chaque marché, de quoi il est fait, et ce qu'il change."""
     marches = (data or {}).get("marches") or {}
@@ -883,7 +888,7 @@ def text(data: dict | None, hist: list[dict] | None = None, now: datetime | None
             continue
         m = g["mesure"] or {}
         lines.append(f"\n**{MARKET_FR[market].capitalize()} : {g['grade']}** · méthode {g['version']} · "
-                     f"risque permis {practical(g['risque_grade'])} (plafond {g['risque_max']:g} %)")
+                     f"{allowed(g['risque_grade'])} (plafond {g['risque_max']:g} %)")
         window = window_text(m.get("fenetre"))
         if g["non_note"]:
             lines.append(f"-# {m.get('raison', 'échantillon trop petit')} : {m.get('trades', 0)} trades sur "

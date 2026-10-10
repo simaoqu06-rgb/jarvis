@@ -598,6 +598,7 @@ def test_page_du_labo_fenetre_et_peremption():
         "discontinue": True}
     html = PG._grade_card(data)  # vérifié à NOW, il y a plus de 6 h
     assert "⚠️ Grade périmé (dernier passage du labo il y a" in html and "5 % permis, 4 % en pratique" in html
+    assert "risque 5 % permis, 4 % en pratique" in html and "permis 5 % permis" not in html
     assert "fenêtre : rejeu du 01/04/2026 au 01/04/2026, direct depuis le 06/10/2026" in html
     fresh = data | {"verifie_le": datetime.now(timezone.utc).isoformat()}
     assert "périmé" not in PG._grade_card(fresh)
@@ -612,7 +613,9 @@ def test_plafond_s_et_budget_total():
     assert g["risque_propose"] == 4.0 and "budget de 4 % ouvert au total" in g["raison"] and "déjà" not in g["raison"]
     assert GR.practical(5.0) == "5 % permis, 4 % en pratique (budget total)" and GR.practical(3.0) == "3 %"
     text = GR.text(full_data(data["marches"]["stock"]), now=NOW)
-    assert "risque permis 5 % permis, 4 % en pratique (budget total)" in text and "périmé" not in text
+    assert "risque 5 % permis, 4 % en pratique (budget total) (plafond 5 %)" in text and "périmé" not in text
+    assert "permis 5 % permis" not in text  # relecture d'intégration : « permis » n'est plus doublé
+    assert GR.allowed(3.0) == "risque permis 3 %"
     assert "espérance +0.250 R par trade après commission IBKR à 20 €" in text
 
 

@@ -71,8 +71,8 @@ def _grade_card(grade: dict | None) -> str:
         wait = (f'<div class="small">⏳ hausse vers {_e(GR.name(g["hausse"]["vers"]))} en attente de ton accord</div>'
                 if g.get("hausse") else "")
         cells.append(f'<div><b>{_e(GR.MARKET_FR[market].capitalize())} : <span class="num">{_e(g["grade"])}</span></b>'
-                     f' <span class="small muted">mesuré {_e(m.get("grade"))}</span><div class="small">risque permis '
-                     f'{_e(GR.practical(g["risque_grade"]))} (plafond {g["risque_max"]:g} %){flags}</div>'
+                     f' <span class="small muted">mesuré {_e(m.get("grade"))}</span><div class="small">'
+                     f'{_e(GR.allowed(g["risque_grade"]))} (plafond {g["risque_max"]:g} %){flags}</div>'
                      f'<div class="small muted">{detail}</div>{wait}</div>')
     age = GR.age_h(grade, datetime.now(timezone.utc))
     stale = ""
