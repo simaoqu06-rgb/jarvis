@@ -224,6 +224,8 @@ def kill_refused(req: dict, words: list[str]) -> str:
         if "crypto" not in words:  # ticker lu comme une crypto : ce peut être une action du même nom (ex. l'ETF BTC)
             text += f" Si c'est l'action {sym}, ajoute `action` : `!prends {sym} {price}{stop} action kill`."
         return text
+    if sym in CRYPTO | set(config.WATCHLIST_CRYPTO):  # sans `action`, la commande serait relue comme la crypto
+        plain = f"`!prends {sym} {price}{stop} action`"
     return (f"Pas de KILL de Killmode aujourd'hui pour {sym} : `kill` refusé, rien n'est suivi. {plain} sans `kill` "
             "pour le suivre sur un plan recalculé.")
 

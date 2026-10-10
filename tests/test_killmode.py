@@ -876,8 +876,11 @@ async def test_prends_kill_refuse_hors_actions_ou_sans_kill(paths, monkeypatch):
     txt = await bot.handle("!prends AAPL 230 stop 226 kill")
     assert "Pas de KILL de Killmode aujourd'hui pour AAPL" in txt and "`!prends AAPL 230 stop 226` sans `kill`" in txt
     assert scheduler.book.trades == [] and asked == ["AAPL"]
-    await bot.handle("!prends BTC 60000 stop 59000 action kill")  # l'action BTC : cherche son KILL du jour
+    txt = await bot.handle("!prends BTC 60000 stop 59000 action kill")  # l'action BTC : cherche son KILL du jour
     assert asked == ["AAPL", "BTC"] and scheduler.book.trades == []
+    # Sans KILL du jour : la commande proposée garde `action`, sinon elle suivrait la crypto BTC.
+    assert "Pas de KILL de Killmode aujourd'hui pour BTC" in txt and "`!prends BTC 60000 stop 59000 action` sans `kill`" in txt
+    assert bot.parse_trade(["BTC", "60000", "stop", "59000", "action"])["market"] == "stock"
 
 
 def test_rouvre_un_go_confirme_reste_avec_jarvis():
