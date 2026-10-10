@@ -154,7 +154,28 @@ def test_grade_sur_les_r_a_20_euros(db):
 
 def test_signature_du_calcul(db):
     synthetic_trades(db, n_days=2, per_day=2)
-    assert GR.signature(db)[3] == GR.GRADE_CALC == 2  # version du calcul : changer de calcul force un recalcul
+    assert GR.signature(db)[3] == GR.GRADE_CALC == 3  # version du calcul : changer de calcul force un recalcul
+    assert GR.signature(db)[4] == "fixe"  # barème IBKR du compte : en changer recalcule aussi le grade
+
+
+def test_grade_au_bareme_ibkr_du_compte(db, monkeypatch):
+    """A7 : compte au Dégressif (JARVIS_IBKR_PLAN) : le grade compte r_20e_deg, pas le Fixe codé en dur ; l'écart
+    change de signe selon le nombre d'actions (le Dégressif coûte plus cher sur un stop serré)."""
+    from app.lab import strategies as ST
+    from app.trading import killmode as K
+
+    wide, tight = sim_result(9.7, "stop"), sim_result(9.95, "stop", stop=9.95)
+    fixe = [GR.cost_r("stock", -1.0, r) for r in (wide, tight)]
+    assert fixe == [ST.cost_variants("stock", json.loads(r))["r_20e"] for r in (wide, tight)]
+    synthetic_trades(db, n_days=2, per_day=2)
+    sig = GR.signature(db)
+    monkeypatch.setattr(K, "IBKR_PLAN", "degressif")
+    deg = [GR.cost_r("stock", -1.0, r) for r in (wide, tight)]
+    assert deg == [ST.cost_variants("stock", json.loads(r))["r_20e_deg"] for r in (wide, tight)]
+    assert deg[0] > fixe[0] and deg[1] < fixe[1]  # moins cher à 76 actions, plus cher à 460
+    assert GR.signature(db)[4] == "degressif" and GR.signature(db) != sig
+    assert M.compared_r("stock", wide, -1.0) == deg[0]  # le challenger est comparé au même R que le grade
+    assert GR.cost_r("crypto", -1.0, wide) == -1.0
 
 
 def test_fenetre_reelle_et_trou(db):
@@ -323,6 +344,64 @@ def test_nouvelle_methode_remet_a_zero(db):
     assert st["version"] == "v2" and st["rang"] is None  # ses trades d'avant ne comptent pas
     assert st["mesure"]["trades"] == 0
     assert any(h["source"] == "nouvelle méthode" for h in GR.history(db.conn))
+
+
+def test_promotion_actions_grade_hors_echantillon_et_crypto_intacte(db):
+    """A4 : après la promotion d'une règle actions, le grade actions ne lit plus les jours de l'essai qui ont décidé
+    la promotion (avant : 388 trades à +0,16 R, D+ et 0,25 % sans accord de Simão) : « non noté », 0 %. La crypto,
+    que la règle ne touche pas, garde son grade et sa fenêtre. 10 jours neufs plus tard, le grade actions est
+    recalculé sur eux seuls."""
+    from tests.test_lab3_method import NOW as M_NOW
+    from tests.test_lab3_method import challenger_ready, losers
+
+    synthetic_trades(db, n_days=40, per_day=10, market="crypto", first=date(2026, 8, 20), base=-0.3, noise=0.8, seed=9)
+    challenger_ready(db, losers, markets=["stock"])
+    GR.step(db, NOW)
+    crypto = state(db, "crypto")
+    assert state(db, "stock")["mesure"]["trades"] > 300 and crypto["rang"] is not None
+    assert M.judge_challenger(db, M_NOW) == "promouvoir"
+    M.enqueue_promotion(db.path, "v2-20", True)
+    assert M.ingest_decisions(db, M_NOW) == 1 and M.champion(db.conn)["version"] == "v2"
+    seen = M.version_settings(db.conn, "v2")["vu_a_la_promotion"]
+    assert seen["live:stock"] == db.conn.execute(
+        "SELECT MAX(day) FROM trades WHERE origin = 'live' AND market = 'stock'").fetchone()[0]
+    GR.step(db, NOW)
+    st = state(db, "stock")
+    assert st["version"] == "v2" and st["rang"] is None and st["mesure"]["trades"] == 0
+    g = GR.payload(db.conn)["marches"]["stock"]
+    assert g["non_note"] and g["risque_grade"] == 0.0
+    assert "après la mise en place de la méthode v2" in GR.window_text(st["mesure"]["fenetre"])
+    after = state(db, "crypto")
+    assert after["version"] == "v2" and after["rang"] == crypto["rang"]
+    assert after["mesure"]["trades"] == crypto["mesure"]["trades"]
+    assert after["mesure"]["fenetre"] == crypto["mesure"]["fenetre"]
+    reasons = [h["raison"] for h in GR.history(db.conn)]
+    assert "méthode v2 en place, mêmes filtres sur les crypto : grade gardé" in reasons
+    assert "méthode v2 en place : grade remis à zéro (hors échantillon)" in reasons
+    # 10 jours neufs : le grade actions est calculé sur eux seuls (trades gardés par v2).
+    synthetic_trades(db, n_days=10, per_day=20, first=date(2026, 11, 16), origin="live", base=0.2, noise=0.5, seed=33)
+    GR.step(db, NOW)
+    st = state(db, "stock")
+    fresh = db.conn.execute("SELECT COUNT(*) FROM trades WHERE market = 'stock' AND day >= '2026-11-16' AND triggered = 1 "
+                            "AND json_extract(context, '$.signal') <= 0.8").fetchone()[0]
+    assert st["mesure"]["trades"] == fresh >= 100 and st["mesure"]["fenetre"]["du"] == "2026-11-16"
+    assert st["rang"] is not None and state(db, "crypto")["rang"] == crypto["rang"]
+
+
+def test_grade_d_avant_le_suivi_par_marche(db):
+    """A4 : un grade enregistré avant ce suivi (sans empreinte de filtres) n'est pas remis à zéro par la mise à jour ;
+    sa version suffit à retrouver ses filtres."""
+    synthetic_trades(db, n_days=20, per_day=20, base=-0.3, noise=0.8)
+    GR.step(db, NOW)
+    st = state(db)
+    for k in ("generation", "filtres", "frontiere", "frontiere_version"):
+        st.pop(k)
+    db.set("grade", "stock", st)
+    db.set("grade_calc", "signature", None)
+    GR.step(db, NOW)
+    new = state(db)
+    assert new["rang"] == st["rang"] and new["change_le"] == st["change_le"] and new["frontiere"] is None
+    assert not any(h["source"] == "nouvelle méthode" for h in GR.history(db.conn))
 
 
 # --- Council du soir -------------------------------------------------------------------------------
