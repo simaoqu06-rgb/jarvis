@@ -6,7 +6,8 @@ du scanner (« écartées par la méthode vN ») et dans data/scans.jsonl. Le fi
 ou sans filtre : aucun filtre, une seule ligne de journal ; une erreur ici ne casse jamais le scanner.
 Hors scanner (`!plan`, `!prends`, API, plans crypto), plan_verdict évalue le même filtre (service.build_plan) :
 le grade est mesuré sur les trades que garde le champion, un plan écarté ne reçoit donc pas son risque
-(risque proposé 0 %, « écarté par la méthode vN »), il reste affiché.
+(risque proposé 0 %, « écarté par la méthode vN »), il reste affiché. Exception : `!prends … go`, dont le GO
+confirmé a déjà été gardé au scanner (le plan recalculé au déclenchement n'est pas refiltré).
 
 Les règles s'évaluent avec le SQL du labo (method.evaluate_rows) sur une ligne aux mêmes champs que
 le journal du labo (generator.py) :

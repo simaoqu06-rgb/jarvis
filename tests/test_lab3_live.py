@@ -416,3 +416,65 @@ async def test_scanner_reprend_le_verdict_du_plan(champ_file, scan_env, monkeypa
     result = await scanner.scan(NOW, Settings(None), save=False)
     assert [e["regles"] for e in result["ecartees_methode"]] == [["vu par build_plan"]]
     assert "BBB" not in [p["symbol"] for p in result["picks"]]
+
+
+async def test_prends_go_garde_la_taille_du_go_confirme(champ_file, full_db, monkeypatch):  # noqa: F811
+    """`!prends … go` : le GO confirmé a été gardé par le champion au scanner ; le plan recalculé au déclenchement
+    (stop plus large) n'est pas refiltré, il garde la taille du MP de confirmation et compte avec JARVIS, pas « à
+    ta règle » dans `!desaccords`. `!prends` sans `go` passe toujours par le filtre."""
+    from app import scheduler
+    from app.lab import generator as G
+    from app.notify import bot
+    from app.trading import confirm as CF
+    from tests.test_lab_generator import DAY as GEN_DAY
+
+    inp = G.stock_inputs(full_db, "AAA", GEN_DAY)
+    now = datetime.fromtimestamp(U.stock_decision_ts(GEN_DAY), timezone.utc)
+    by_interval = {15: inp["bars"], 1440: inp["daily"], 240: inp["h4"]}
+
+    async def fake_candles(symbol, market, interval, source=None, max_age=None, outputsize=None):
+        return by_interval[interval]
+
+    async def no_cat(symbol, now):
+        return None
+
+    monkeypatch.setattr(T, "candles", fake_candles)
+    monkeypatch.setattr(T.C, "safe_check", no_cat)
+    monkeypatch.setattr(GR, "current", lambda: GRADE_A | {"verifie_le": now.isoformat()})
+    monkeypatch.setenv("JARVIS_CAPITAL", "10000")
+    real_build = T.build_plan
+    p0 = await real_build("AAA", "stock", now=now)
+    tp1 = p0["targets"][0]["price"]
+    trigger = round(p0["entry"] + 0.9 * (tp1 - p0["entry"]), 2)  # déclenché sous TP1, stop plus large
+    thr = (p0["stop_pct"] - (trigger - p0["stop"]) / trigger * 100) / 2
+    write_champion(champ_file, [rule({"field": "plan.stop_pct", "op": "<", "value": thr}, name="stop trop large")])
+    p0 = await real_build("AAA", "stock", now=now)
+    assert p0["methode"]["garde"]  # le plan du scan est gardé : c'est un pick
+    g = GR.risk_now("stock", [], now)
+    risk = CF.rule_size(g, T.recommended_eur(g["risque_propose"]), T.rule_eur())
+    targets = [t["price"] for t in p0["targets"]]
+    mp = CF.event_text("AAA", {"stop": p0["stop"], "targets": targets, "entry": p0["entry"]},
+                       {"kind": "confirmé", "trigger": trigger, "vwap": p0["entry"]}, now, risk, 1.15, g)
+    book = T.Book(None)
+    monkeypatch.setattr(scheduler, "book", book)
+    today = datetime.now(timezone.utc).astimezone(T.NEW_YORK).date().isoformat()
+    monkeypatch.setattr(scheduler, "confirm_state", {"day": today, "closed": False, "gos": {
+        "AAA": {"status": "confirmé", "entry": p0["entry"], "stop": p0["stop"], "targets": targets,
+                "trigger": trigger, "composite": p0["score"]["composite"], "last_bar": None, "events": []}}})
+
+    async def build_at_now(*a, **k):
+        return await real_build(*a, **(k | {"now": now}))
+
+    monkeypatch.setattr(bot.trading, "build_plan", build_at_now)
+    txt = await bot.handle("!prends AAA go")
+    tr = book.trades[-1]
+    assert "methode" not in tr and not tr["grade"].get("ecarte") and "plan écarté" not in txt
+    assert f"**{tr['sizing']['quantity']} actions**" in mp  # la taille du MP de confirmation
+    assert not T.at_rule(tr) and not T.against_jarvis(tr)
+    st = T.disagreements(book)
+    assert st["regle"]["total"] == 0 and st["avec"]["total"] == 1
+    # Sans `go`, mêmes prix : le plan passe par le filtre de la méthode, comme tous les plans.
+    txt = await bot.handle(f"!prends AAA {trigger:g} stop {p0['stop']:g}")
+    tr = book.trades[-1]
+    assert tr["methode"] == {"garde": False, "regles": ["stop trop large"], "version": "v2"} and tr["sizing"] is None
+    assert "plan écarté par la méthode v2 (règle « stop trop large »)" in txt and T.at_rule(tr)

@@ -327,12 +327,14 @@ async def build_plan(
     symbol: str, market: str, side: str = "long", entry: float | None = None,
     stop: float | None = None, targets: list[float] | None = None, now: datetime | None = None,
     capital: float | None = None, risk_pct: float | None = None, source: str | None = None,
-    cat: dict | None = None,
+    cat: dict | None = None, methode: bool = True,
 ) -> dict:
     """Plan complet : niveaux, délais rejoués, checklist, catalyseur et note composite.
 
     Lit les bougies (et le catalyseur pour une action) puis confie le calcul à plan_from_bars.
     `cat` : catalyseur déjà lu (le scanner l'a en main) pour ne pas rappeler Finnhub.
+    `methode` False : pas de filtre de la méthode championne (`!prends … go` : le GO confirmé a déjà été gardé par
+    le champion au scanner, et le plan recalculé au déclenchement ne doit pas lui retirer la taille proposée).
     """
     symbol, market, side = symbol.strip().upper(), _market(market), side.lower()
     now = now or datetime.now(timezone.utc)
@@ -356,7 +358,7 @@ async def build_plan(
     # un plan qu'elle écarte ne reçoit pas son risque (apply_grade). None : aucune règle sur ce marché.
     from app.lab import live as LIVE  # import tardif : le labo importe ce module
 
-    methode = await LIVE.plan_verdict(plan, daily, now)
+    methode = await LIVE.plan_verdict(plan, daily, now) if methode else None
     apply_grade(plan, capital, risk_pct, now, usd_per_eur=await usd_per_eur(), methode=methode)
     return plan
 

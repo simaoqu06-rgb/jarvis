@@ -376,8 +376,10 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
                 req["entry"] = req["entry"] if req["entry"] is not None else go.get("trigger")
                 req["stop"] = req["stop"] if req["stop"] is not None else go["stop"]
                 req["targets"] = req["targets"] or go["targets"]
+            # Un GO confirmé a déjà été gardé par la méthode championne au scanner (seuls ses picks sont confirmés) :
+            # pas de second filtre sur le plan recalculé au déclenchement, il garde la taille du MP de confirmation.
             plan = await trading.build_plan(req["symbol"], req["market"], req["side"], req["entry"], req["stop"],
-                                            req["targets"])
+                                            req["targets"], methode=go is None)
             if go:
                 plan["policy"] = "go_confirme"
             if req.get("killmode"):
