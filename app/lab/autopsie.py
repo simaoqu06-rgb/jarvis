@@ -7,10 +7,12 @@ ne les lise.
 
 Ce que l'autopsie dit, par marché et setup pour v1 (table trades, version de génération), et par stratégie
 du labo v2 (table strat_trades) :
-- élan : parmi les trades « tranchés » (MFE ≥ +1 R, ou stop d'origine touché avant), la part qui touche
-  +1 R d'abord. Sans aucun avantage (marche aléatoire, sans frais), elle vaut 50 % : c'est la référence
-  qui ne dépend d'aucun choix de notre part. Même chose à +0,5 R (référence 1/1,5 ≈ 66,7 %). Intervalle
-  à 95 % en grappes par jour (stats.mean_ci), comme partout au labo ;
+- élan (descriptif) : parmi les trades « tranchés » (MFE ≥ +1 R, ou stop d'origine touché avant), la part qui
+  touche +1 R d'abord, avec un intervalle à 95 % en grappes par jour (stats.mean_ci). 50 % n'est qu'un
+  repère théorique (marche aléatoire sans dérive, barrières fixes à +1 R et −1 R) : ici il est biaisé vers
+  le bas (bougies de 5 min lues dans le pire ordre, trades sortis au stop remonté à l'entrée avant +1 R
+  écartés). Avis de GPT du 10 octobre : la vraie référence est un témoin apparié (même actif, séance,
+  géométrie), pas encore mesuré en MFE ; l'élan ne produit donc aucune piste à lui seul ;
 - stops d'origine : part des trades, puis parmi eux « jamais partis » (MFE < +0,1 R), « gain rendu »
   (MFE ≥ +1 R avant de revenir au stop) et le MFE médian ;
 - gagnants : part de ceux qui ont frôlé le stop (MAE ≤ −0,8 R) ou en ont fait la moitié (MAE ≤ −0,5 R) ;
@@ -79,8 +81,7 @@ class Prop:
         p, se, ci = STATS.mean_ci(self.days, float(self.k), self.n)
         out = {"n": self.n, "part": round(p, 4), "ic95": ci, "jours": len(self.days)}
         if ref is not None:
-            out["hasard"] = round(ref, 4)
-            out["z"] = round((p - ref) / se, 2) if se else None
+            out["repere_theorique"] = round(ref, 4)
         return out
 
 
@@ -152,14 +153,10 @@ class Autopsy:
 
 
 def pistes(m: dict) -> list[str]:
-    """Pistes de déclaration en clair (jamais des règles), d'après les repères et l'élan contre le hasard."""
+    """Questions à creuser en clair (jamais des règles ni des preuves) : MFE/MAE s'arrêtent à la sortie, et les
+    seuls gagnants ou perdants ne disent pas si un autre stop ou objectif ferait mieux : il faut re-simuler
+    tous les signaux dans une déclaration. L'élan n'en produit pas (pas de témoin apparié)."""
     out = []
-    e = m["elan_1r"]
-    if e.get("ic95") and e["n"] >= MIN_N:
-        if e["ic95"][1] < e["hasard"]:
-            out.append(f"entrée sans élan : +1 R avant le stop {e['part']:.0%} du temps, moins que le hasard (50 %)")
-        elif e["ic95"][0] > e["hasard"]:
-            out.append(f"élan réel : +1 R avant le stop {e['part']:.0%} du temps, mieux que le hasard (50 %)")
     s, g, t = m["stops"], m["gagnants"], m["sans_tp1"]
     if s["gain_rendu"] is not None and s["gain_rendu"] >= REPERES["gain_rendu"]:
         out.append(f"gain rendu : {s['gain_rendu']:.0%} des stops avaient touché +1 R (gestion de sortie à tester)")
@@ -263,13 +260,17 @@ def report(conn: sqlite3.Connection) -> dict:
     version = V.current_version(conn)
     return {"version": version, "v1": v1_report(conn, version), "strategies": strat_report(conn),
             "grade_indicatif": go_indicatif(conn),
-            "references": {"elan_1r": "50 % : part sans avantage (marche aléatoire) de toucher +1 R avant −1 R",
-                           "elan_05r": "66,7 % : même chose pour +0,5 R",
+            "references": {"elan_1r": "50 % : repère théorique seulement (marche aléatoire, barrières fixes) ; biaisé vers le bas "
+                                       "ici (bougies de 5 min, stop remonté à l'entrée) ; la référence valable serait "
+                                       "un témoin apparié, pas encore mesuré",
+                           "elan_05r": "66,7 % : même repère théorique pour +0,5 R",
                            "reperes": REPERES},
             "limites": ["MFE et MAE sont mesurés jusqu'à la sortie : rien ici ne dit où serait allé le prix après "
                         "un stop (horizons fixes, piste M2, à déclarer).",
-                        "Les pistes sont des hypothèses à pré-enregistrer, jamais des règles : choisir après coup "
-                        "le stop ou l'objectif « optimal » vu ici serait du surapprentissage.",
+                        "Les pistes sont des questions à déclarer, jamais des règles : choisir après coup le stop ou "
+                        "l'objectif « optimal » vu ici serait du surapprentissage ; un changement de stop ou "
+                        "d'objectif se juge en re-simulant tous les signaux (coûts et taille recalculés).",
+                        "L'élan est descriptif : 50 % n'est pas la référence du hasard dans ce simulateur.",
                         "Bloc scellé exclu ; MFE/MAE bruts (avant frais), en R du risque initial."]}
 
 
@@ -308,7 +309,7 @@ def _elan(e: dict | None) -> str:
         return "élan n/d"
     ci = e.get("ic95") or [None, None]
     rng = f" [{ci[0]:.0%} ; {ci[1]:.0%}]" if ci[0] is not None else ""
-    return f"+1 R avant stop {e['part']:.0%}{rng} (hasard 50 %)"
+    return f"+1 R avant stop {e['part']:.0%}{rng} (repère théorique 50 %, biaisé vers le bas)"
 
 
 def compact(data: dict | None, per_market: int = 6) -> dict | None:
@@ -321,7 +322,7 @@ def compact(data: dict | None, per_market: int = 6) -> dict | None:
             return {"trades": m["trades"], "echantillon_faible": True}
         e = m["elan_1r"]
         return {"trades": m["trades"], "jours": m["jours"], "esperance_r": m["esperance_r"],
-                "elan_1r": {k: e.get(k) for k in ("part", "ic95", "z")},
+                "elan_1r": {k: e.get(k) for k in ("part", "ic95", "n")},
                 "stops": {k: m["stops"][k] for k in ("part", "jamais_partis", "gain_rendu", "mfe_median_r")},
                 "gagnants_frole_stop": m["gagnants"]["frole_stop"], "presque_tp1": m["sans_tp1"]["presque_tp1"],
                 "pistes": m["pistes"]}
@@ -349,7 +350,7 @@ def indicatif_lines(gi: dict | None) -> list[str]:
 
 
 def text(data: dict | None, market: str | None = None) -> str:
-    """`!autopsie` (option `crypto` ou `actions`) : où les trades échouent, contre le hasard."""
+    """`!autopsie` (option `crypto` ou `actions`) : où les trades échouent (descriptif)."""
     if not data:
         return ("🩺 Autopsie pas encore calculée (le worker du labo la calcule à son prochain passage, "
                 "après le déploiement).")
@@ -372,7 +373,7 @@ def text(data: dict | None, market: str | None = None) -> str:
         strats = (data.get("strategies") or {}).get(mk) or {}
         best = [(k, v) for k, v in strats.items() if not v.get("echantillon_faible")]
         if best:
-            lines.append(f"**Stratégies {MARKET_FR[mk]}** (élan contre le hasard)")
+            lines.append(f"**Stratégies {MARKET_FR[mk]}** (élan, descriptif)")
             for key, m in sorted(best, key=lambda kv: -(kv[1]["elan_1r"].get("part") or 0))[:6]:
                 lines.append(f"-# {key} · {m['trades']} trades · {_elan(m['elan_1r'])}")
     gi = indicatif_lines(data.get("grade_indicatif"))

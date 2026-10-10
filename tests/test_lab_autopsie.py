@@ -23,10 +23,10 @@ def test_elan_au_niveau_du_hasard_et_stops_jamais_partis():
         acc.add(day, 1.0, "tp3", 1.4, -0.3, 1, 1.0)        # +1 R d'abord
         acc.add(day, -1.0, "stop", 0.05, -1.0, 0, 1.0)     # jamais parti
     m = acc.result()
-    assert m["trades"] == 100 and m["elan_1r"]["part"] == 0.5 and m["elan_1r"]["hasard"] == 0.5
+    assert m["trades"] == 100 and m["elan_1r"]["part"] == 0.5 and m["elan_1r"]["repere_theorique"] == 0.5
     assert m["stops"]["part"] == 0.5 and m["stops"]["jamais_partis"] == 1.0 and m["stops"]["gain_rendu"] == 0.0
     assert m["gagnants"]["frole_stop"] == 0.0 and m["sans_tp1"]["presque_tp1"] == 0.0
-    assert not any("élan" in p for p in m["pistes"])          # 50 % : ni pire ni mieux que le hasard
+    assert not any("élan" in p for p in m["pistes"])          # l'élan ne produit jamais de piste
     assert any("entrée trop tôt" in p for p in m["pistes"])
 
 
@@ -42,7 +42,7 @@ def test_pistes_sans_elan_gain_rendu_stop_dans_le_bruit_objectif_loin():
     assert m["sans_tp1"]["presque_tp1"] == 1.0
     text = " ".join(m["pistes"])
     assert "gain rendu" in text and "stop dans le bruit" in text and "objectif loin" in text
-    assert "élan réel" in text
+    assert "élan" not in text
 
 
 def test_echantillon_faible():
@@ -75,7 +75,7 @@ def test_rapport_v1_par_setup_hors_scelle_et_strategies():
     assert set(stock) - {"ensemble"} <= {"cassure_pivot", "rebond_pivot", "divergence", "tendance_sans_declencheur"}
     orb = rep["strategies"]["stock"]["orb30"]
     assert orb["trades"] == 40 and orb["elan_1r"]["part"] == 0.0 and orb["sans_tp1"]["presque_tp1"] == 0.0
-    assert any("sans élan" in p for p in orb["pistes"])
+    assert not any("élan" in p for p in orb["pistes"])
     assert rep["limites"] and rep["references"]["elan_1r"].startswith("50 %")
 
 
@@ -117,7 +117,7 @@ def test_textes():
     _go_rows(db)
     data = AUT.report(db.conn)
     txt = AUT.text(data)
-    assert "Autopsie" in txt and "hasard 50 %" in txt and "Grade indicatif" in txt
+    assert "Autopsie" in txt and "repère théorique 50 %" in txt and "Grade indicatif" in txt
     assert "crypto" not in AUT.text(data, "stock").lower().split("autopsie")[1][:40]
 
 
