@@ -190,7 +190,7 @@ def compared_r(market: str, result: str | None, r_net: float) -> float:
 
     try:
         r = ST.cost_variants("stock", json.loads(result))["r_20e"]
-    except (ValueError, KeyError, TypeError):
+    except (ValueError, KeyError, TypeError, ZeroDivisionError):  # comme grade.cost_r : stop à l'entrée
         r = None
     return r_net if r is None else r
 

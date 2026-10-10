@@ -433,6 +433,12 @@ def test_actions_comparees_a_la_mise_de_simao(db):
     assert r20 is not None and r20 < 1.95
     assert M.compared_r("stock", json.dumps(res), 1.95) == r20
     assert M.compared_r("crypto", json.dumps(res), 1.95) == 1.95 and M.compared_r("stock", "{}", 0.4) == 0.4
+    # Relecture d'intégration : un ordre au stop égal à l'entrée garde le R net, comme le grade (cost_r), au
+    # lieu de faire échouer la comparaison (bascule du challenger, !labo, statut).
+    from app.lab import grade as GR
+
+    flat = json.dumps(res | {"order_prices": {"entry": 100.0, "stop": 100.0, "targets": [104.0]}})
+    assert M.compared_r("stock", flat, 0.4) == 0.4 == GR.cost_r("stock", 0.4, flat)
     challenger_ready(db, losers, n_days=3, per_day=10)
     before = M.compare(db.conn, M.champion(db.conn), M.challenger(db.conn))["champion"]
     tid, r = db.conn.execute("SELECT id, r_net FROM trades WHERE origin = 'live' AND triggered = 1 LIMIT 1").fetchone()
