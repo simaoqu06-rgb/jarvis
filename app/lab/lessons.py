@@ -545,7 +545,8 @@ def proof(lesson: dict) -> str:
     if m.get("jours_rejeu") is None:  # mesure d'avant le compte par origine
         who = f"{m['n']} trades jamais vus par la leçon"
     elif m.get("vu_jusqu") is None:  # leçon sans frontière : ses jours ont pu être vus
-        who = f"{m['n']} trades ({m['jours_rejeu']} j de rejeu, {m.get('jours_direct') or 0} j du direct, leçon sans frontière)"
+        who = (f"{m['n']} trades ({m['jours_rejeu']} j de rejeu, "
+               f"{m.get('jours_direct') or 0} j du direct, leçon sans frontière)")
     else:
         who = (f"{m['n']} trades jamais vus par la leçon ({m['jours_rejeu']} j de rejeu, "
                f"{m.get('jours_direct') or 0} j du direct)")
