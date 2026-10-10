@@ -399,6 +399,17 @@ def test_copie_manuelle_respectee(tmp_path):
     assert len(_read(path, "SELECT * FROM archive_info")) == 4
 
 
+def test_seances_n9_sans_ligne_archivees(tmp_path):
+    """Une séance de la n° 9 sans ligne garde ses mesures (listes, amplitudes) : elles sont réécrites aussi."""
+    db = LabDB(str(tmp_path / "lab.db"))
+    db.set(P10.JOB, DAYS[0], {"mesure": 9, "listes": {"s10": [], "rebond": []}})
+    db.set(P10.JOB, DAYS[1], {"absente": True})
+    out = AUD.step(db)
+    assert out[f"plus10:m{P10.MESURE}"] == {"plus10_trades": {"choisies": 0, "ajoutees": 0, "deja_la": 0},
+                                            "plus10_seances": {"ajoutees": 1}}
+    assert [d for d, _ in _read(_archive(db), "SELECT day, value FROM plus10_seances")] == [DAYS[0]]
+
+
 def test_sans_ancienne_ligne_pas_de_fichier(tmp_path):
     db = LabDB(str(tmp_path / "lab.db"))
     db.replace_strat("replay", "stock", DAYS[0], [_strat("AAA")])

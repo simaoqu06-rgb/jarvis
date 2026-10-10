@@ -56,6 +56,8 @@ NOTES = {10: "mesures d'avant la n° 10 : simulateur révision 1, témoin sur la
 STRAT_KEY = ("origin", "market", "symbol", "day", "strategy", "slot")
 KILL_KEY = ("day", "symbol", "cout")
 PLUS10_KEY = ("day", "symbol", "essai")
+# n° 9 : séances calculées sous une autre mesure (leurs listes et amplitudes sont aussi réécrites, même sans ligne).
+SESSIONS = "job = ? AND json_extract(value, '$.mesure') IS NOT ? AND json_extract(value, '$.absente') IS NULL"
 INFO_DDL = (f"CREATE TABLE IF NOT EXISTS {ALIAS}.archive_info (archived_at TEXT NOT NULL, cle TEXT NOT NULL, "
             "tables TEXT, remplace TEXT, declaration INTEGER, lignes TEXT, note TEXT)")
 
@@ -82,18 +84,18 @@ def _jobs() -> list[dict]:
 
     out = [{"key": f"strats:{m}:d{declaration(m)}", "decl": declaration(m), "table": "strat_trades", "unique": STRAT_KEY,
             "where": "market = ? AND declaration IS NOT ?", "args": (m, declaration(m)),
-            "replaced": f"SELECT DISTINCT declaration FROM main.strat_trades WHERE market = ? AND declaration IS NOT ?"}
+            "replaced": "SELECT DISTINCT declaration FROM main.strat_trades WHERE market = ? AND declaration IS NOT ?"}
            for m in ("stock", "crypto")]
     cost = KC.cost_fingerprint()
     out.append({"key": f"kill_complet:{cost}", "decl": ST.DECLARATION, "table": "kill_complet", "unique": KILL_KEY,
                 "where": "cout IS NOT ?", "args": (cost,),
                 "replaced": "SELECT DISTINCT cout FROM main.kill_complet WHERE cout IS NOT ?"})
-    other = (f"day NOT IN (SELECT key FROM main.progress WHERE job = ? AND json_extract(value, '$.mesure') = ?)")
+    other = "day NOT IN (SELECT key FROM main.progress WHERE job = ? AND json_extract(value, '$.mesure') = ?)"
     out.append({"key": f"plus10:m{P10.MESURE}", "decl": ST.DECLARATION, "table": "plus10_trades", "unique": PLUS10_KEY,
                 "where": other, "args": (P10.JOB, P10.MESURE), "mesure": P10.MESURE, "job": P10.JOB,
-                "replaced": "SELECT DISTINCT json_extract(value, '$.mesure') FROM main.progress WHERE job = ? AND "
-                            "json_extract(value, '$.mesure') IS NOT ? AND json_extract(value, '$.absente') IS NULL"})
+                "replaced": f"SELECT DISTINCT json_extract(value, '$.mesure') FROM main.progress WHERE {SESSIONS}"})
     return out
+
 
 
 def _columns(conn: sqlite3.Connection, schema: str, table: str) -> list[str]:
@@ -119,9 +121,8 @@ def _copy(conn: sqlite3.Connection, table: str, unique: tuple, where: str, args:
 def _sessions(conn: sqlite3.Connection, job: str, mesure: int) -> int:
     """n° 9 : mesures par séance (listes, amplitudes…) d'une autre mesure, telles quelles (plus10_seances)."""
     conn.execute(f"CREATE TABLE IF NOT EXISTS {ALIAS}.plus10_seances (day TEXT PRIMARY KEY, value TEXT)")
-    return conn.execute(f"INSERT OR IGNORE INTO {ALIAS}.plus10_seances SELECT key, value FROM main.progress WHERE job = ? "
-                        "AND json_extract(value, '$.mesure') IS NOT ? AND json_extract(value, '$.absente') IS NULL",
-                        (job, mesure)).rowcount
+    return conn.execute(f"INSERT OR IGNORE INTO {ALIAS}.plus10_seances SELECT key, value FROM main.progress WHERE "
+                        f"{SESSIONS}", (job, mesure)).rowcount
 
 
 def pending(db: LabDB) -> list[dict]:
@@ -135,6 +136,8 @@ def pending(db: LabDB) -> list[dict]:
                                 job["args"]).fetchone()[0]
         except sqlite3.OperationalError:  # table absente (base d'avant la déclaration qui l'a créée)
             n = 0
+        if "job" in job:  # n° 9 : des séances sans ligne ont aussi leurs mesures à garder
+            n += db.conn.execute(f"SELECT COUNT(*) FROM progress WHERE {SESSIONS}", job["args"]).fetchone()[0]
         if n:
             out.append(job)
         else:
