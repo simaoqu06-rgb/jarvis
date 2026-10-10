@@ -291,10 +291,11 @@ def _mean(s: float, n: int) -> float | None:
 
 def measure(conn, lesson: dict, version: str, r20_cache: dict | None = None) -> dict:
     """Mesures d'une leçon : trades concernés contre l'ensemble (trades déclenchés de la version,
-    gardés par le champion, marchés de la leçon). Jours de la mesure par origine (jours_rejeu, jours_direct :
-    rejeu historique jamais vu ou direct). Trades d'actions concernés aussi au R de la mise de Simão
-    (method.compared_r : 20 €, frais IBKR, comme le challenger et le grade ; crypto : R du labo), seulement pour
-    eux (le coût reste celui du grade) ; `r20_cache` : {id du trade: R}, partagé par les leçons d'un passage."""
+    gardés par le champion, marchés de la leçon). Jours des trades CONCERNÉS par origine (jours_rejeu,
+    jours_direct : rejeu historique jamais vu ou direct ; « jours », celui du z et de MIN_DAYS, reste celui de
+    l'ensemble). Trades d'actions concernés aussi au R de la mise de Simão (method.compared_r : 20 €, frais IBKR,
+    comme le challenger et le grade ; crypto : R du labo), seulement pour eux (le coût reste celui du grade) ;
+    `r20_cache` : {id du trade: R}, partagé par les leçons d'un passage."""
     from app.lab import method as M  # import tardif : method importe le validateur, comme ce module
 
     canon = {"cond": lesson["cond"], "markets": lesson["markets"]}
@@ -320,19 +321,18 @@ def measure(conn, lesson: dict, version: str, r20_cache: dict | None = None) -> 
         args += lesson["markets"]
     day_sums: dict[str, list] = {}
     tp_all = tp_hit = 0
-    live_days, r20 = set(), [0.0, 0, 0]  # [ΣR comparé des concernés, n, dont actions]
+    live_hit, replay_hit, r20 = set(), set(), [0.0, 0, 0]  # jours des concernés ; [ΣR comparé des concernés, n, dont actions]
     cache = {} if r20_cache is None else r20_cache
     for tid, day, origin, market, r, tp1, hit, result in conn.execute(sql, args):
         d = day_sums.setdefault(day, [0.0, 0, 0.0, 0])
         d[0] += r
         d[1] += 1
         tp_all += tp1 or 0
-        if origin == "live":
-            live_days.add(day)
         if hit:
             d[2] += r
             d[3] += 1
             tp_hit += tp1 or 0
+            (live_hit if origin == "live" else replay_hit).add(day)
             if market == "stock" and tid not in cache:
                 cache[tid] = M.compared_r(market, result, r)
             r20[0] += cache[tid] if market == "stock" else r
@@ -344,7 +344,7 @@ def measure(conn, lesson: dict, version: str, r20_cache: dict | None = None) -> 
         "tp1": round(tp_hit / n_hit, 4) if n_hit else None, "tp1_ensemble": round(tp_all / n_all, 4) if n_all else None,
         # Espérance des concernés à la mise de Simão, s'il y a des actions (crypto en R du labo, comme le grade).
         "esperance_20e_r": round(r20[0] / r20[1], 4) if r20[2] else None,
-        "jours_rejeu": len(set(day_sums) - live_days), "jours_direct": len(live_days),
+        "jours_rejeu": len(replay_hit - live_hit), "jours_direct": len(live_hit),
         "version": version, "apres_trade": lesson.get("apres_trade"), "vu_jusqu": seen}
 
 

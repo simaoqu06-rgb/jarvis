@@ -437,6 +437,26 @@ def test_jours_de_rejeu_et_du_direct_et_etiquette_historique(db, tmp_path, monke
     assert L.adjustment([live_item(x["id"]) | {"jours_direct": L.MIN_DAYS}])["lignes"] == [f"+0.5 #{x['id']} Leçon {x['id']}"]
 
 
+def test_jours_de_rejeu_et_du_direct_comptes_sur_les_trades_concernes(db):
+    """Relecture de la fusion (L2) : jours_rejeu et jours_direct sont les jours des trades CONCERNÉS (la preuve les
+    accroche à eux). Une leçon sans aucun trade concerné du direct reste « (historique) », même après 25 jours où
+    l'ensemble a des trades du direct ; « jours » (l'ensemble) reste celui du z et de MIN_DAYS."""
+    x = add(db, lesson())
+    synthetic_trades(db, n_days=100, per_day=20, effect=pivot_effect)
+    synthetic_trades(db, n_days=25, per_day=20, effect=pivot_effect, first=date(2026, 9, 1), origin="live", seed=3)
+    db.conn.execute("UPDATE trades SET context = json_set(context, '$.setup', 'autre') WHERE origin = 'live'")
+    db.conn.commit()
+    L.measure_all(db)
+    x = L.get(db.conn, x["id"])
+    m = x["mesures"]
+    hit_days = {d for (d,) in db.conn.execute(
+        "SELECT DISTINCT day FROM trades WHERE triggered = 1 AND json_extract(context, '$.setup') = 'cassure_pivot'")}
+    assert x["etat"] == "confirmee" and m["jours"] == 125
+    assert m["jours_direct"] == 0 and m["jours_rejeu"] == len(hit_days)
+    assert f"({len(hit_days)} j de rejeu, 0 j du direct) :" in L.proof(x)
+    assert L.line(x).startswith("✅ (historique) 👍")
+
+
 def test_lecon_actions_favorable_au_labo_qui_perd_a_20_euros_est_relative(db, monkeypatch):
     """Scénario 3 de GPT : une leçon d'actions à +0,05 R du labo qui perd à 20 € (commission IBKR) n'est pas un
     gain pour le compte de Simão : la plus basse des deux espérances décide, le texte dit « à 20 € »."""
