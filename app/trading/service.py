@@ -381,13 +381,14 @@ def recommended_eur(pct: float | None, capital: float | None = None) -> float | 
 def euro_sizing(entry: float, stop: float, market: str, risk_eur: float, usd_per_eur: float,
                 capital: float | None = None) -> dict | None:
     """Taille pour `risk_eur` € de risque au change `usd_per_eur` (gardé dans la taille) : actions en nombre entier
-    (0 quand une seule action dépasse ce risque : pas d'ordre), crypto en quantité fractionnaire. La taille découle
-    du stop, le levier de la taille."""
+    (0 quand une seule action dépasse ce risque : pas d'ordre), crypto en quantité fractionnaire arrondie vers le bas
+    à 6 décimales (jamais plus de risque que prévu). La taille découle du stop, le levier de la taille."""
     unit = abs(entry - stop)
     if not unit or risk_eur <= 0:
         return None
     risk_usd = risk_eur * usd_per_eur
-    quantity = math.floor(risk_usd / unit + 1e-9) if market == "stock" else round(risk_usd / unit, 6)
+    quantity = (math.floor(risk_usd / unit + 1e-9) if market == "stock"
+                else math.floor(risk_usd / unit * 1e6 + 1e-9) / 1e6)
     notional = quantity * entry
     return {"capital": capital, "risk_pct": round(risk_eur / capital * 100, 3) if capital else None,
             "risk_amount_eur": round(risk_eur, 2), "risk_amount": round(risk_usd, 2), "eurusd": usd_per_eur,
@@ -516,12 +517,22 @@ def _amount(x: float, digits: int = 2) -> str:
     return f"{x:.{digits}f}".replace(".", ",")
 
 
+def crypto_qty(q: float) -> str:
+    """Quantité crypto en clair, sans notation scientifique ni arrondi vers le haut : au plus 6 chiffres significatifs
+    (tronqués), jamais moins que la partie entière, espaces comme les montants (« 37 096 774 », « 0.023 »)."""
+    if q <= 0:
+        return "0"
+    digits = max(0, min(6, 5 - math.floor(math.log10(q))))  # décimales gardées
+    text = f"{math.floor(q * 10 ** digits + 1e-9) / 10 ** digits:,.{digits}f}".replace(",", " ")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
 def _quantity(p: dict, s: dict) -> str:
     """Taille en clair : actions entières (« pas d'ordre » quand une seule action dépasse le risque), crypto en
     quantité."""
     q = s["quantity"]
     if p.get("market") != "stock":
-        return f"taille {q:g} pour {_num(s['notional'])} $" + (
+        return f"taille {crypto_qty(q)} pour {_num(s['notional'])} $" + (
             f" · levier {s['leverage']:g}×" if (s.get("leverage") or 1) > 1 else "")
     if q < 1:
         return (f"pas d'ordre, 1 action = {_amount(s['unit_risk_eur'])} € de risque, au-delà de "

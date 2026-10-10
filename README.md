@@ -447,6 +447,7 @@ trade terminé, comparé à une sortie au moment du conseil (ligne « Bilan des 
 | `!avis NVDA` | avis de JARVIS : entrer long, entrer short ou attendre, pourquoi, ce qui invaliderait, et ce que le labo a mesuré |
 | `!prends NVDA` | calcule le plan et suit le trade (TP/SL annoncés, cockpit) ; `!prends NVDA 132.5 stop 128` = ton entrée et ton stop réels |
 | `!prends NVDA 132.5 go` | suit le GO confirmé du jour avec son stop et ses objectifs (pas recalculés) ; sans GO confirmé ce jour, rien n'est suivi |
+| `!prends ACME 106.6 kill` | suit le KILL de Killmode du jour (sa taille de 20 €, sa gestion) ; refusé pour une crypto ou sans KILL noté ce jour (`action` force l'action d'un ticker lu comme crypto, ex. l'ETF BTC) |
 | `!sortie NVDA 131.2` | ta sortie réelle : clôture le trade suivi à ce prix, ou corrige le prix de sa dernière sortie s'il est déjà terminé |
 | `!positions` | trades suivis : sortir, alléger ou garder, avec les faits (aussi envoyé seul 30 min avant la clôture US) |
 | `!position NVDA 132.5` | même conseil pour une position prise hors de JARVIS (`short`, `stop 128` en plus) |
