@@ -32,6 +32,11 @@ lignes de la déclaration n° 7 (sortie déclarée r_sans_be), par trade exécut
 quand aucun ordre ne part). Indicatif : il ne change ni le grade officiel ni le risque proposé. Sa fenêtre
 (FENETRE_JOURS jours présents dans la base) publie son étendue réelle (stats.span, avis du 10 octobre, I5) :
 elle peut enjamber le trou entre la fin du rejeu et le direct.
+
+Scénario 3 de GPT (10 octobre 2026) : une stratégie perdante paraissait bonne, triée par élan à côté d'un repère
+« 50 % ». Chaque ligne de stratégie dit son espérance (actions : à la mise de Simão, colonne r_20e de la ligne,
+commission IBKR comprise ; sinon l'unité est dite) et les stratégies sont triées par nombre de trades ; le grade
+indicatif des GO confirmés dit aussi son espérance à 20 € par trade.
 """
 import sqlite3
 from collections import defaultdict
@@ -104,12 +109,16 @@ class Autopsy:
         self.no_tp1 = 0
         self.no_tp1_near = 0
         self.no_tp1_known = 0
+        self.r20 = [0.0, 0]  # actions : Σ et nombre des R à la mise de Simão (r_20e de la ligne)
 
     def add(self, day: str, r: float, exit_reason: str | None, mfe: float, mae: float, tp1_hit,
-            tp1_r: float | None) -> None:
+            tp1_r: float | None, r20: float | None = None) -> None:
         self.n += 1
         self.r_sum += r
         self.days.add(day)
+        if r20 is not None:
+            self.r20[0] += r20
+            self.r20[1] += 1
         stopped = exit_reason == "stop"
         for key, level in (("1r", 1.0), ("05r", 0.5)):
             if mfe >= level:
@@ -138,6 +147,8 @@ class Autopsy:
 
         out = {
             "trades": self.n, "jours": len(self.days), "esperance_r": round(self.r_sum / self.n, 4),
+            "esperance_20e_r": round(self.r20[0] / self.r20[1], 4) if self.r20[1] else None,
+            "trades_20e": self.r20[1],
             "elan_1r": self.elan["1r"].result(REF_ELAN["1r"]),
             "elan_05r": self.elan["05r"].result(REF_ELAN["05r"]),
             "stops": {"part": round(self.stops / self.n, 4), "n": self.stops,
@@ -183,7 +194,7 @@ WHERE triggered = 1 AND r_net IS NOT NULL AND mfe_r IS NOT NULL AND mae_r IS NOT
   AND day NOT BETWEEN ? AND ?{version}
 """
 STRAT_QUERY = """
-SELECT market, strategy, day, r_net, exit_reason, mfe_r, mae_r, tp1_hit
+SELECT market, strategy, day, r_net, exit_reason, mfe_r, mae_r, tp1_hit, r_20e
 FROM strat_trades
 WHERE triggered = 1 AND r_net IS NOT NULL AND mfe_r IS NOT NULL AND mae_r IS NOT NULL
   AND day NOT BETWEEN ? AND ?
@@ -208,9 +219,9 @@ def v1_report(conn: sqlite3.Connection, version: str | None) -> dict:
 
 def strat_report(conn: sqlite3.Connection) -> dict:
     groups: dict = defaultdict(Autopsy)
-    for market, strat, day, r, why, mfe, mae, tp1 in conn.execute(STRAT_QUERY, SEAL.bounds()):
+    for market, strat, day, r, why, mfe, mae, tp1, r20 in conn.execute(STRAT_QUERY, SEAL.bounds()):
         tp1_r = None if strat.startswith("go_") else 1.0  # GO : objectif du plan v1, absent de la ligne
-        groups[(market, strat)].add(day, r, why, mfe, mae, tp1, tp1_r)
+        groups[(market, strat)].add(day, r, why, mfe, mae, tp1, tp1_r, r20 if market == "stock" else None)
     out: dict = {}
     for (market, strat), acc in sorted(groups.items(), key=lambda kv: -kv[1].n):
         out.setdefault(market, {})[strat] = acc.result()
@@ -237,6 +248,10 @@ def go_indicatif(conn: sqlite3.Connection) -> dict:
             f"AND triggered = 1 AND {col} IS NOT NULL AND day >= ? AND day NOT BETWEEN ? AND ? "
             f"ORDER BY COALESCE(filled_at, signal_at), id", (strat, cutoff, lo, hi))]
         m = GRADE.evaluate(rows)
+        n20, r20 = conn.execute(  # mêmes trades, à la mise de Simão (r_20e de la ligne, commission IBKR comprise)
+            f"SELECT COUNT(r_20e), AVG(r_20e) FROM strat_trades WHERE market = 'stock' AND strategy = ? "
+            f"AND triggered = 1 AND {col} IS NOT NULL AND day >= ? AND day NOT BETWEEN ? AND ?",
+            (strat, cutoff, lo, hi)).fetchone()
         day_sums: dict = {}
         n = 0
         total = 0.0
@@ -253,6 +268,7 @@ def go_indicatif(conn: sqlite3.Connection) -> dict:
                       "par_trade": {k: m.get(k) for k in ("grade", "trades", "jours", "esperance_r", "ic95",
                                                           "moities_r", "serie_pertes", "serie_attendue",
                                                           "reussite", "tp1", "raison")},
+                      "par_trade_20e": {"trades": n20, "esperance_r": round(r20, 4) if r20 is not None else None},
                       "par_go": {"go": n, "jours": len(day_sums),
                                  "esperance_r": round(mean, 4) if mean is not None else None, "ic95": ci},
                       "fenetre": STATS.span(days)}
@@ -338,7 +354,7 @@ def compact(data: dict | None, per_market: int = 6) -> dict | None:
             return {"trades": m["trades"], "echantillon_faible": True}
         e = m["elan_1r"]
         return {"trades": m["trades"], "jours": m["jours"], "esperance_r": m["esperance_r"],
-                "elan_1r": {k: e.get(k) for k in ("part", "ic95", "n")},
+                "esperance_20e_r": m.get("esperance_20e_r"), "elan_1r": {k: e.get(k) for k in ("part", "ic95", "n")},
                 "stops": {k: m["stops"][k] for k in ("part", "jamais_partis", "gain_rendu", "mfe_median_r")},
                 "gagnants_frole_stop": m["gagnants"]["frole_stop"], "presque_tp1": m["sans_tp1"]["presque_tp1"],
                 "pistes": m["pistes"]}
@@ -364,11 +380,30 @@ def indicatif_lines(gi: dict | None) -> list[str]:
         gap = (f" · fenêtre discontinue : trou de {win['trou_max_jours']} jours, {win['jours_direct']} jours en direct"
                if (win.get("trou_max_jours") or 0) > STATS.GAP_DAYS else "")
         lines.append(f"-# {res['nom']} : **{t['grade']}** indicatif · {t['esperance_r']:+.3f} R par trade "
-                     f"(IC95 {ci[0]:+.3f} ; {ci[1]:+.3f}) sur {t['trades']} trades / {t['jours']} jours · {per_go}{gap}")
+                     f"(IC95 {ci[0]:+.3f} ; {ci[1]:+.3f}) sur {t['trades']} trades / {t['jours']} jours"
+                     f"{_at_20(res.get('par_trade_20e'), t['trades'])} · {per_go}{gap}")
     part = next((res["partiel"] for res in (gi or {}).values() if res.get("partiel")), None)
     if part:
         lines.append(f"-# ⏳ Grade indicatif : {_partial_text(part)}")
     return lines
+
+
+def _at_20(r20: dict | None, trades: int) -> str:
+    """« · à 20 € : −0,120 R par trade » du grade indicatif (sa lettre se lit en R du labo, pas à ta taille)."""
+    if not r20 or r20.get("esperance_r") is None:
+        return " · à 20 € : n/d"
+    part = f" (sur {r20['trades']})" if r20["trades"] < trades else ""
+    return f" · à 20 € : {r20['esperance_r']:+.3f} R par trade{part}"
+
+
+def _esp(m: dict, market: str) -> str:
+    """Espérance d'une ligne de stratégie avec son unité : à 20 € en actions quand la ligne la porte."""
+    if market != "stock":
+        return f"{m['esperance_r']:+.3f} R (frais OKX compris)"
+    if m.get("esperance_20e_r") is None:
+        return f"{m['esperance_r']:+.3f} R du labo (avant commission IBKR à 20 €)"
+    part = f" (sur {m['trades_20e']} trades)" if (m.get("trades_20e") or 0) < m["trades"] else ""
+    return f"{m['esperance_20e_r']:+.3f} R à 20 €{part}"
 
 
 def _partial_text(part: dict) -> str:
@@ -392,7 +427,8 @@ def text(data: dict | None, market: str | None = None) -> str:
         groups = (data.get("v1") or {}).get(mk) or {}
         if not groups:
             continue
-        lines.append(f"\n**v1 {MARKET_FR[mk]}**")
+        unit = "R du labo, avant commission IBKR à 20 €" if mk == "stock" else "R du labo, frais OKX compris"
+        lines.append(f"\n**v1 {MARKET_FR[mk]}** ({unit})")
         for key, m in list(groups.items())[:5]:
             if m.get("echantillon_faible"):
                 continue
@@ -405,9 +441,10 @@ def text(data: dict | None, market: str | None = None) -> str:
         strats = (data.get("strategies") or {}).get(mk) or {}
         best = [(k, v) for k, v in strats.items() if not v.get("echantillon_faible")]
         if best:
-            lines.append(f"**Stratégies {MARKET_FR[mk]}** (élan, descriptif)")
-            for key, m in sorted(best, key=lambda kv: -(kv[1]["elan_1r"].get("part") or 0))[:6]:
-                lines.append(f"-# {key} · {m['trades']} trades · {_elan(m['elan_1r'])}")
+            lines.append(f"**Stratégies {MARKET_FR[mk]}** (les plus fournies d'abord ; espérance par trade, élan "
+                         "descriptif)")
+            for key, m in sorted(best, key=lambda kv: -kv[1]["trades"])[:6]:
+                lines.append(f"-# {key} · {m['trades']} trades · {_esp(m, mk)} · {_elan(m['elan_1r'])}")
     gi = indicatif_lines(data.get("grade_indicatif"))
     if gi:
         lines.append("\n**Grade indicatif des GO confirmés** (ne change ni le grade ni le risque)")
