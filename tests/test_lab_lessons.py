@@ -437,6 +437,26 @@ def test_jours_de_rejeu_et_du_direct_et_etiquette_historique(db, tmp_path, monke
     assert L.adjustment([live_item(x["id"]) | {"jours_direct": L.MIN_DAYS}])["lignes"] == [f"+0.5 #{x['id']} Leçon {x['id']}"]
 
 
+def test_jours_de_rejeu_et_du_direct_comptes_sur_les_trades_concernes(db):
+    """Relecture de la fusion (L2) : jours_rejeu et jours_direct sont les jours des trades CONCERNÉS (la preuve les
+    accroche à eux). Une leçon sans aucun trade concerné du direct reste « (historique) », même après 25 jours où
+    l'ensemble a des trades du direct ; « jours » (l'ensemble) reste celui du z et de MIN_DAYS."""
+    x = add(db, lesson())
+    synthetic_trades(db, n_days=100, per_day=20, effect=pivot_effect)
+    synthetic_trades(db, n_days=25, per_day=20, effect=pivot_effect, first=date(2026, 9, 1), origin="live", seed=3)
+    db.conn.execute("UPDATE trades SET context = json_set(context, '$.setup', 'autre') WHERE origin = 'live'")
+    db.conn.commit()
+    L.measure_all(db)
+    x = L.get(db.conn, x["id"])
+    m = x["mesures"]
+    hit_days = {d for (d,) in db.conn.execute(
+        "SELECT DISTINCT day FROM trades WHERE triggered = 1 AND json_extract(context, '$.setup') = 'cassure_pivot'")}
+    assert x["etat"] == "confirmee" and m["jours"] == 125
+    assert m["jours_direct"] == 0 and m["jours_rejeu"] == len(hit_days)
+    assert f"({len(hit_days)} j de rejeu, 0 j du direct) :" in L.proof(x)
+    assert L.line(x).startswith("✅ (historique) 👍")
+
+
 def test_lecon_actions_favorable_au_labo_qui_perd_a_20_euros_est_relative(db, monkeypatch):
     """Scénario 3 de GPT : une leçon d'actions à +0,05 R du labo qui perd à 20 € (commission IBKR) n'est pas un
     gain pour le compte de Simão : la plus basse des deux espérances décide, le texte dit « à 20 € »."""
@@ -478,6 +498,40 @@ def test_lecon_a_confirmer_favorable_qui_perd_encore_est_relative(db):
     assert x["etat"] == "a_confirmer"
     assert L.proof(x).endswith("relative : moins mauvais que la moyenne, perd encore 0,10 R")
     assert L.line(x).startswith("🔎 👍")  # « (historique) » ne vise que les confirmées
+
+
+def test_lecon_favorable_qui_fait_pire_que_l_ensemble_n_est_pas_moins_mauvaise(db, tmp_path, monkeypatch):
+    """Relecture de la fusion (L1) : une favorable « à confirmer » (ou une confirmée retombée) dont les trades
+    concernés font PIRE que l'ensemble ne dit pas « moins mauvais que la moyenne » : elle dit « pas mieux que la
+    moyenne » et garde « perd encore X R », dans !lecons, dans la preuve de la routine et dans le plan du direct."""
+    x = add(db, lesson())
+    synthetic_trades(db, n_days=12, per_day=20, effect=lambda c, r: -0.15 if c["setup"] == "cassure_pivot" else 0.0,
+                     base=-0.2, seed=4)
+    L.measure_all(db)
+    x = L.get(db.conn, x["id"])
+    m = x["mesures"]
+    assert x["etat"] == "a_confirmer" and m["esperance_r"] < m["esperance_ensemble_r"] < 0 and m["ecart_r"] < 0
+    lost = f"{abs(m['esperance_r']):.2f}".replace(".", ",")
+    assert L.proof(x).endswith(f" · pas mieux que la moyenne, perd encore {lost} R")
+    assert "moins mauvais" not in L.text(db.conn) and "moins mauvais" not in json.dumps(L.brief(db.conn))
+    # Mesure sur un seul jour (écart du z inconnu) : l'écart vient des deux espérances.
+    one_day = {"n": 40, "esperance_r": -0.3, "esperance_ensemble_r": -0.1, "ecart_r": None, "jours_rejeu": 1,
+               "jours_direct": 0, "vu_jusqu": {}}
+    assert L.proof(x | {"mesures": one_day}).endswith(" · pas mieux que la moyenne, perd encore 0,30 R")
+    # Confirmée dont l'écart est retombé sous 0 (hystérésis) : le fichier du direct porte l'écart, le plan le dit.
+    db.conn.execute("UPDATE lessons SET status = 'confirmee', metrics = ? WHERE id = ?",
+                    (json.dumps(m | {"palier_juge": 0}), x["id"]))
+    L.write_live(db)
+    (item,) = json.loads(L.live_path(db.path).read_text())["lecons"]
+    assert item["ecart_r"] == m["ecart_r"]
+    write_live(tmp_path, monkeypatch, [item])
+    (line,) = L.adjustment(L.current())["lignes"]
+    assert line.endswith(f"(historique ; pas mieux que la moyenne, perd encore {lost} R)")
+    # Le texte « moins mauvais » reste quand l'écart est positif (ou inconnu : fichier d'avant l'écart).
+    assert L.relative("favorable", -0.2, None, 0.05) == "relative : moins mauvais que la moyenne, perd encore 0,20 R"
+    assert L.relative("favorable", -0.2, None, None) == "relative : moins mauvais que la moyenne, perd encore 0,20 R"
+    assert L.relative("favorable", -0.2, -0.4, 0.0) == "pas mieux que la moyenne, perd encore 0,40 R à 20 €"
+    assert L.relative("favorable", 0.1, None, -0.2) is None and L.relative("defavorable", -0.2, None, -0.1) is None
 
 
 async def test_sans_lecon_ou_en_erreur_plan_inchange(db, tmp_path, monkeypatch, caplog):

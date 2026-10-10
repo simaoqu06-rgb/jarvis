@@ -465,19 +465,21 @@ def _kept_mean(windows: list[dict]) -> float | None:
 
 
 def days_fr(m: dict) -> str | None:
-    """Catégorie des jours de test (validator.day_categories, avis de GPT du 10 octobre 2026) : « Jours de test : 70
-    historiques jamais lus (rejeu), 5 du direct. » ; sans jour du direct, la règle n'est validée que sur l'historique
-    et c'est le challenger, jugé sur le direct seul, qui décidera. None pour une règle testée avant ce compte."""
+    """Catégorie des jours après la frontière (validator.day_categories, avis de GPT du 10 octobre 2026) : « Jours
+    neufs depuis la soumission : 70 historiques jamais lus (rejeu), 5 du direct. » ; sans jour du direct, la règle
+    n'est validée que sur l'historique et c'est le challenger, jugé sur le direct seul, qui décidera. Pas « jours de
+    test » : le compte inclut le 1er bloc du walk-forward (ajustement seul) et les jours d'embargo, jamais testés.
+    None pour une règle testée avant ce compte."""
     cats = m.get("jours_par_categorie")
     if not cats:
         return None
     direct = cats.get("prospectif") or 0
     if m.get("frontiere") is None:  # règle d'avant la frontière : ses jours ont pu être vus
-        head = (f"Jours de test : {cats.get('historique_exploratoire') or 0} jours qui ont pu être lus avant la règle "
+        head = (f"Jours de données : {cats.get('historique_exploratoire') or 0} jours qui ont pu être lus avant la règle "
                 "(sans frontière)")
     else:
-        head = (f"Jours de test : {cats.get('historique_non_consulte') or 0} historiques jamais lus (rejeu), "
-                f"{direct} du direct")
+        head = (f"Jours neufs depuis la soumission : {cats.get('historique_non_consulte') or 0} historiques jamais lus "
+                f"(rejeu), {direct} du direct")
     return head + (" ; validée sur l'historique seulement : le challenger en direct décidera." if not direct
                    or m.get("frontiere") is None else ".")
 
@@ -707,13 +709,14 @@ def _where(cmp: dict) -> str:
 
 def absolute_label(h: dict, delta: float | None = None) -> str:
     """Étiquette absolue des trades gardés (« méthode toujours perdante »…) ; vide si rien à dire. Un filtre peut
-    seulement perdre moins : « moins perdant » seulement quand l'écart relatif `delta` est positif (une promotion
-    l'est toujours). Espérance positive : « non prouvée » tant que la borne basse de son IC95 n'est pas > 0."""
+    seulement perdre moins : « moins perdant » seulement quand l'écart relatif `delta` est connu et positif (inconnu
+    sous 2 jours de trades : rien ne dit que le filtre perd moins). Espérance positive : « non prouvée » tant que la
+    borne basse de son IC95 n'est pas > 0."""
     e = h.get("esperance_r")
     if e is None:
         return ""
     if e <= 0:
-        return "filtre moins perdant, méthode toujours perdante" if delta is None or delta > 0 else \
+        return "filtre moins perdant, méthode toujours perdante" if delta is not None and delta > 0 else \
             "méthode toujours perdante"
     ci = h.get("ic95")
     if ci and ci[0] is not None and ci[0] <= 0:
@@ -733,7 +736,7 @@ def promotion_text(cmp: dict, cfg: dict, champ: dict, chall: dict, look: int) ->
             f"jours de trades{_where(cmp)} : {fr(cmp['delta_r'], 3)} par trade de mieux que {champ['version']}, "
             f"z = {num_fr(cmp['z'])}, {threshold_fr(cmp, cfg)} ; {fr(h['esperance_r'], 3)} par trade sur "
             f"{h['declenches']} trades gardés, contre {fr(c['esperance_r'], 3)} sur {c['declenches']} ; potentiel +10 "
-            f"capturé {h['capture']} fois (contre {c['capture']}).{absolute_fr(h)} "
+            f"capturé {h['capture']} fois (contre {c['capture']}).{absolute_fr(h, cmp['delta_r'])} "
             f"Regard {n_looks.index(look) + 1} sur {len(n_looks)}.")
 
 
@@ -762,7 +765,7 @@ def _promote(db: LabDB, champ: dict, chall: dict, cmp: dict, now: datetime) -> s
             f"(promotion approuvée par Simão). En direct sur {cmp['jours']} jours de trades{_where(cmp)} : "
             f"{fr(h['esperance_r'], 3)} par trade sur {h['declenches']} trades, contre {fr(c['esperance_r'], 3)} sur "
             f"{c['declenches']} pour {champ['version']} ; potentiel +10 capturé {h['capture']} fois "
-            f"(contre {c['capture']}).{absolute_fr(h)}")
+            f"(contre {c['capture']}).{absolute_fr(h, cmp['delta_r'])}")
     event(db, "bascule", chall["version"], text, cmp, now)
     return text
 

@@ -291,8 +291,9 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
 - **Le matin (8 h - 9 h, heure de Paris)** : un seul message privé groupé (`app/lab/morning.py`) avec
   chaque règle validée, sa preuve chiffrée (« Les trades où rvol > 5 font −0,40 R en moyenne sur 212
   trades ; les exclure donne +0,15 R par trade sur 3 périodes de test », écart relatif en R du labo,
-  avec ce que font encore les trades gardés, puis « Jours de test : 70 historiques jamais lus (rejeu),
-  5 du direct » ; sans jour du direct : « validée sur l'historique seulement : le challenger en direct
+  avec ce que font encore les trades gardés, puis « Jours neufs depuis la soumission : 70 historiques
+  jamais lus (rejeu), 5 du direct » (tous les jours après la frontière, y compris le 1er bloc du
+  walk-forward et l'embargo, qui ne sont pas testés) ; sans jour du direct : « validée sur l'historique seulement : le challenger en direct
   décidera ») et son « pourquoi », plus le nombre d'idées écartées depuis la veille. Boutons Approuver / Refuser par règle, ou `!oui N` /
   `!non N` (mêmes propositions que les réglages, même cockpit). Rien de validé : pas de message.
   Jamais hors de 8 h - 9 h ; manqué, il repart le lendemain ; jamais deux le même jour, même après un
@@ -327,8 +328,9 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
   réparti sur les 3 regards, en t de Student à g − 1 degrés (g jours du regard) : 2,53 au premier regard
   du premier challenger, 4,58 pour le dixième. Il ne bascule pas seul : tu reçois une proposition « mettre
   en place la méthode v2 » (boutons, `!oui N` / `!non N`), avec l'espérance des trades gardés (« filtre
-  moins perdant, méthode toujours perdante » si elle reste ≤ 0, « positive mais non prouvée » si son IC95
-  touche 0 ; !labo et le cockpit le disent aussi). Approuvée : « Méthode v2 en place : … » ; refusée : v2
+  moins perdant, méthode toujours perdante » si elle reste ≤ 0, « méthode toujours perdante » seul tant que
+  l'écart n'est pas connu et positif, « positive mais non prouvée » si son IC95 touche 0 ; !labo et le
+  cockpit le disent aussi). Approuvée : « Méthode v2 en place : … » ; refusée : v2
   est retirée ; sans réponse, il reste mesuré et le regard suivant remplace la proposition ; une
   promotion du dernier regard sans réponse depuis 14 jours est retirée. Pas assez net au dernier regard
   (ou 100 jours sans l'atteindre), il est retiré (message aussi). Seuils `challenger_looks_days`,
