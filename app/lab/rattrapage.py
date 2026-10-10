@@ -28,6 +28,7 @@ import logging
 import time
 from datetime import date, datetime, timedelta, timezone
 
+from app.core.http import SourceError
 from app.lab import collector as CO
 from app.lab import generator as G
 from app.lab import heartbeat
@@ -124,7 +125,23 @@ def _daily(db: LabDB, market: str, symbol: str, cutoff: int) -> list[dict]:
     return db.get_bars(market, symbol, 1440, cutoff - DAILY_LOOKBACK_DAYS * 86400, cutoff)
 
 
-async def stock_rows(db: LabDB, origin: str, day: date, transport=None) -> list[dict] | None:
+def _lost(missing: set | None, batch: list[str], exc: Exception, day: date) -> None:
+    """Lot ou symbole en échec à la source : relevé (I4, dernier essai, `missing`), sinon l'erreur remonte."""
+    if missing is None:
+        raise exc
+    log.warning("Labo v2 : rattrapage %s sans %s (%s: %s)", day, ", ".join(batch[:5]), type(exc).__name__, exc)
+    missing.update(batch)
+
+
+def _too_many(missing: set | None, names: list[str]) -> None:
+    """Panne de la source plutôt que symboles absents : plus de la moitié de l'univers manque (comme runner.prepare_day)."""
+    if missing and 2 * len(missing & set(names)) > len(names):
+        raise SourceError(f"{len(missing)} symboles sans bougies : {', '.join(sorted(missing)[:5])}")
+
+
+async def stock_rows(db: LabDB, origin: str, day: date, transport=None, missing: set | None = None) -> list[dict] | None:
+    """Lignes d'un jour d'actions. Avec `missing` (dernier essai), un lot en échec à la source y est noté et le jour se
+    calcule sans lui (SPY compris : sortie n° 6 sans l'indice), sauf si plus de la moitié de l'univers manque."""
     bounds = CO.session_ts(day)
     universe = db.universe("stock", day.isoformat())
     if not bounds or not universe:
@@ -136,14 +153,23 @@ async def stock_rows(db: LabDB, origin: str, day: date, transport=None) -> list[
     names = [u["symbol"] for u in universe]
     ranks = {u["symbol"]: u.get("rank") for u in universe}
     # Déclaration n° 6 : séance de SPY en 5 min (sortie sur avalement baissier de l'indice).
-    index = (await SRC.alpaca_bars([G.INDEX["stock"]], CO.BASE_TF, datetime.fromtimestamp(bounds[0], timezone.utc),
-                                   datetime.fromtimestamp(bounds[1], timezone.utc),
-                                   transport=transport, adjustment="raw")).get(G.INDEX["stock"])
+    try:
+        index = (await SRC.alpaca_bars([G.INDEX["stock"]], CO.BASE_TF, datetime.fromtimestamp(bounds[0], timezone.utc),
+                                       datetime.fromtimestamp(bounds[1], timezone.utc),
+                                       transport=transport, adjustment="raw")).get(G.INDEX["stock"])
+    except SourceError as exc:
+        _lost(missing, [G.INDEX["stock"]], exc, day)
+        index = None
     for i in range(0, len(names), STOCK_BATCH):
         batch = names[i:i + STOCK_BATCH]
-        bars = await SRC.alpaca_bars(batch, CO.BASE_TF, datetime.fromtimestamp(first, timezone.utc),
-                                     datetime.fromtimestamp(bounds[1], timezone.utc), transport=transport,
-                                     adjustment="raw")
+        try:
+            bars = await SRC.alpaca_bars(batch, CO.BASE_TF, datetime.fromtimestamp(first, timezone.utc),
+                                         datetime.fromtimestamp(bounds[1], timezone.utc), transport=transport,
+                                         adjustment="raw")
+        except SourceError as exc:
+            _lost(missing, batch, exc, day)
+            _too_many(missing, names)
+            continue
         heartbeat.beat()
         for symbol in batch:
             b5 = CO.regular_hours(bars.get(symbol) or [])
@@ -169,7 +195,8 @@ async def stock_rows(db: LabDB, origin: str, day: date, transport=None) -> list[
     return rows
 
 
-async def crypto_rows(db: LabDB, origin: str, day: date, transport=None) -> list[dict] | None:
+async def crypto_rows(db: LabDB, origin: str, day: date, transport=None, missing: set | None = None) -> list[dict] | None:
+    """Lignes d'un jour crypto ; `missing` comme stock_rows (paire en échec à la source, dernier essai)."""
     universe = db.universe("crypto", day.isoformat())
     if not universe:
         return None
@@ -178,7 +205,12 @@ async def crypto_rows(db: LabDB, origin: str, day: date, transport=None) -> list
     rows: list[dict] = []
     for u in universe:
         symbol, rank = u["symbol"], u.get("rank")
-        bars = await SRC.okx_candles(symbol, CO.BASE_TF, start - 86400, start + 2 * 86400, transport=transport)
+        try:
+            bars = await SRC.okx_candles(symbol, CO.BASE_TF, start - 86400, start + 2 * 86400, transport=transport)
+        except SourceError as exc:
+            _lost(missing, [symbol], exc, day)
+            _too_many(missing, [x["symbol"] for x in universe])
+            continue
         heartbeat.beat()
         if not bars:
             continue
@@ -191,7 +223,14 @@ async def crypto_rows(db: LabDB, origin: str, day: date, transport=None) -> list
 
 
 async def step(db: LabDB, market: str, max_seconds: float, transport=None) -> int:
-    """Rattrape des jours (rejeu puis direct) dans le temps donné ; renvoie le nombre de jours faits."""
+    """Rattrape des jours (rejeu puis direct) dans le temps donné ; renvoie le nombre de jours faits.
+
+    Un jour en échec (source en panne, paire retirée…) est retenté au passage suivant ; au dernier des
+    runner.MAX_DAY_ATTEMPTS essais, il se calcule sans les symboles en échec (I4, clé missing:<origine>:<jour>), et s'il
+    échoue encore il est sauté (skipped:<origine>:<jour>) : ses lignes d'une autre déclaration sont effacées et le curseur
+    avance. Sans cela, un seul jour bloquait le rattrapage du marché, et le direct derrière lui, à chaque passage."""
+    from app.lab.runner import MAX_DAY_ATTEMPTS  # import tardif : runner importe generator
+
     started, done = time.monotonic(), 0
     job = ST.progress_job(market)
     for origin in ORIGINS:
@@ -199,10 +238,28 @@ async def step(db: LabDB, market: str, max_seconds: float, transport=None) -> in
             if done and time.monotonic() - started >= max_seconds:
                 return done
             heartbeat.beat(f"labo v2 : rattrapage {market} {day}")
-            rows = await (stock_rows if market == "stock" else crypto_rows)(db, origin, day, transport)
+            key = f"{origin}:{day.isoformat()}"
+            tries = (db.get(job, f"attempts:{key}", 0) or 0) + 1
+            missing = set() if tries >= MAX_DAY_ATTEMPTS else None
+            skipped = None
+            try:
+                rows = await (stock_rows if market == "stock" else crypto_rows)(db, origin, day, transport, missing)
+            except Exception as exc:  # comme runner.replay : 3 essais puis le jour est sauté
+                skipped = f"{type(exc).__name__}: {exc}"[:300]
+                db.set(job, f"attempts:{key}", tries)
+                if tries < MAX_DAY_ATTEMPTS:
+                    log.warning("Labo v2 : rattrapage %s %s en échec (essai %d/%d) : %s", market, key, tries,
+                                MAX_DAY_ATTEMPTS, skipped)
+                    return done  # nouvel essai au prochain passage
+                log.error("Labo v2 : rattrapage %s %s sauté après %d échecs : %s", market, key, tries, skipped)
+                rows = []
             with db.transaction():
                 if rows is not None:
                     db.replace_strat(origin, market, day.isoformat(), rows)
+                if skipped:
+                    db.set(job, f"skipped:{key}", skipped)
+                elif missing:
+                    db.set(job, f"missing:{key}", {"missing": len(missing), "missing_symbols": sorted(missing)[:10]})
                 db.set(job, f"rattrapage:{origin}", day.isoformat())
             log.info("Labo v2 : rattrapage %s %s %s, %d lignes", origin, market, day, len(rows or []))
             done += 1

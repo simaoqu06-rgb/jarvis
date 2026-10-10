@@ -7,6 +7,7 @@ from datetime import date, datetime, time, timedelta
 
 import pytest
 
+from app.core.http import SourceError
 from app.lab import brief as BRIEF
 from app.lab import collector as CO
 from app.lab import plus10 as P10
@@ -261,6 +262,72 @@ async def test_direct_rattrape_seulement_avec_le_journalier_du_jour(tmp_path, mo
     assert RAT.due_days(db, "stock", "live") == [DAY] and await RAT.step(db, "stock", 60) == 1
     symbols = {s for (s,) in db.conn.execute("SELECT DISTINCT symbol FROM strat_trades")}
     assert symbols == {"AAA"}                              # SPLT écartée (opération sur titre)
+
+
+def _old_row(db, market, day):
+    """Ligne d'une déclaration précédente, à refaire par le rattrapage."""
+    db.replace_strat("replay", market, day, [{"symbol": "OLD", "strategy": "orb15", "slot": 1, "triggered": 0}])
+    db.conn.execute("UPDATE strat_trades SET declaration = 9")
+
+
+def _decls(db, market):
+    return sorted(db.conn.execute("SELECT symbol, declaration FROM strat_trades WHERE market = ?", (market,)).fetchall())
+
+
+async def test_rattrapage_paire_en_echec_retentee_puis_calculee_sans_elle(tmp_path, monkeypatch):
+    """Relecture : une paire que la source refuse (retirée de la cote : OKX 51001) faisait échouer le jour à chaque passage,
+    sans fin ; le rattrapage crypto (et son direct) restait bloqué. Comme le rejeu (I4) : 3 essais, le dernier sans elle."""
+    day = "2026-09-15"
+    db = LabDB(str(tmp_path / "lab.db"))
+    db.set("replay:crypto", "start", day)
+    db.set("replay:crypto", "last_day", day)
+    db.replace_universe("crypto", day, [{"symbol": s, "rank": i + 1, "reason": "test"}
+                                        for i, s in enumerate(("AAA-USDT", "BBB-USDT", "DEAD-USDT"))])
+    _old_row(db, "crypto", day)
+    calls = []
+
+    async def candles(symbol, tf, start, end, transport=None):
+        calls.append(symbol)
+        if symbol == "DEAD-USDT":
+            raise SourceError("OKX 51001 Instrument ID does not exist")
+        return [{"t": start, "o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0, "v": 1.0}]
+
+    monkeypatch.setattr(RAT.SRC, "okx_candles", candles)
+    monkeypatch.setattr(RAT.ST, "crypto_day", lambda d, symbol, *a: [{"symbol": symbol, "strategy": "orb15", "slot": 1,
+                                                                      "triggered": 0}])
+    job = ST.progress_job("crypto")
+    for attempt in (1, 2):
+        assert await RAT.step(db, "crypto", 60) == 0                   # nouvel essai au passage suivant
+        assert db.get(job, "rattrapage:replay") is None and db.get(job, f"attempts:replay:{day}") == attempt
+    assert await RAT.step(db, "crypto", 60) == 1                       # 3e essai : calculé sans elle
+    assert db.get(job, "rattrapage:replay") == day and RAT.due_days(db, "crypto", "replay") == []
+    assert _decls(db, "crypto") == [("AAA-USDT", 10), ("BBB-USDT", 10)]
+    assert db.get(job, f"missing:replay:{day}") == {"missing": 1, "missing_symbols": ["DEAD-USDT"]}
+    assert calls.count("DEAD-USDT") == 3
+
+
+async def test_rattrapage_jour_saute_apres_trois_pannes(tmp_path, monkeypatch):
+    """Source en panne pour tout l'univers : pas de jour calculé sur une poignée de valeurs ; au 3e échec le jour est sauté,
+    ses lignes de l'ancienne déclaration effacées (elles ne reviennent pas dans le tableau la fin du rattrapage venue)."""
+    db = LabDB(str(tmp_path / "lab.db"))
+    db.set("replay:stock", "start", DAY.isoformat())
+    db.set("replay:stock", "last_day", DAY.isoformat())
+    db.replace_universe("stock", DAY.isoformat(), [{"symbol": "AAA", "rank": 1, "reason": "test"},
+                                                   {"symbol": "BBB", "rank": 2, "reason": "test"}])
+    db.put_bars("stock", "SPY", 1440, [{"t": CO.ny_midnight(DAY), "o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0, "v": 1.0}])
+    _old_row(db, "stock", DAY.isoformat())
+
+    async def down(symbols, tf, start, end, transport=None, adjustment="split"):
+        raise SourceError("HTTP 503")
+
+    monkeypatch.setattr(RAT.SRC, "alpaca_bars", down)
+    job, key = ST.progress_job("stock"), f"replay:{DAY.isoformat()}"
+    assert await RAT.step(db, "stock", 60) == 0 and await RAT.step(db, "stock", 60) == 0
+    assert _decls(db, "stock") == [("OLD", 9)] and db.get(job, "rattrapage:replay") is None
+    assert await RAT.step(db, "stock", 60) == 1
+    assert _decls(db, "stock") == [] and db.get(job, "rattrapage:replay") == DAY.isoformat()
+    assert db.get(job, f"skipped:{key}").startswith("SourceError") and db.get(job, f"missing:{key}") is None
+    assert SS.partial(db.conn) == {}
 
 
 def test_facteur_des_prix_negocies():
