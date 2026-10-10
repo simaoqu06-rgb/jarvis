@@ -993,7 +993,7 @@ elles restent exclues (et comptées) tant qu'il en reste, même sans jour à ref
 journalier manque revenait dans le tableau à la fin du rattrapage) ; un jour du direct qui attend seulement son
 journalier ne rend pas le tableau partiel. Chaque ligne garde aussi l'empreinte du modèle de coût (`cout_rev` :
 barème IBKR, révision du simulateur) ; le tableau dit « N révisions du code / du coût » d'un marché quand il en mêle
-plusieurs.
+plusieurs ; les lignes sans révision du coût (n° 10 écrites avant la colonne) sont dites à part, sans alerte.
 
 ### Limites
 
@@ -1047,7 +1047,9 @@ contrôler que sur des tableaux agrégés, sur des fenêtres de jours différent
   révision 1, témoin sur la journée, 5 tirages, prix ajustés ». Une clé de progress (`audit:archive`) par marché et
   déclaration, empreinte de coût et mesure : faite une fois, plus rien à lire ensuite. Si l'archive échoue, le
   passage ne réécrit rien (rattrapage, Killmode complet et n° 9 attendent ; le direct et le rejeu n'écrivent que des
-  jours neufs). Jamais de table `*_sealed`.
+  jours neufs). L'échec est noté (progress `lab` / `archive_audit`) et dit en tête de `!labo` et dans
+  `/api/lab/status` jusqu'au passage qui réussit ; un fichier d'archive vide n'est pas publié comme audit. Jamais de
+  table `*_sealed`.
 - **Copie manuelle** : si le fichier contient déjà ces tables (commande de DEPLOY.md, `CREATE TABLE … AS SELECT *`),
   elles ne sont ni recréées ni modifiées ; seules les lignes absentes y sont ajoutées (même clé que la base). Ajouter
   plutôt que ne rien faire : une copie manuelle peut dater d'après des jours déjà réécrits, ou ne couvrir qu'une
@@ -1058,6 +1060,8 @@ contrôler que sur des tableaux agrégés, sur des fenêtres de jours différent
   paires déclenchées des deux côtés, la moyenne de nouveau − ancien pour la sortie de référence (commission IBKR
   comprise en actions, comme le tableau), `r_net`, le témoin et l'écart stratégie − témoin, avec IC en grappes par
   jour (semaines en crypto). C'est la mesure sur données réelles du biais de la révision 1 et de l'« Effet attendu ».
+  Sauf les séances du direct dont les plans v1 ont été recalculés (`empreinte.V1_RECALCULS` : actions du 06/10/2026),
+  archivées sur les anciens plans : exclues de l'appariement, et le texte le dit.
 - **Pour audit, jamais pour décider** : ni « candidate », ni le grade, ni le brief, ni les leçons ne lisent l'archive
   (un test balaie le code). Affichée dans `!strategies` (« Audit de la n° 10 (ancien → nouveau, mêmes trades) ») et
   par `GET /api/lab/strategies/audit`, en cache du worker (étape « audit »).

@@ -141,8 +141,7 @@ labo (pente > 0). Les sorties sont au prix suivi (stop franchi en gap : à l'ouv
 d'un pas) ou au tien avec `!sortie`. Ce R net sert aussi à l'arrêt de la journée à −3 R, aux trades réels
 de `!grade` et au journal du cockpit. Un GO confirmé pris avec `!prends NVDA 132.5 go` garde le stop et les
 objectifs du scanner et compte avec JARVIS. La taille est un désaccord à part : un trade pris à ta règle de 20 €
-quand JARVIS propose 0 % (ou à un risque demandé au-delà de ce qu'il propose) forme un troisième groupe, « taille
-à ta règle », jugé sur la même règle (30 trades sur 20 jours, IC qui exclut 0) ; un GO pris sous un grade F reste
+(ou à un risque demandé) quand JARVIS propose 0 % forme un troisième groupe, « taille à ta règle », jugé sur la même règle (30 trades sur 20 jours, IC qui exclut 0) ; un GO pris sous un grade F reste
 d'accord avec la note, pas avec la taille. Le même principe s'applique aux Claude qui travaillent sur JARVIS
 ([CLAUDE.md](CLAUDE.md)).
 
@@ -310,9 +309,10 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
   que l'effet tient ; **démentie**, c'est définitif (encore mesurée, jamais reconfirmée). Les confirmées
   (`data/lab_lessons.json`) s'affichent dans les plans en direct (ligne « Leçons du labo », avec la note
   qu'elles donneraient) **sans toucher au verdict** : GO / NO GO reste calculé sur la note brute. Une
-  leçon « favorable » dont les trades perdent encore est dite « relative » ; en actions, l'espérance est
-  aussi comptée à 20 € (commission IBKR) et la plus basse décide (« perd encore 0,12 R à 20 € »). La preuve
-  dit ses jours de rejeu et du direct ; une confirmée qui a moins de 20 jours du direct est dite
+  leçon « favorable » dont les trades perdent encore est dite « relative » (« pas mieux que la moyenne » si ses
+  trades font même pire que l'ensemble) ; en actions, l'espérance est aussi comptée à 20 € (commission IBKR) et
+  la plus basse décide (« perd encore 0,12 R à 20 € »). La preuve dit ses jours de rejeu et du direct (jours où
+  elle a des trades concernés) ; une confirmée qui a moins de 20 jours du direct est dite
   « (historique) », dans `!lecons` et dans les plans. La routine relit le carnet
   (dans `GET /api/lab/brief`) avant d'analyser ; Simão le lit avec `!lecons`.
 - **Approuvée** : la règle crée la version suivante (v2 = v1 + ses filtres), d'abord **challenger**.
@@ -346,10 +346,13 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
   de SPY) ; champs absents traités comme « non vérifiés ». Fichier absent ou illisible : aucun filtre,
   une ligne de journal, le direct continue. Tous les autres plans longs (`!plan`, `!prends`, API,
   crypto) passent par le même filtre (`live.plan_verdict` dans `build_plan` ; crypto : contexte de
-  `lessons.crypto_row`, paire au nom du labo « BTC-USDT », régime de BTC) : un plan écarté reste
-  affiché, mais le grade ne mesurant que les trades que garde la méthode, JARVIS n'y propose aucun
-  risque (« 🏅 … 0 % : plan écarté par la méthode v2 (règle « … ») », ta règle de 20 € à part).
-  Donnée manquante (indice du régime, contexte) : plan gardé, une ligne de journal.
+  `lessons.crypto_row` ramené au créneau du labo qui précède (00, 04… 20 h UTC), paire au nom du labo
+  « BTC-USDT », régime de BTC), sauf `!prends … go` (le GO confirmé a déjà été gardé au scanner : le plan
+  recalculé au déclenchement garde la taille du MP). Un plan écarté reste affiché, mais le grade ne mesurant
+  que les trades que garde la méthode, JARVIS n'y propose aucun risque (« 🏅 … 0 % : plan écarté par la
+  méthode v2 (règle « … ») », ta règle de 20 € à part), et `!avis` ramène un GO écarté à « attendre ».
+  Donnée manquante (indice du régime, bougies journalières pour le volume relatif et la variation de la veille,
+  contexte) : la règle concernée ne s'applique pas, plan gardé, une ligne de journal.
 - **Cockpit** : page `/cockpit/labo` (lecture seule) : grade, avancement, chiffres clés, méthode en
   place et challenger, dernières propositions, règles testées, dernier message du matin.
 - **Grade de JARVIS** (`app/lab/grade.py`, barème validé par Simão le 2026-10-07) : de F- à S+, la

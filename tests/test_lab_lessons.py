@@ -527,6 +527,14 @@ def test_lecon_favorable_qui_fait_pire_que_l_ensemble_n_est_pas_moins_mauvaise(d
     write_live(tmp_path, monkeypatch, [item])
     (line,) = L.adjustment(L.current())["lignes"]
     assert line.endswith(f"(historique ; pas mieux que la moyenne, perd encore {lost} R)")
+    # Confirmée mesurée sur un seul jour (écart du z inconnu) : le fichier du direct porte l'écart des deux espérances.
+    db.conn.execute("UPDATE lessons SET metrics = ? WHERE id = ?", (json.dumps(one_day | {"palier_juge": 0}), x["id"]))
+    L.write_live(db)
+    (item,) = json.loads(L.live_path(db.path).read_text())["lecons"]
+    assert item["ecart_r"] == pytest.approx(-0.2)
+    write_live(tmp_path, monkeypatch, [item])
+    (line,) = L.adjustment(L.current())["lignes"]
+    assert line.endswith("pas mieux que la moyenne, perd encore 0,30 R)")
     # Le texte « moins mauvais » reste quand l'écart est positif (ou inconnu : fichier d'avant l'écart).
     assert L.relative("favorable", -0.2, None, 0.05) == "relative : moins mauvais que la moyenne, perd encore 0,20 R"
     assert L.relative("favorable", -0.2, None, None) == "relative : moins mauvais que la moyenne, perd encore 0,20 R"

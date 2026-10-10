@@ -12,7 +12,7 @@ révision du code (trades.code_rev) pour voir quand une même version mélange p
 Deuxième tour d'avis du 10 octobre : garde du Labo 1 (garde_v1, empreinte v1 calculée au démarrage du worker ; en
 pause, une alerte en tête de !labo) et recalcul ponctuel des séances du direct d'avant une rupture (recalcul_v1 ;
 une séance « non recalculable » est dite).
-Relecture de la fusion (W1) : archive d'audit en échec (archive_line), alerte en tête de !labo tant qu'elle dure.
+2e tour d'avis, relecture : archive d'audit en échec (archive_line), alerte en tête de !labo tant qu'elle dure.
 """
 import json
 import sqlite3

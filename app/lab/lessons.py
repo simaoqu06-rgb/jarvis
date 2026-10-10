@@ -513,7 +513,7 @@ def relative(sens: str, esperance: float | None, esperance_20e: float | None = N
     la même à la mise de Simão (actions) ; la plus basse des deux décide (« … perd encore 0,12 R à 20 € »).
     `ecart` (concernés - ensemble) ≤ 0 : les concernés ne font même pas mieux que l'ensemble (une « à confirmer »,
     ou une confirmée retombée sous l'hystérésis) : « pas mieux que la moyenne, perd encore … » ; inconnu : comme
-    positif (fichier du direct d'avant l'écart : une confirmée l'a été sur un écart positif)."""
+    positif (fichier du direct écrit avant l'écart ; proof() et write_live passent _gap, défini même sur un jour)."""
     if sens != "favorable":
         return None
     at20 = esperance_20e is not None and (esperance is None or esperance_20e < esperance)
@@ -626,6 +626,7 @@ def write_live(db: LabDB) -> bool:
         return False
     data = {"lecons": [{"id": x["id"], "texte": x["texte"], "sens": x["sens"], "cond": x["cond"],
                         "markets": x["markets"]} | {k: (x["mesures"] or {}).get(k) for k in LIVE_METRICS}
+                       | {"ecart_r": _gap(x["mesures"] or {})}  # sur un seul jour : écart des deux espérances, comme proof()
                        for x in list_lessons(db.conn, "confirmee")]}
     path = live_path(db.path)
     try:
