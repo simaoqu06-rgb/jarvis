@@ -77,6 +77,21 @@ def test_rejeu_s_arrete_avant_le_resume_du_soir():
     assert W.replay_seconds(datetime(2026, 10, 7, 11, 0, tzinfo=paris), None) == W.REPLAY_SECONDS["jour"]
 
 
+def test_rattrapage_s_arrete_avant_le_resume_du_soir():
+    """Relecture : depuis la n° 10, le rattrapage prend son budget entier à chaque passage (des centaines de jours) ;
+    2 × 10 min lancées à 22 h 25 repoussaient le résumé du soir après la routine de 22 h 52."""
+    from zoneinfo import ZoneInfo
+
+    paris = ZoneInfo("Europe/Paris")
+    at = datetime(2026, 10, 7, 22, 25, tzinfo=paris)
+    assert W.rattrapage_seconds(at, None) == 300
+    assert W.rattrapage_seconds(at, "2026-10-07") == W.RATTRAPAGE_SECONDS["nuit"] == 600   # résumé déjà fait
+    assert W.rattrapage_seconds(datetime(2026, 10, 7, 22, 29, tzinfo=paris), None) == 60
+    assert W.rattrapage_seconds(datetime(2026, 10, 7, 23, 0, tzinfo=paris), None) == 600
+    assert W.rattrapage_seconds(datetime(2026, 10, 7, 11, 0, tzinfo=paris), None) == W.RATTRAPAGE_SECONDS["jour"]
+    assert W.rattrapage_seconds(datetime(2026, 10, 7, 17, 0, tzinfo=paris), None) == 0     # séance de New York
+
+
 def test_rejeu_borne_par_periode():
     assert W.REPLAY_SECONDS["nuit"] > W.REPLAY_SECONDS["jour"] > W.REPLAY_SECONDS["seance"] > 0
     assert set(W.REPLAY_SECONDS) == set(W.CHUNK_DAYS)

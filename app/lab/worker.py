@@ -147,6 +147,14 @@ def replay_seconds(now: datetime, summary_last_day: str | None) -> float:
     return box
 
 
+def rattrapage_seconds(now: datetime, summary_last_day: str | None) -> float:
+    """Durée permise au rattrapage du labo v2 d'un marché à ce passage : RATTRAPAGE_SECONDS de la période, sans déborder
+    sur l'heure du résumé du soir tant qu'il n'est pas fait, comme le rejeu (replay_seconds). Depuis la n° 10, il a des
+    centaines de jours devant lui et prend tout son budget à chaque passage : 2 marchés × 10 min juste avant 22 h 30
+    repoussaient le résumé après la routine du soir."""
+    return min(float(RATTRAPAGE_SECONDS[period(now)]), replay_seconds(now, summary_last_day))
+
+
 def replay_budget(now: datetime) -> int:
     """Nombre de jours de rejeu par passage et par marché."""
     return CHUNK_DAYS[period(now)]
@@ -311,10 +319,12 @@ async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, tra
         heartbeat.beat()
     if "labo2" not in report:
         report["labo2"] = await lab2(db, current(), collect)
-    seconds = RATTRAPAGE_SECONDS[period(current())] if collect else 0
-    if seconds:
+    if collect and RATTRAPAGE_SECONDS[period(current())]:
         report["rattrapage"] = {}
         for market in markets:
+            seconds = rattrapage_seconds(current(), db.get("summary", "last_day"))
+            if not seconds:
+                continue
             heartbeat.beat(f"labo v2 : rattrapage {market}")
             try:
                 report["rattrapage"][market] = await RAT.step(db, market, seconds, transport)
