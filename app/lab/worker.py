@@ -33,6 +33,8 @@ Toutes les ~10 min :
    gardées en mémoire, hors séance US, kill_complet_seconds par passage.
 12. Déclaration n° 9 : « potentiel_plus10 » (plus10.py), listes S+10 et Rebond sur toute la base, bougies de 5 min
    non ajustées relues et gardées en mémoire, hors séance US, plus10_seconds par passage.
+13. « autopsie » (autopsie.py) : où les trades échouent (MFE/MAE contre le hasard) et grade indicatif des GO
+   confirmés, recalculés quand les trades changent, au plus toutes les stats_age secondes.
 Le battement (lab.heartbeat) porte l'étape en cours, affichée par /api/lab/status et !labo.
 Le rejeu couvre JARVIS_LAB_REPLAY_DAYS séances (504 ≈ 2 ans) avant le premier lancement du worker ;
 le direct prend le relais à partir de ce jour-là. JARVIS_LAB_ENABLED=off met le worker en veille.
@@ -57,6 +59,7 @@ from app.lab import lessons as L
 from app.lab import plus10 as P10
 from app.lab import method as M
 from app.lab import potentiel as PO
+from app.lab import autopsie as AUT
 from app.lab import rattrapage as RAT
 from app.lab import regime as REG
 from app.lab import runner as R
@@ -403,6 +406,7 @@ async def lab2(db: LabDB, now: datetime, collect: bool = True) -> dict:
     await step("lecons", lambda: L.step(db, now, budget["stats_age"]))
     await step("grade", lambda: GRADE.step(db, now))
     await step("strategies", lambda: refresh_strategies(db, now, budget["stats_age"]))
+    await step("autopsie", lambda: AUT.step(db, now, budget["stats_age"]))
     summary_day = SUM.due(now, db.get("summary", "last_day"))
     stats = await step("stats", lambda: refresh_stats(db, now, budget["stats_age"], force=bool(summary_day)))
     if stats:

@@ -725,6 +725,34 @@ def text(data: dict | None, hist: list[dict] | None = None) -> str:
     return "\n".join(lines)
 
 
+def reels(trades: list[dict]) -> dict:
+    """Troisième population (avis de GPT, 10 oct.) : trades réellement pris et suivis par JARVIS (`!prends`),
+    terminés, hors Killmode (mesuré par son propre journal), en R réalisé. Indicatif : aucun effet."""
+    from app.trading import service as T
+
+    out = {}
+    for market in MARKETS:
+        rs = [r for r in (T.realized_r(t) for t in trades if t.get("market", "stock") == market
+                          and not t.get("killmode")) if r is not None]
+        out[market] = {"termines": len(rs), "esperance_r": round(sum(rs) / len(rs), 3) if rs else None,
+                       "total_r": round(sum(rs), 2), "gagnants": sum(r > 0 for r in rs)}
+    return out
+
+
+def populations_text(indicatif: list[str], real: dict | None) -> str:
+    """Lignes ajoutées à `!grade` : GO confirmés (labo) et trades réels, à côté du grade officiel de v1."""
+    lines = []
+    if indicatif:
+        lines.append("\n**Ce que tu trades vraiment** (indicatif : ne change ni le grade ni le risque)")
+        lines += indicatif
+    for market, g in (real or {}).items():
+        if g["termines"]:
+            lines.append(f"-# Tes trades réels {MARKET_FR[market]} : {g['termines']} terminés, {g['gagnants']} "
+                         f"gagnants, {g['esperance_r']:+.2f} R en moyenne avant frais ({g['total_r']:+.2f} R au total)"
+                         + (" · trop peu pour conclure" if g["termines"] < 30 else ""))
+    return "\n".join(lines)
+
+
 def sync_proposals(proposals, data: dict | None = None) -> list[dict]:
     """Serveur : une proposition par hausse de lettre en attente ; les hausses dépassées sont remplacées.
     Renvoie les nouvelles propositions (à envoyer en privé)."""

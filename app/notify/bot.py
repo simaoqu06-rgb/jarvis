@@ -23,6 +23,8 @@ qu'aux comptes listés dans JARVIS_DISCORD_OWNER_ID et ignore tout le reste sans
   !lecons               carnet des leçons du labo (confirmées, à confirmer, démenties)
   !grade                grade de JARVIS (F- à S+), de quoi il est fait et le risque qu'il permet
   !strategies           labo v2 : stratégies à déclencheur contre v1 et leur témoin aléatoire
+  !autopsie             où les trades du labo échouent (élan contre le hasard, stops, gagnants qui frôlent le stop) ;
+                        `!autopsie crypto` ou `!autopsie actions`
   !potentiel            potentiel +10 : part des séances qui touchent +8 % selon le gap, types de catalyseurs
   !kill                 JARVIS Killmode, désactivé par défaut : `!kill on`, `!kill NVDA`, `!kill scan`, `!kill bilan`
   !aide                 cette liste
@@ -42,6 +44,7 @@ from datetime import datetime, timezone
 
 from app import config
 from app.lab import db as lab_db
+from app.lab import autopsie as lab_autopsie
 from app.lab import grade as lab_grade
 from app.lab import lessons as lab_lessons
 from app.lab import morning as lab_morning
@@ -213,14 +216,30 @@ def settings_text() -> str:
 
 
 def grade_text() -> str:
+    from app import scheduler
+
     conn = lab_db.open_readonly()
-    hist = []
+    hist, indicatif = [], []
     if conn is not None:
         try:
             hist = lab_grade.history(conn, limit=5)
+            indicatif = lab_autopsie.indicatif_lines((lab_autopsie.cached(conn) or {}).get("grade_indicatif"))
         finally:
             conn.close()
-    return lab_grade.text(lab_grade.current(), hist)
+    extra = lab_grade.populations_text(indicatif, lab_grade.reels(scheduler.book.trades))
+    return lab_grade.text(lab_grade.current(), hist) + ("\n" + extra if extra else "")
+
+
+def autopsie_text(args: list[str]) -> str:
+    conn = lab_db.open_readonly()
+    if conn is None:
+        return "🩺 Base du labo absente : le service jarvis-lab n'a pas encore démarré."
+    words = {a.lower() for a in args}
+    market = "crypto" if "crypto" in words else "stock" if words & {"actions", "action", "stock"} else None
+    try:
+        return lab_autopsie.text(lab_autopsie.cached(conn), market)
+    finally:
+        conn.close()
 
 
 def potentiel_text() -> str:
@@ -348,6 +367,8 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
             return await asyncio.to_thread(grade_text)
         if cmd in ("strategies", "stratégies", "strats"):
             return await asyncio.to_thread(strategies_text)
+        if cmd == "autopsie":
+            return await asyncio.to_thread(autopsie_text, args)
         if cmd in ("potentiel", "potentiel10", "plus10"):
             return await asyncio.to_thread(potentiel_text)
         if cmd == "kill":
