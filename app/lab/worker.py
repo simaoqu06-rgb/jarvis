@@ -354,7 +354,8 @@ async def _recalcul_day(db: LabDB, market: str, avant: str, day: date, now: date
     - Plus aucune ligne sans révision (déjà recalculée, ou pas encore journalisée : le direct la fera avec ce code) :
       sans objet.
     - Bougies de 5 min manquantes (purgées puis refusées par la source, univers absent) : rien n'est effacé, nouvel
-      essai au passage suivant ; au 3e échec (runner.MAX_DAY_ATTEMPTS), « non recalculable », dit dans !labo.
+      essai au passage suivant ; au 3e échec (runner.MAX_DAY_ATTEMPTS), « non recalculable », dit dans !labo. Trades
+      d'une autre version de méthode que celle en cours : « non recalculable » tout de suite.
     - replace_trades réécrit les trades en place : mêmes id pour un même symbole (leçons, règles et grade bornent ce
       qu'ils ont vu par jour, le jour reste « vu »), révision du code et heure du calcul neuves. run_day efface aussi
       les lignes du labo v2 du jour (n° 10 : le générateur n'en écrit pas pour les actions) : si le rattrapage de la
@@ -368,6 +369,15 @@ async def _recalcul_day(db: LabDB, market: str, avant: str, day: date, now: date
         state = base | {"etat": "sans_objet", "trades": total}
         db.set(RECALCUL_JOB, key, state)
         log.info("Labo : recalcul v1 %s %s sans objet (%d trades, tous du code suivi)", market, iso, total)
+        return state
+    versions = sorted(v for (v,) in db.conn.execute("SELECT DISTINCT method_version FROM trades WHERE origin = 'live' "
+                                                    "AND market = ? AND day = ?", (market, iso)))
+    current = R.method(db)[0]
+    if versions != [current]:  # replace_trades remplace par version : l'ancienne ligne resterait à côté de la neuve
+        state = base | {"etat": "non_recalculable", "raison": f"version de méthode changée ({', '.join(versions)} → "
+                                                              f"{current})", "essais": 0}
+        db.set(RECALCUL_JOB, key, state)
+        log.error("Labo : recalcul v1 %s %s non recalculable : %s", market, iso, state["raison"])
         return state
     tries = (db.get(RECALCUL_JOB, f"attempts:{key}", 0) or 0) + 1
     last = tries >= R.MAX_DAY_ATTEMPTS

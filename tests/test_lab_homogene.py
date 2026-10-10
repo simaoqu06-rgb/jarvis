@@ -477,3 +477,15 @@ def test_bougie_de_15_h_45_close_et_bougie_en_cours_plate(tmp_path):
     assert bars[:-1] == inp["bars"] and bars[-1] | {"t": 0} == {"t": 0, "o": c, "h": c, "l": c, "c": c, "v": 0.0,
                                                                "pending": True}
     assert "with_open_bar" in G.__doc__ and "que le plan tient pour en cours" not in G.__doc__
+
+
+async def test_recalcul_refuse_si_la_version_de_methode_a_change(tmp_path, monkeypatch):
+    """replace_trades remplace les trades d'une version : sous une autre version, la ligne d'avant resterait à côté."""
+    db = LabDB(str(tmp_path / "lab.db"))
+    _old_day(db, monkeypatch)
+    db.conn.execute("UPDATE trades SET method_version = 'v0'")
+    monkeypatch.setattr(E, "V1_RECALCULS", REAL)
+    before = _plans(db)
+    state = (await W.recalcul_v1(db, NOW))[KEY]
+    assert state["etat"] == "non_recalculable" and state["raison"] == "version de méthode changée (v0 → v1)"
+    assert _plans(db) == before and db.count_trades() == 3
