@@ -66,7 +66,6 @@ import re
 import time
 from datetime import date
 from pathlib import Path
-from statistics import NormalDist
 
 from app.lab import stats as STATS
 from app.lab.db import LabDB, now_iso
@@ -80,8 +79,12 @@ DEFAULTS = {"windows": 3, "embargo_days": 1, "min_affected": 100, "min_improveme
             "challenger_min_trades": 100, "challenger_max_trades": 300,
             "challenger_min_gain": 0.02, "challenger_max_days": 100,
             "challenger_looks_days": [20, 40, 60],
-            # 3 regards fixes, alpha global unilatéral 0,05 (Bonferroni) : z ≥ 2,13.
-            "challenger_min_z": NormalDist().inv_cdf(1 - 0.05 / 3)}
+            # Seuil z du challenger (challenger_z) : alpha global unilatéral de 0,05 dépensé sur le rang k du
+            # challenger (6·alpha/(π²k²), même série que les essais du validateur), réparti sur les 3 regards
+            # (Bonferroni), en t de Student à g − 1 degrés de liberté (g jours de trades du regard).
+            "challenger_alpha": 0.05,
+            # Promotion proposée et restée sans réponse de Simão : au-delà, elle ne protège plus le challenger.
+            "challenger_answer_days": 14}
 OPS = {">": ">", ">=": ">=", "<": "<", "<=": "<=", "==": "=", "!=": "<>"}
 SET_OPS = ("in", "not_in")
 ALL_OPS = (*OPS, *SET_OPS, "between", "is_null", "not_null")
@@ -305,6 +308,17 @@ def z_threshold(trial: int, alpha: float = DEFAULTS["alpha"]) -> float:
     from statistics import NormalDist
 
     return -NormalDist().inv_cdf(trial_level(trial, alpha))  # queue basse : pas d'arrondi à 1 en flottant
+
+
+def challenger_z(rank: int, days: int, cfg: dict | None = None) -> float:
+    """Seuil z du challenger n° `rank` à un regard sur `days` jours de trades. Alpha du rang : trial_level (la
+    somme sur tous les challengers ne dépasse jamais challenger_alpha), divisé par le nombre de regards fixes
+    (Bonferroni) ; quantile de Student à days − 1 degrés de liberté, car le z en grappes par jour (pooled_z)
+    n'a que `days` grappes (20 au premier regard : le quantile normal laissait passer trop de faux gains).
+    Infini sous 2 jours."""
+    cfg = cfg or DEFAULTS
+    level = trial_level(rank, cfg["challenger_alpha"]) / max(1, len(cfg["challenger_looks_days"]))
+    return STATS.t_quantile(1 - level, days - 1)
 
 
 # --- Walk-forward (fonctions pures) ---------------------------------------------------------

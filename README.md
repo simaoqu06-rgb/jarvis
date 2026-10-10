@@ -312,15 +312,20 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
   trades déclenchés **en direct** depuis sa création, sur les seuls marchés de ses nouvelles règles, en R
   à ta mise de 20 € pour les actions (frais IBKR réels), avec un écart et un z en grappes par jour. Elle
   n'est jugée qu'à 3 regards fixes, à 20, 40 et 60 jours de trades : le challenger est promouvable si
-  l'écart atteint +0,02 R par trade, z ≥ 2,13 (5 % répartis sur les 3 regards), aucun marché touché ne
-  recule, la capture du potentiel +10 tient (même tolérance que le validateur) et il garde au moins 100
-  trades. Il ne bascule pas seul : tu reçois une proposition « mettre en place la méthode v2 » (boutons,
-  `!oui N` / `!non N`), avec l'espérance des trades gardés (« filtre moins perdant, méthode toujours
-  perdante » si elle reste ≤ 0). Approuvée : « Méthode v2 en place : … » ; refusée : v2 est retirée ;
-  sans réponse, il reste mesuré et le regard suivant remplace la proposition. Pas assez net au dernier
-  regard (ou 100 jours sans l'atteindre), il est retiré (message aussi). Seuils `challenger_looks_days`,
-  `challenger_min_z`, `challenger_min_gain`, `challenger_min_trades`, `challenger_max_days` dans
-  `lab_config`. Des règles approuvées pendant un essai attendent sa fin (sauf le même matin : elles
+  l'écart atteint +0,02 R par trade, z ≥ le seuil du challenger n° k, aucun marché touché ne recule, la
+  capture du potentiel +10 tient (même tolérance que le validateur) et il garde au moins 100 trades. Le
+  seuil dépense 5 % au total sur TOUS les challengers (6·0,05/(π²k²) pour le k-ième, même série que les
+  essais du validateur ; k = 1 + challengers précédents jugés à au moins un regard, figé à sa création),
+  réparti sur les 3 regards, en t de Student à g − 1 degrés (g jours du regard) : 2,53 au premier regard
+  du premier challenger, 4,58 pour le dixième. Il ne bascule pas seul : tu reçois une proposition « mettre
+  en place la méthode v2 » (boutons, `!oui N` / `!non N`), avec l'espérance des trades gardés (« filtre
+  moins perdant, méthode toujours perdante » si elle reste ≤ 0, « positive mais non prouvée » si son IC95
+  touche 0 ; !labo et le cockpit le disent aussi). Approuvée : « Méthode v2 en place : … » ; refusée : v2
+  est retirée ; sans réponse, il reste mesuré et le regard suivant remplace la proposition ; une
+  promotion du dernier regard sans réponse depuis 14 jours est retirée. Pas assez net au dernier regard
+  (ou 100 jours sans l'atteindre), il est retiré (message aussi). Seuils `challenger_looks_days`,
+  `challenger_alpha`, `challenger_min_gain`, `challenger_min_trades`, `challenger_max_days`,
+  `challenger_answer_days` dans `lab_config`. Des règles approuvées pendant un essai attendent sa fin (sauf le même matin : elles
   rejoignent le challenger tant qu'il n'a aucun trade).
 - **Refusée** : rangée dans la mémoire des échecs (« refusée par Simão »), jamais reproposée.
 - **En direct** : le worker écrit la méthode en place dans `data/lab_champion.json`. Le scanner

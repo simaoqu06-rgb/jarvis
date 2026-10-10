@@ -335,7 +335,9 @@ def test_etat_lisible_pour_labo_et_cockpit(db):
     assert st["challenger"]["prochain_regard"] == 20 and st["challenger"]["promotion"] is None
     line = M.state_line(st)
     assert "challenger v2 : 2 jours de trades en direct (prochain regard à 20), " in line
-    assert line.endswith("(seuil 2,13)") and "trades en direct" in line
+    # Seuil du prochain regard (20 jours, t à 19 degrés de liberté) du premier challenger, dit avec son rang.
+    assert st["challenger"]["rang"] == 1 and round(st["challenger"]["seuil_z"], 2) == 2.53
+    assert ", seuil z 2,53 (challenger n° 1)" in line and "trades en direct" in line
 
 
 def test_resume_du_soir_garde_le_nom_de_la_version_de_generation(db):
@@ -372,11 +374,11 @@ def cmp_at(jours, delta=0.05, z=3.0, n=400, capture_ok=True, par_marche=None):
 
 def test_bascule_exige_une_marge_et_retrait_apres_delai():
     cfg = dict(V.DEFAULTS)
-    assert round(cfg["challenger_min_z"], 2) == 2.13 and cfg["challenger_max_days"] >= 100
+    assert round(V.challenger_z(1, 20, cfg), 2) == 2.53 and cfg["challenger_max_days"] >= 100
     t = datetime(2026, 1, 30, tzinfo=timezone.utc)
     assert M.verdict(cmp_at(20), cfg, t) == "promouvoir"
     assert M.verdict(cmp_at(20, delta=0.01), cfg, t) == "attendre"              # marge sous +0,02
-    assert M.verdict(cmp_at(20, delta=0.04, z=2.0), cfg, t) == "attendre"       # marge tenue, z sous 2,13
+    assert M.verdict(cmp_at(20, delta=0.04, z=2.0), cfg, t) == "attendre"       # marge tenue, z sous 2,53
     assert M.verdict(cmp_at(20, n=80), cfg, t) == "attendre"                    # moins de 100 trades gardés
     assert M.verdict(cmp_at(20, capture_ok=False), cfg, t) == "attendre"
     assert M.verdict(cmp_at(25), cfg, t, done=20) == "attendre"                 # entre deux regards
@@ -538,6 +540,194 @@ def test_promotion_qui_perd_encore_le_dit():
     chall = {"version": "v2", "regles": [{"empreinte": "a" * 64, "nom": "signal tendu"}]}
     text = M.promotion_text(cmp, dict(V.DEFAULTS), champ, chall, 20)
     assert text == ("v2 = v1 + « signal tendu ». En direct sur 20 jours de trades (actions) : +0,050 R par trade de "
-                    "mieux que v1 (z = 3,00, seuil 2,13) ; −0,120 R par trade sur 400 trades gardés, contre −0,170 R sur "
+                    "mieux que v1, z = 3,00, seuil z 2,53 (challenger n° 1) ; −0,120 R par trade sur 400 trades gardés, "
+                    "contre −0,170 R sur "
                     "500 ; potentiel +10 capturé 3 fois (contre 3). Filtre moins perdant, méthode toujours perdante. "
                     "Regard 1 sur 3.")
+
+
+# --- Lot 2 (chantier A) : seuil du challenger, promotion sans réponse, étiquettes absolues ----------
+
+def test_premier_regard_en_student_a_g_moins_1_degres():
+    """A1 : le z en grappes du challenger n'a que 20 grappes (jours) au premier regard : seuil de Student à 19
+    degrés de liberté, plus exigeant que le quantile normal (qui laissait passer trop de faux gains)."""
+    import math
+    from statistics import NormalDist
+
+    from app.lab import stats as STATS
+
+    cfg = dict(V.DEFAULTS)
+    level = 6 * 0.05 / (math.pi ** 2) / 3  # alpha du challenger n° 1, réparti sur 3 regards
+    assert V.challenger_z(1, 20, cfg) == pytest.approx(STATS.t_quantile(1 - level, 19))
+    assert V.challenger_z(1, 20, cfg) > NormalDist().inv_cdf(1 - level) + 0.2
+    assert V.challenger_z(1, 60, cfg) < V.challenger_z(1, 40, cfg) < V.challenger_z(1, 20, cfg)
+    assert V.challenger_z(1, 1, cfg) == math.inf  # moins de 2 jours : rien n'est jugeable
+
+
+def test_premier_regard_nul_promu_au_plus_a_son_alpha():
+    """A1, simulation (graine fixe) : challenger nul (10 % des trades retirés au hasard), z seul (sans la marge de
+    +0,02), premier regard à 20 jours, vrai code (measure_days, verdict) : fausse promotion ≤ son alpha
+    (α₁/3 ≈ 1,01 %) + marge de bruit. Le quantile normal, lui, en laisse passer bien plus."""
+    from statistics import NormalDist
+
+    cfg = dict(V.DEFAULTS) | {"challenger_min_gain": 0.0}
+    alpha = V.trial_level(1, cfg["challenger_alpha"]) / 3
+    normal = NormalDist().inv_cdf(1 - alpha)
+    rnd = random.Random(7)
+    runs, promoted, promoted_normal = 3000, 0, 0
+    for _ in range(runs):
+        day_sums = {}
+        for day in range(20):
+            d = [0.0, 0, 0.0, 0]
+            for _ in range(30):
+                r = max(-1.5, min(3.0, rnd.gauss(0, 1)))
+                d[0] += r
+                d[1] += 1
+                if rnd.random() >= 0.1:
+                    d[2] += r
+                    d[3] += 1
+            day_sums[day] = d
+        m = M.measure_days(day_sums)
+        cmp = m | {"depuis_ts": 0, "capture_ok": True, "challenger": {"declenches": sum(d[3] for d in day_sums.values())},
+                   "par_marche": {"stock": m}}
+        promoted += M.verdict(cmp, cfg) == "promouvoir"
+        promoted_normal += m["z"] is not None and m["z"] >= normal
+    assert promoted / runs <= alpha + 0.005
+    assert promoted_normal > promoted
+
+
+def test_seuil_selon_le_rang_du_challenger():
+    """A2 : alpha dépensé sur le rang k du challenger (6·0,05/(π²k²), même série que le validateur), Bonferroni sur
+    les 3 regards, Student à g − 1 degrés ; la marge de +0,02 R reste."""
+    cfg = dict(V.DEFAULTS)
+    assert round(V.challenger_z(1, 20, cfg), 2) == 2.53 and round(V.challenger_z(1, 60, cfg), 2) == 2.39
+    assert round(V.challenger_z(10, 20, cfg), 2) == 4.58 and round(V.challenger_z(10, 60, cfg), 2) == 3.96
+    t = datetime(2026, 1, 30, tzinfo=timezone.utc)
+    first, tenth = cfg | {"challenger_rang": 1}, cfg | {"challenger_rang": 10}
+    assert M.verdict(cmp_at(20, z=3.0), first, t) == "promouvoir"
+    assert M.verdict(cmp_at(20, z=3.0), tenth, t) == "attendre"
+    assert M.promotion_fails(cmp_at(20, z=3.0), tenth) == ["z = 3,00, seuil z 4,58 (challenger n° 10)"]
+    assert M.verdict(cmp_at(20, z=5.0, delta=0.01), tenth, t) == "attendre"  # marge de +0,02 R toujours exigée
+    # Seuil injecté (judged_cfg) : la décision et le texte disent le même seuil.
+    injected = cfg | {"challenger_min_z": 3.5, "challenger_rang": 4}
+    assert M.verdict(cmp_at(20, z=3.4), injected, t) == "attendre"
+    assert M.threshold_fr(cmp_at(20), injected) == "seuil z 3,50 (challenger n° 4)"
+
+
+def test_rang_du_challenger_memorise_et_retrait_sans_regard_gratuit(db):
+    """A2 : k = 1 + challengers précédents jugés à au moins un regard, mémorisé à la création. Un challenger retiré
+    sans aucun regard (filet des 100 jours) ne consomme pas d'alpha."""
+    synthetic_trades(db, n_days=5, per_day=4, seed=1)
+    a = insert_validated(db, "a", SIGNAL)
+    M.enqueue_decision(db.path, a, "approuvee")
+    M.ingest_decisions(db)
+    v2 = M.ensure_challenger(db, NOW)
+    assert M.version_settings(db.conn, "v2")["rang_challenger"] == 1 and M.challenger_rank(db.conn, v2) == 1
+    later = datetime(2027, 1, 20, tzinfo=timezone.utc)  # plus de 100 jours sans aucun trade en direct
+    assert M.judge_challenger(db, later) == "retirer" and M.challenger(db.conn) is None
+    assert "100 jours sans atteindre le dernier regard" in M.events(db.conn)[-1]["texte"]
+    # v3 : v2 n'a jamais été jugée, k reste 1.
+    rvol = {"field": "context.rvol", "op": ">", "value": 1.5}
+    b = insert_validated(db, "b", rvol)
+    M.enqueue_decision(db.path, b, "approuvee")
+    M.ingest_decisions(db)
+    v3 = M.ensure_challenger(db, later)
+    assert v3["version"] == "v3" and M.challenger_rank(db.conn, v3) == 1
+    synthetic_trades(db, n_days=20, per_day=30, seed=31, origin="live", first=date(2027, 1, 21),
+                     effect=lambda ctx, rnd: -1.0 if ctx["rvol"] > 1.5 else 0.1)
+    assert M.judge_challenger(db, later) == "promouvoir"  # jugée au premier regard : alpha dépensé
+    assert "seuil z 2,53 (challenger n° 1)" in M.pending_promotion(db.conn)["texte"]
+    M.enqueue_promotion(db.path, "v3-20", False)
+    assert M.ingest_decisions(db, later) == 1 and M.challenger(db.conn) is None
+    # v4 : une seule précédente jugée (v3), k = 2, et il ne bouge plus pendant l'essai.
+    c = insert_validated(db, "c", {"field": "composite", "op": "<", "value": 5})
+    M.enqueue_decision(db.path, c, "approuvee")
+    M.ingest_decisions(db)
+    v4 = M.ensure_challenger(db, datetime(2027, 3, 1, tzinfo=timezone.utc))
+    assert v4["version"] == "v4" and M.version_settings(db.conn, "v4")["rang_challenger"] == 2
+    db.set("methode", "regard:v2", 20)  # ce qui arrive ensuite aux autres versions ne change pas son rang
+    assert M.judged_challengers(db.conn, "v4") == 2 and M.challenger_rank(db.conn, v4) == 2
+    st = M.state(db.conn)["challenger"]
+    assert st["rang"] == 2 and st["seuil_texte"] == f"seuil z {M.num_fr(V.challenger_z(2, 20))} (challenger n° 2)"
+    # Challenger d'avant ce suivi (rang absent des settings) : calculé de la même façon.
+    db.conn.execute("UPDATE method_versions SET settings = '{}' WHERE version = 'v4'")
+    assert M.challenger_rank(db.conn, v4) == 3
+
+
+def test_promotion_du_dernier_regard_sans_reponse_retiree_apres_14_jours(db):
+    """A3 : une promotion proposée au dernier regard et restée sans réponse ne bloque plus le labo : retrait après
+    14 jours (événement comme les autres retraits), proposition close, nouvelle règle approuvée mise en essai."""
+    challenger_ready(db, losers, n_days=60, per_day=10)
+    assert M.judge_challenger(db, NOW) == "promouvoir"  # 60 jours d'un coup : proposée au dernier regard
+    assert M.pending_promotion(db.conn)["id"] == "v2-60"
+    props = PR.Proposals(None, Settings(None))
+    [p] = M.sync_proposals(props, M.champion_payload(db.conn))
+    b = insert_validated(db, "b", {"field": "context.rvol", "op": ">", "value": 4})
+    M.enqueue_decision(db.path, b, "approuvee")
+    M.ingest_decisions(db)
+    assert M.ensure_challenger(db, NOW) is None  # le challenger en attente bloque la file
+    assert M.judge_challenger(db, datetime(2026, 10, 20, 6, 5, tzinfo=timezone.utc)) is None  # 13 jours : attendre
+    when = datetime(2026, 10, 21, 6, 5, tzinfo=timezone.utc)
+    assert M.judge_challenger(db, when) == "retirer"
+    assert M.challenger(db.conn) is None and M.pending_promotion(db.conn) is None
+    text = M.events(db.conn)[-1]["texte"]
+    assert text.startswith("🧪 Méthode v2 retirée : promotion sans réponse de Simão (14 jours) (")
+    assert M.sync_proposals(props, M.champion_payload(db.conn)) == [] and props.get(p["id"])["status"] == "replaced"
+    assert M.ensure_challenger(db, when)["version"] == "v3"  # la file repart
+
+
+def test_promotion_sans_reponse_d_un_regard_intermediaire():
+    """A3 : avant le dernier regard, le regard suivant remplace la proposition (comportement gardé) ; passé 14
+    jours, elle ne protège plus le challenger du filet des 100 jours."""
+    cfg = dict(V.DEFAULTS)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    promo = {"id": "v2-20", "le": "2026-01-29T06:05:00+00:00"}
+    assert M.verdict(cmp_at(25), cfg, datetime(2026, 2, 20, tzinfo=timezone.utc), done=20, pending=promo) == "attendre"
+    late = datetime(2026, 4, 12, tzinfo=timezone.utc)  # 101 jours depuis le début de l'essai
+    assert M.verdict(cmp_at(25), cfg, late, done=20, pending=promo) == "retirer"
+    fresh = promo | {"le": "2026-04-01T06:05:00+00:00"}  # Simão a encore le temps de répondre
+    assert M.verdict(cmp_at(25), cfg, late, done=20, pending=fresh) == "attendre"
+    assert M.verdict(cmp_at(65), cfg, datetime(2026, 2, 20, tzinfo=timezone.utc), done=60, pending=promo) == "retirer"
+    assert not M.promotion_expired(True, late, cfg) and start < late
+
+
+def test_etiquette_absolue():
+    """A6 : un écart relatif positif ne dit pas que la méthode gagne."""
+    assert M.absolute_label({"esperance_r": -0.12}, 0.05) == "filtre moins perdant, méthode toujours perdante"
+    assert M.absolute_label({"esperance_r": -0.20}, -0.03) == "méthode toujours perdante"
+    assert M.absolute_label({"esperance_r": 0.05, "ic95": [-0.01, 0.11]}, 0.04) == \
+        "méthode positive mais non prouvée (IC95 −0,010 ; +0,110)"
+    assert M.absolute_label({"esperance_r": 0.05, "ic95": [0.01, 0.09]}) == ""
+    assert M.absolute_label({"esperance_r": 0.05, "ic95": None}) == "" == M.absolute_label({"esperance_r": None})
+    assert M.absolute_fr({"esperance_r": -0.12}) == " Filtre moins perdant, méthode toujours perdante."
+
+
+def test_labo_et_cockpit_disent_methode_toujours_perdante(db, monkeypatch):
+    """A6 : challenger à −0,12 contre un champion à −0,17 : !labo (state_line) et le cockpit le disent."""
+    from app.lab import page as P
+
+    challenger_ready(db, losers, n_days=2, per_day=10)
+    cmp = cmp_at(5, delta=0.05) | {"marches": ["stock"]}
+    cmp["challenger"]["esperance_r"], cmp["champion"]["esperance_r"] = -0.12, -0.17
+    monkeypatch.setattr(M, "compare", lambda *a, **k: cmp)
+    st = M.state(db.conn)
+    assert st["challenger"]["etiquette"] == "filtre moins perdant, méthode toujours perdante"
+    assert "· filtre moins perdant, méthode toujours perdante" in M.state_line(st)
+    h = insert_validated(db, "testée", {"field": "context.rvol", "op": ">", "value": 3})
+    html = P.render({"exists": True, "methode": st}, [], [V.get_rule(db.conn, h)], None, False)
+    assert "<b>Filtre moins perdant, méthode toujours perdante.</b>" in html
+    assert "seuil z 2,53 (challenger n° 1)" in html
+    assert "<th>Écart / trade (relatif)</th>" in html and "Gain / trade" not in html
+
+
+def test_bascule_d_une_methode_toujours_perdante_le_dit(db):
+    """A6 : l'événement de mise en place (_promote, relayé le matin) porte l'étiquette absolue."""
+    challenger_ready(db, lambda ctx, rnd: -1.0 if ctx["signal"] > 0.8 else -0.3)
+    assert M.judge_challenger(db, NOW) == "promouvoir"
+    M.enqueue_promotion(db.path, "v2-20", True)
+    assert M.ingest_decisions(db, NOW) == 1 and M.champion(db.conn)["version"] == "v2"
+    text = M.events(db.conn)[-1]["texte"]
+    assert text.startswith("🧪 Méthode v2 en place") and text.endswith(" Filtre moins perdant, méthode toujours perdante.")
+    note = json.loads(db.conn.execute("SELECT note FROM method_versions WHERE version = 'v2'").fetchone()[0])
+    assert note["rang_challenger"] == 1 and note["seuil_z"] == round(V.challenger_z(1, 20), 3)
+    assert note["challenger"]["esperance_r"] < 0 and note["challenger"]["ic95"][1] < 0
