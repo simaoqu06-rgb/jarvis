@@ -151,6 +151,40 @@ Ensuite : `docker compose logs -f jarvis-lab` pour suivre le rejeu, `!labo` sur 
 l'historique (bougies journalières de toutes les actions, puis 5 min des valeurs de chaque jour) :
 compter quelques heures avant la fin du rejeu, surtout la nuit et le week-end.
 
+### Archive d'audit des mesures remplacées (lot 2)
+
+Quand une déclaration change la façon de mesurer (n° 10 : simulateur révision 2, témoin à la même heure, prix
+négociés), le labo réécrit ses anciennes lignes. Avant toute réécriture, le worker les copie **automatiquement**,
+une seule fois, dans `data/archives/labo2-avant-n10.db` (à côté de `lab.db`) : tables `strat_trades`, `kill_complet`
+et `plus10_trades`, plus `archive_info` (heure, ce qui est remplacé, lignes par table). Si la copie échoue (disque
+plein…), le worker ne réécrit rien et le dit dans `docker compose logs jarvis-lab` (« archive d'audit en échec »).
+L'archive sert seulement à l'audit (`!strategies`, section « Audit », et `GET /api/lab/strategies/audit`) : rien
+ne la lit pour décider. Le fichier fait à peu près la taille des lignes remplacées ; `data/` n'est jamais effacé
+par le ménage.
+
+En secours (worker arrêté ou ancienne version du code), la même copie à la main, depuis le dossier de JARVIS. Elle
+ne crée une table que si elle manque (l'image n'a pas l'outil `sqlite3`, d'où Python) :
+
+```bash
+docker compose exec -T jarvis-lab python - <<'EOF'
+import os, sqlite3
+db = os.getenv("JARVIS_LAB_DB", "data/lab.db")
+out = os.path.join(os.path.dirname(db) or ".", "archives", "labo2-avant-n10.db")
+os.makedirs(os.path.dirname(out), exist_ok=True)
+c = sqlite3.connect(db, timeout=300)
+c.execute("ATTACH DATABASE ? AS a", (out,))
+have = {r[0] for r in c.execute("SELECT name FROM a.sqlite_master WHERE type = 'table'")}
+for t, where in (("strat_trades", "WHERE declaration IS NULL"), ("kill_complet", ""), ("plus10_trades", "")):
+    if t not in have:
+        c.execute(f"CREATE TABLE a.{t} AS SELECT * FROM main.{t} {where}")
+        c.commit()
+    print(t, c.execute(f"SELECT COUNT(*) FROM a.{t}").fetchone()[0], "lignes archivées")
+print("Archive :", out)
+EOF
+```
+
+Le worker reconnaît cette copie : il ne recrée pas ses tables et n'y ajoute que les lignes qui manquent.
+
 ### Accès du labo pour la routine du soir (Labo 2)
 
 Les routes `GET /api/lab/summary`, `/api/lab/stats`, `/api/lab/catalysts`, `/api/lab/rules` et

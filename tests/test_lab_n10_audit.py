@@ -641,3 +641,41 @@ def test_go_brut_lignes_sans_temoin():
     assert "· 3 lignes sans témoin (hors de l'écart)" in line
     assert "sans témoin" not in next(x for x in SS.text(rep).splitlines()
                                      if x.startswith(rep["strategies"]["stock"]["pullback"]["nom"]))
+
+
+# --- C8 : docs ---------------------------------------------------------------------------------------------------
+
+def test_commande_manuelle_de_deploy_puis_archive_automatique(tmp_path):
+    """La commande de secours de DEPLOY.md, lancée telle quelle, puis le worker : rien de recréé, rien en double."""
+    import os
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[1]
+    deploy = (root / "DEPLOY.md").read_text(encoding="utf-8")
+    script = deploy.split("docker compose exec -T jarvis-lab python - <<'EOF'\n")[1].split("\nEOF\n")[0]
+    db = _base(tmp_path)
+    run = subprocess.run([sys.executable, "-c", script], cwd=tmp_path, capture_output=True, text=True,
+                         env=os.environ | {"JARVIS_LAB_DB": str(tmp_path / "lab.db")}, timeout=60)
+    assert run.returncode == 0 and "strat_trades 4 lignes archivées" in run.stdout
+    path = _archive(db)
+    assert _read(path, "SELECT COUNT(*) FROM strat_trades") == [(4,)]          # declaration IS NULL seule
+    out = AUD.step(db)
+    assert out[f"strats:stock:d{ST.DECLARATION}"]["strat_trades"] == {"choisies": 4, "ajoutees": 0, "deja_la": 4}
+    assert out[f"strats:crypto:d{ST.CRYPTO_DECLARATION}"]["strat_trades"]["ajoutees"] == 1   # la n° 9 crypto
+    assert _read(path, "SELECT COUNT(*) FROM strat_trades") == [(5,)]
+
+
+def test_docs_de_la_n10_limites_et_avant_la_n11():
+    root = Path(__file__).resolve().parents[1]
+    doc = (root / "docs" / "labo-strategies.md").read_text(encoding="utf-8")
+    section = doc.split("## Déclaration n° 10 (10 octobre 2026)")[1].split("## Bloc scellé")[0]
+    for text in ("moyenne des 6 bougies qui suivent la bougie d'exécution", "se compte en bougies, pas en minutes",
+                 "+0,007 R", "−0,06 R à 1 σ, −0,10 R à 0,75 σ, −0,28 R à 0,5 σ", "+0,013 R [+0,004 ; +0,023]",
+                 "`go_brut` n'a pas de témoin", "Limite de régime", "30 pas par bougie", "### Avant la n° 11",
+                 "`rattrapage.v1_trades` ne lit pas", "témoin transversal", "labo2-avant-n10.db",
+                 "Pour audit, jamais pour décider", "(méthode du solde n° 5)"):
+        assert text in section, text
+    assert "rejoue encore en révision 1 : à aligner" not in section
+    assert "Méthode du solde n° 5" in doc and "### Archive d'audit des mesures remplacées" in (
+        root / "DEPLOY.md").read_text(encoding="utf-8")
