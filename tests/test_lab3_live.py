@@ -323,6 +323,52 @@ async def test_plan_verdict_regime_absent_plan_garde_une_ligne(champ_file, monke
     assert calls.count("SPY") == 2 and "BTC" in calls  # réessayé : une panne n'est pas gardée pour la journée
 
 
+def test_journalier_absent_regles_sur_rvol_non_appliquees(champ_file, full_db, monkeypatch, caplog):  # noqa: F811
+    """Bougies journalières en panne (build_plan les lit sans les exiger) : les règles sur rvol et day_change_pct ne
+    s'appliquent pas, plutôt que d'écarter le plan « par la méthode » sur un champ inconnu ; les autres règles
+    oui ; une seule ligne de journal. Avec les bougies, la règle s'applique comme avant."""
+    import asyncio
+
+    from app.lab import generator as G
+    from tests.test_lab_generator import DAY as GEN_DAY
+
+    caplog.set_level(logging.WARNING)
+    inp = G.stock_inputs(full_db, "AAA", GEN_DAY)
+    now = datetime.fromtimestamp(U.stock_decision_ts(GEN_DAY), timezone.utc)
+    fail = {"daily": False}
+
+    async def fake_candles(symbol, market, interval, source=None, max_age=None, outputsize=None):
+        if interval == 1440 and fail["daily"]:
+            raise T.PlanError("bougies journalières indisponibles (test)")
+        return {15: inp["bars"], 1440: inp["daily"], 240: inp["h4"]}[interval]
+
+    async def no_cat(symbol, now):
+        return None
+
+    monkeypatch.setattr(T, "candles", fake_candles)
+    monkeypatch.setattr(T.C, "safe_check", no_cat)
+    monkeypatch.setattr(GR, "current", lambda: GRADE_A | {"verifie_le": now.isoformat()})
+    keep_rvol = rule({"field": "context.rvol", "op": ">=", "value": 0.5}, kind="keep", name="rvol au moins 0,5")
+    write_champion(champ_file, [keep_rvol])
+    ok = asyncio.run(T.build_plan("AAA", "stock", now=now))
+    assert ok["methode"] == {"garde": True, "regles": [], "version": "v2"}
+    write_champion(champ_file, [rule({"field": "context.rvol", "op": ">=", "value": 1e9}, kind="keep",
+                                     name="rvol énorme")])
+    assert not asyncio.run(T.build_plan("AAA", "stock", now=now))["methode"]["garde"]  # lu sur les bougies
+    fail["daily"] = True
+    for _ in range(2):
+        ko = asyncio.run(T.build_plan("AAA", "stock", now=now))
+        assert ko["methode"] == {"garde": True, "regles": [], "version": "v2"} and not ko["grade"].get("ecarte")
+    assert caplog.text.count("bougies journalières du plan indisponibles") == 1
+    # Les autres règles s'appliquent toujours ; une condition mixte (rvol ou autre) n'est pas appliquée.
+    write_champion(champ_file, [keep_rvol, rule({"field": "symbol", "op": "==", "value": "AAA"}, name="pas AAA")])
+    assert asyncio.run(T.build_plan("AAA", "stock", now=now))["methode"]["regles"] == ["pas AAA"]
+    mixed = rule({"or": [{"field": "context.day_change_pct", "op": ">", "value": 50},
+                         {"field": "symbol", "op": "==", "value": "AAA"}]}, name="mixte")
+    write_champion(champ_file, [mixed])
+    assert asyncio.run(T.build_plan("AAA", "stock", now=now))["methode"]["garde"]
+
+
 def test_ligne_crypto_au_nom_du_labo_avec_le_regime_de_btc():
     """Plan crypto du direct (« BTC », Kraken) : la ligne de lessons.crypto_row, le symbole du labo (« BTC-USDT »)
     et le régime de BTC comme generator.crypto_day."""
