@@ -907,7 +907,8 @@ def _eur(x: float) -> str:
 def plan_line(g: dict) -> str:
     """Une ligne pour le plan sur Discord (et l'avertissement d'un risque demandé au-delà du budget)."""
     head = f"🏅 Grade JARVIS **{g['grade']}** · risque proposé **{g['risque_propose']:g} %**"
-    line = head + (f" : plan en observation ({g['raison']})" if g.get("observation") else f" ({g['raison']})")
+    line = head + (f" : plan {g['raison']}" if g.get("ecarte") else  # écarté par la méthode : la raison suffit
+                   f" : plan en observation ({g['raison']})" if g.get("observation") else f" ({g['raison']})")
     if g.get("hors_budget"):
         line += (f"\n⚠️ **Hors budget** : risque demandé {g['risque_demande']:g} %"
                  + (f" ({_eur(g['risque_demande_eur'])})" if g.get("risque_demande_eur") else "")
