@@ -10,6 +10,7 @@ Depuis le 10 octobre 2026 (fil « JARVIS s'améliore-t-il vraiment », choix « 
 analystes ne reçoivent plus seulement des totaux : `detail` (espérance par setup, régime, heure, note et jour,
 calculée par le code avec IC en grappes), `strategies` (tableau du labo v2 en bref, confirmation des GO) et
 `autopsie` (où les trades échouent, élan contre le hasard, grade indicatif des GO confirmés).
+`filtres_scanner` : ce que coûte chaque filtre du scanner de 15 h 10, mesuré sur les trades v1 d'actions (filtres.py).
 """
 import fcntl
 import json
@@ -20,6 +21,7 @@ from zoneinfo import ZoneInfo
 
 from app.lab import autopsie as AUT
 from app.lab import catalysts as CAT
+from app.lab import filtres as FIL
 from app.lab import grade as GRADE
 from app.lab import lessons as L
 from app.lab import method as M
@@ -226,6 +228,7 @@ def build(conn, now: datetime, db_file: str, morning: dict | None = None, dm: bo
             "regles_recentes": _rules(conn, now), "compteurs": V.counts(conn), "lecons": _lessons(conn),
             "grade": _grade(conn),
             "detail": _detail(conn), "strategies": _strategies(conn), "autopsie": AUT.compact(AUT.cached(conn)),
+            "filtres_scanner": FIL.compact(FIL.cached(conn)),
             "point_du_matin": {k: morning.get(k) for k in ("jour", "etat", "rejetees", "propositions", "texte")}
             if morning else None}
     cut = False
@@ -249,6 +252,8 @@ def build(conn, now: datetime, db_file: str, morning: dict | None = None, dm: bo
             pass
         elif data["autopsie"] and data["autopsie"].get("strategies"):
             data["autopsie"]["strategies"] = None
+        elif data["filtres_scanner"] and data["filtres_scanner"].get("par_prix"):
+            data["filtres_scanner"]["par_prix"] = None
         elif data["lecons"] and len(data["lecons"]["actives"]) > 10:
             data["lecons"]["actives"] = data["lecons"]["actives"][:-5]  # confirmées en tête : on garde celles-là
         else:

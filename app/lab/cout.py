@@ -19,8 +19,8 @@ JOB = "cout:n8"
 TABLES = ("trades", "trades_sealed")
 BATCH = 5000
 CACHES = (("stats", "signature"), ("grade_calc", "signature"), ("lessons", "signature"), ("strats", "signature"),
-          ("autopsie", "signature"))
-AGES = (("stats", "at"), ("lessons", "at"), ("strats", "at"), ("autopsie", "at"))
+          ("autopsie", "signature"), ("filtres", "signature"))
+AGES = (("stats", "at"), ("lessons", "at"), ("strats", "at"), ("autopsie", "at"), ("filtres", "at"))
 
 
 def recost(result: dict, side: str = "long") -> dict | None:

@@ -158,13 +158,23 @@ Chaque valeur du scanner (GO comme NO GO) est passée en silence sur le compte f
 trois ordres « bracket » (un tiers de la taille vers chaque TP, même stop), annulés si l'entrée
 n'est pas touchée dans la séance, soldés après 2 séances. Aucun message trade par trade : seul un
 bilan agrégé part le vendredi à 16 h 30 (New York), avec le résultat moyen en R par verdict,
-par note, par RSI, par volume, par gap et par catalyseur, l'écart entre délais prévus et réels,
-`GET /api/trading/paper/stats` ou `!bilan` à tout moment.
+par note, par RSI, par volume, par gap, par catalyseur et par volume moyen en $ (mesuré seulement :
+il chiffre la règle « pas de filtre de liquidité »), l'écart entre délais prévus et réels (en minutes
+de cotation ; les TP coupés par l'horizon n'y entrent pas), `GET /api/trading/paper/stats` ou `!bilan`
+à tout moment. Il mesure les plans bruts du scanner (entrée limite au prix de pré-ouverture, stop fixe,
+2 séances, avant frais), pas les GO confirmés que tu trades (`!confirmations`) ; les plans manuels
+sont comptés à part. Il ne voit que les valeurs qui passent les filtres : ce que coûte chaque filtre
+(prix, en jeu, ATR, MM, RSI) est mesuré au labo sur les trades v1 d'actions (`GET /api/lab/filtres`,
+section `filtres_scanner` du brief du soir).
 
-Quand un groupe a 15 exemples et un écart net, JARVIS en tire une **proposition de réglage**
-numérotée (ex. « `rsi_max` 75 → 65 : RSI ≥ 65 à -0,40 R sur 18 plans »). Elle arrive en message
-privé Discord avec des boutons Approuver / Refuser, et dans le cockpit. Rien ne change sans ton
-accord ; une proposition refusée n'est pas reproposée avec la même valeur.
+JARVIS en tire une **proposition de réglage** numérotée seulement sur preuve : au moins 30 plans sur
+10 séances, intervalle de confiance en grappes par jour (t de Student, corrigé pour les 6 règles)
+entièrement du bon côté, sur tous les plans ou sur les GO seuls. Un filtre resserré doit aussi perdre
+sur les plans qu'il retirerait vraiment, et la proposition tombe si les GO confirmés de la même tranche
+disent le contraire (ex. « `rsi_max` 75 → 65 : RSI ≥ 65 : -0,52 R en moyenne (IC -0,90 ; -0,14) sur
+40 plans, 20 jours »). `go_min` ne monte que de 0,5 sur la tranche juste au-dessus du seuil, jamais
+au-delà de 8,5. Elle arrive en message privé Discord avec des boutons Approuver / Refuser, et dans le
+cockpit. Rien ne change sans ton accord ; une proposition refusée n'est pas reproposée avec la même valeur.
 
 ## Labo de performance
 

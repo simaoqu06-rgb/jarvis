@@ -35,6 +35,8 @@ Toutes les ~10 min :
    non ajustées relues et gardées en mémoire, hors séance US, plus10_seconds par passage.
 13. « autopsie » (autopsie.py) : où les trades échouent (MFE/MAE contre le hasard) et grade indicatif des GO
    confirmés, recalculés quand les trades changent, au plus toutes les stats_age secondes.
+14. « filtres » (filtres.py) : ce que coûte chaque filtre du scanner de 15 h 10 sur les trades v1 d'actions,
+   recalculé quand les trades ou les réglages changent, au plus toutes les stats_age secondes, hors séance US.
 Le battement (lab.heartbeat) porte l'étape en cours, affichée par /api/lab/status et !labo.
 Le rejeu couvre JARVIS_LAB_REPLAY_DAYS séances (504 ≈ 2 ans) avant le premier lancement du worker ;
 le direct prend le relais à partir de ce jour-là. JARVIS_LAB_ENABLED=off met le worker en veille.
@@ -52,6 +54,7 @@ from app.lab import collector as CO
 from app.lab import cout as COUT
 from app.lab import derivs as DER
 from app.lab import empreinte as E
+from app.lab import filtres as FIL
 from app.lab import generator as G
 from app.lab import grade as GRADE
 from app.lab import heartbeat
@@ -412,6 +415,8 @@ async def lab2(db: LabDB, now: datetime, collect: bool = True) -> dict:
     await step("grade", lambda: GRADE.step(db, now))
     await step("strategies", lambda: refresh_strategies(db, now, budget["stats_age"]))
     await step("autopsie", lambda: AUT.step(db, now, budget["stats_age"]))
+    if not CO.CAL.session_open(now):  # un journalier relu par action : pas pendant la séance US
+        await step("filtres", lambda: FIL.step(db, now, budget["stats_age"]))
     summary_day = SUM.due(now, db.get("summary", "last_day"))
     stats = await step("stats", lambda: refresh_stats(db, now, budget["stats_age"], force=bool(summary_day)))
     if stats:

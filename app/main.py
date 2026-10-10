@@ -31,6 +31,7 @@ from app.lab import page as lab_page
 from app.lab import stats as lab_stats
 from app.lab import potentiel as lab_potentiel
 from app.lab import autopsie as lab_autopsie
+from app.lab import filtres as lab_filtres
 from app.lab import strat_stats as lab_strategies
 from app.lab import status as lab_status
 from app.lab import summary as lab_summary
@@ -739,6 +740,18 @@ def lab_autopsie_get():
     conn = _lab_conn()
     try:
         return lab_autopsie.cached(conn) or lab_autopsie.report(conn)
+    finally:
+        conn.close()
+
+
+@app.get("/api/lab/filtres", dependencies=[Depends(lab_key)])
+def lab_filtres_get():
+    """Ce que coûte chaque filtre du scanner de 15 h 10 sur les trades v1 d'actions : passe tout, rate
+    seulement un critère, rate 2 ou plus, et tranches de prix (R net, IC, GO seuls). Mesure seulement.
+    Cache du worker, sinon calcul direct."""
+    conn = _lab_conn()
+    try:
+        return lab_filtres.cached(conn) or lab_filtres.report(conn)
     finally:
         conn.close()
 

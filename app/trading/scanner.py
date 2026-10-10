@@ -3,7 +3,8 @@
 Repris de l'agent scanner d'OpenClaw, mais calculé au lieu d'être deviné, et revu :
 - univers : les 100 plus actives et les 50 plus fortes hausses (screener Alpaca), plus la liste
   suivie et `scan_universe` ; les ETF tombent d'eux-mêmes (pas de profil de société chez Finnhub) ;
-- en jeu : volume de la veille ≥ 1,5× la moyenne 20 jours OU gap de pré-ouverture ≥ 2 % ;
+- en jeu : volume de la veille ≥ 1,5× la moyenne 20 jours OU gap de pré-ouverture ≥ 2 % (avec un
+  volume de la veille d'au moins `scan_gap_rvol_min`, 0 par défaut : aucun minimum) ;
 - tradable : prix ≥ 5 $ (pas de plafond), amplitude journalière (ATR) ≥ 2,5 % pour que des TP
   à +5-10 % soient réalistes ; ni liquidité ni capitalisation minimales (choix de Simão) ;
 - dans la tendance : au-dessus des MM 20 et 50 jours, RSI 14 jours entre 45 et 75 ;
@@ -75,7 +76,8 @@ def filter_reasons(f: dict, s) -> list[str]:
     out = []
     if f["price"] < s["scan_price_min"] or (s["scan_price_max"] and f["price"] > s["scan_price_max"]):
         out.append("prix")
-    if not ((f["rvol"] or 0) >= s["scan_rvol_min"] or f["gap_pct"] >= s["scan_gap_min_pct"]):
+    rvol = f["rvol"] or 0
+    if not (rvol >= s["scan_rvol_min"] or (f["gap_pct"] >= s["scan_gap_min_pct"] and rvol >= s["scan_gap_rvol_min"])):
         out.append("pas en jeu")
     if f["atr_pct"] < s["scan_atr_pct_min"]:
         out.append("trop calme")
@@ -184,7 +186,8 @@ async def scan(now: datetime | None = None, s=settings, save: bool = True) -> di
     picks.sort(key=lambda p: p["plan"]["score"]["composite"], reverse=True)
     result = {"at": now.isoformat(timespec="seconds"), "examined": len(symbols), "passed": len(passed),
               "rejected": rejected, "skipped": skipped, "picks": picks, "ecartees_methode": filtered,
-              "methode": champ.get("version")}
+              "methode": champ.get("version"),
+              "reglages": {k: s[k] for k in ("scan_rvol_min", "scan_gap_min_pct", "scan_gap_rvol_min")}}
     if save:
         _save(result)
     return result
