@@ -7,6 +7,7 @@ from datetime import date, datetime, timezone
 import pytest
 
 from app.lab import collector as CO
+from app.lab import grade as GR
 from app.lab import live as LIVE
 from app.lab import method as M
 from app.lab import regime as REG
@@ -17,6 +18,7 @@ from app.trading import scanner
 from app.trading import score as SC
 from app.trading import service as T
 from app.trading.settings import Settings
+from tests.test_lab_generator import full_db  # noqa: F401  (fixture)
 from tests.test_score import plan as score_plan
 
 NOW = datetime(2026, 10, 7, 13, 10, tzinfo=timezone.utc)  # 9 h 10 à New York
@@ -58,6 +60,7 @@ def champ_file(tmp_path, monkeypatch):
     monkeypatch.setenv("JARVIS_LAB_CHAMPION", str(path))
     monkeypatch.setattr(LIVE, "_cache", {"key": None, "data": None})
     monkeypatch.setattr(LIVE, "_warned", set())
+    monkeypatch.setattr(LIVE, "_index", {})
     return path
 
 
@@ -222,3 +225,194 @@ async def test_scanner_montre_le_potentiel_plus_10(champ_file, scan_env, monkeyp
     assert result["picks"] and all(p["potentiel"] for p in result["picks"])   # gap de pré-ouverture +2 %
     assert ("🎯 Potentiel +10 : 9,2 % des séances à gap +2 à +5 % ont touché +8 % depuis l'ouverture "
             "(4,1 % +10 %), sur 120 séances du labo") in scanner.text(result)
+
+
+# --- Tous les plans (A5) : `!plan`, `!prends`, API, crypto ---------------------------------------
+
+GRADE_A = {"marches": {"stock": {"grade": "A", "rang": GR.rank_of("A", 1), "non_note": False, "risque_grade": 3.0,
+                                 "risque_max": 3.0, "mode_survie": False}},
+           "verifie_le": NOW.isoformat()}
+
+
+def crypto_daily(n: int, end: date, start: float = 60000.0, step: float = 50.0) -> list[dict]:
+    """Bougies journalières crypto (minuit UTC, tous les jours), jusqu'à `end` inclus."""
+    first = CO.utc_midnight(end) - (n - 1) * 86400
+    return [{"t": first + i * 86400, "o": start + i * step, "h": start + i * step + 100,
+             "l": start + i * step - 100, "c": start + i * step + (30 if i % 3 else -60), "v": 1e3}
+            for i in range(n)]
+
+
+async def test_plan_ecarte_par_la_methode_sans_taille_mais_affiche(champ_file, monkeypatch):
+    """Le grade mesure les trades que garde le champion : un plan qu'il écarte ne reçoit pas le risque du grade
+    (0 %, taille None), la raison est dite sur les lignes 🏅 et 💰, et le plan reste affiché."""
+    write_champion(champ_file, [rule({"field": "symbol", "op": "==", "value": "AAA"}, name="pas AAA")])
+    monkeypatch.setattr(GR, "current", lambda: GRADE_A)
+    monkeypatch.setenv("JARVIS_CAPITAL", "10000")
+    daily = daily_bars(80, date(2026, 10, 6))
+    p = fake_plan("AAA") | {"entry": 10.0, "stop": 9.5}
+    verdict = await LIVE.plan_verdict(p, daily, NOW, Settings(None))
+    assert verdict == {"garde": False, "regles": ["pas AAA"], "version": "v2"}
+    T.apply_grade(p, None, None, NOW, trades=[], usd_per_eur=1.15, methode=verdict)
+    g = p["grade"]
+    assert p["sizing"] is None and p["methode"] == verdict
+    assert g["risque_propose"] == 0.0 and g["ecarte"] and g["grade"] == "A" and g["risque_grade"] == 3.0
+    assert g["raison"] == "écarté par la méthode v2 (règle « pas AAA »)"
+    assert GR.plan_line(g) == "🏅 Grade JARVIS **A** · risque proposé **0 %** : plan écarté par la méthode v2 (règle « pas AAA »)"
+    assert T.sizing_lines(p) == ["💰 JARVIS ne propose pas de taille : plan écarté par la méthode v2 (règle « pas AAA »). "
+                                 "Ta règle de 20 € : 46 actions pour 460 $ (exception, hors avis de JARVIS)"]
+    text = T.plan_text(p | {"targets": [], "checklist": p["checklist"] | {"items": []}})
+    assert "**🟢 LONG AAA**" in text and "plan écarté par la méthode v2" in text and "Ta règle de 20 €" in text
+    # Gardé : le risque du grade (3 % de 10 000 €, plafonné à 20 €), rien d'écarté.
+    q = fake_plan("BBB") | {"entry": 10.0, "stop": 9.5}
+    verdict = await LIVE.plan_verdict(q, daily, NOW, Settings(None))
+    T.apply_grade(q, None, None, NOW, trades=[], usd_per_eur=1.15, methode=verdict)
+    assert verdict["garde"] and q["sizing"]["risk_amount_eur"] == 20.0 and not q["grade"].get("ecarte")
+    assert q["grade"]["raison"] == "grade A"
+    # Plusieurs règles ; risque demandé explicitement : gardé, hors budget (JARVIS ne propose rien).
+    r = fake_plan("AAA") | {"entry": 10.0, "stop": 9.5}
+    T.apply_grade(r, None, 1.0, NOW, trades=[], usd_per_eur=1.15,
+                  methode={"garde": False, "regles": ["a", "b"], "version": "v3"})
+    assert r["grade"]["raison"] == "écarté par la méthode v3 (règles « a », « b »)"
+    assert r["sizing"]["risk_amount_eur"] == 20.0 and r["grade"]["hors_budget"]
+
+
+async def test_plan_verdict_rien_a_evaluer(champ_file, monkeypatch, caplog):
+    """None (aucun effet) sans champion, sans règle sur le marché du plan, ou pour un short (le labo ne mesure
+    que des longs) ; une erreur garde le plan avec une ligne de journal, jamais d'exception."""
+    caplog.set_level(logging.WARNING)
+    daily = daily_bars(80, date(2026, 10, 6))
+    assert await LIVE.plan_verdict(fake_plan("AAA"), daily, NOW) is None
+    crypto_only = rule({"field": "symbol", "op": "==", "value": "AAA"}, name="pas AAA") | {"markets": ["crypto"]}
+    write_champion(champ_file, [crypto_only])
+    assert await LIVE.plan_verdict(fake_plan("AAA"), daily, NOW) is None
+    write_champion(champ_file, [rule({"field": "symbol", "op": "==", "value": "AAA"}, name="pas AAA")])
+    assert await LIVE.plan_verdict(fake_plan("AAA") | {"side": "short"}, daily, NOW) is None
+    monkeypatch.setattr(M, "market_rules", lambda rules, market: 1 / 0)
+    for _ in range(2):
+        assert await LIVE.plan_verdict(fake_plan("AAA"), daily, NOW) == {"garde": True, "regles": [], "version": "v2"}
+    assert caplog.text.count("verdict du plan impossible") == 1
+
+
+async def test_plan_verdict_regime_absent_plan_garde_une_ligne(champ_file, monkeypatch, caplog):
+    """SPY (actions) ou BTC (crypto) indisponible : les règles sur le régime ne s'appliquent pas, les autres oui,
+    une seule ligne de journal par indice."""
+    caplog.set_level(logging.WARNING)
+    write_champion(champ_file, [
+        rule({"field": "regime_trend", "op": "==", "value": "haussier"}, kind="keep", name="haussier seulement"),
+        rule({"field": "symbol", "op": "==", "value": "ETH-USDT"}, name="pas ETH")])
+    calls = []
+
+    async def no_spy(now):
+        calls.append("SPY")
+        return None
+
+    async def no_btc(symbol, market, interval, source=None, max_age=None):
+        calls.append(symbol)
+        return None
+
+    monkeypatch.setattr(scanner, "_index_daily", no_spy)
+    monkeypatch.setattr(T, "_optional_candles", no_btc)
+    daily = daily_bars(80, date(2026, 10, 6))
+    for _ in range(2):
+        assert (await LIVE.plan_verdict(fake_plan("AAA"), daily, NOW))["garde"] is True
+        assert (await LIVE.plan_verdict(fake_plan("BTC") | {"market": "crypto"}, None, NOW))["garde"] is True
+    out = await LIVE.plan_verdict(fake_plan("ETH") | {"market": "crypto"}, None, NOW)
+    assert out == {"garde": False, "regles": ["pas ETH"], "version": "v2"}
+    assert caplog.text.count("régime de marché (SPY) indisponible") == 1
+    assert caplog.text.count("régime de marché (BTC) indisponible") == 1
+    assert calls.count("SPY") == 2 and "BTC" in calls  # réessayé : une panne n'est pas gardée pour la journée
+
+
+def test_ligne_crypto_au_nom_du_labo_avec_le_regime_de_btc():
+    """Plan crypto du direct (« BTC », Kraken) : la ligne de lessons.crypto_row, le symbole du labo (« BTC-USDT »)
+    et le régime de BTC comme generator.crypto_day."""
+    from app.lab import lessons as L
+
+    day = date(2026, 10, 7)
+    btc = crypto_daily(600, day)  # bougie du jour en cours comprise : ignorée, comme au labo
+    daily = crypto_daily(60, day, start=3000.0, step=5.0)
+    p = fake_plan("ETH") | {"market": "crypto"}
+    row = LIVE.crypto_row(p, daily, btc, NOW)
+    base = L.crypto_row(p, daily, NOW)
+    assert row["symbol"] == "ETH-USDT" and LIVE.lab_symbol("btc-usdt") == "BTC-USDT"
+    assert {k: v for k, v in row.items() if not k.startswith("regime") and k not in ("symbol", "context")} == \
+        {k: v for k, v in base.items() if k not in ("symbol", "context")}
+    assert row["context"] == base["context"] | {"regime": U.regime(btc, CO.utc_midnight(day), 365)}
+    assert row["context"]["regime"] is not None
+    label = REG.series(btc, "crypto", [day])["2026-10-07"]
+    assert (row["regime_label"], row["regime_trend"], row["regime_vol_tercile"]) == \
+        (label["label"], label["trend"], label["vol_tercile"]) and row["regime_trend"] == "haussier"
+    # Sans BTC : pas de régime (les règles qui le lisent ne s'appliquent pas, voir plus haut).
+    assert "regime_label" not in LIVE.crypto_row(p, daily, None, NOW)
+
+
+async def test_plan_crypto_ecarte_sur_le_regime_de_btc(champ_file, monkeypatch):
+    """Règle du champion sur le régime, évaluée en direct sur les bougies journalières de BTC (Kraken), lues une
+    fois par jour UTC."""
+    write_champion(champ_file, [rule({"field": "regime_trend", "op": "==", "value": "haussier"}, name="pas en hausse")
+                                | {"markets": ["crypto"]}])
+    btc = crypto_daily(600, date(2026, 10, 7))
+    calls = []
+
+    async def kraken(symbol, market, interval, source=None, max_age=None):
+        calls.append((symbol, market, interval))
+        return btc
+
+    monkeypatch.setattr(T, "_optional_candles", kraken)
+    for _ in range(2):
+        out = await LIVE.plan_verdict(fake_plan("SOL") | {"market": "crypto"}, None, NOW)
+        assert out == {"garde": False, "regles": ["pas en hausse"], "version": "v2"}
+    assert calls == [("BTC", "crypto", 1440)]
+    assert await LIVE.plan_verdict(fake_plan("AAA"), None, NOW) is None  # règle crypto seulement
+
+
+def test_build_plan_applique_la_methode_a_tous_les_plans(champ_file, full_db, monkeypatch):  # noqa: F811
+    """build_plan (`!plan`, `!prends`, API) passe par le même filtre que le scanner : plan écarté → 0 % proposé,
+    plan affiché ; sans règle qui le touche, plan inchangé."""
+    import asyncio
+
+    from app.lab import generator as G
+    from tests.test_lab_generator import DAY as GEN_DAY
+
+    inp = G.stock_inputs(full_db, "AAA", GEN_DAY)
+    now = datetime.fromtimestamp(U.stock_decision_ts(GEN_DAY), timezone.utc)
+    by_interval = {15: inp["bars"], 1440: inp["daily"], 240: inp["h4"]}
+
+    async def fake_candles(symbol, market, interval, source=None, max_age=None, outputsize=None):
+        return by_interval[interval]
+
+    async def no_cat(symbol, now):
+        return None
+
+    monkeypatch.setattr(T, "candles", fake_candles)
+    monkeypatch.setattr(T.C, "safe_check", no_cat)
+    monkeypatch.setattr(GR, "current", lambda: GRADE_A | {"verifie_le": now.isoformat()})
+    monkeypatch.setenv("JARVIS_CAPITAL", "10000")
+    write_champion(champ_file, [rule({"field": "symbol", "op": "==", "value": "AAA"}, name="pas AAA")])
+    plan = asyncio.run(T.build_plan("AAA", "stock", now=now))
+    assert plan["methode"] == {"garde": False, "regles": ["pas AAA"], "version": "v2"}
+    assert plan["sizing"] is None and plan["grade"]["risque_propose"] == 0.0 and plan["sizing_regle"]["hors_grade"]
+    text = T.plan_text(plan)
+    assert "**🟢 LONG AAA**" in text and "🏅 Grade JARVIS **A** · risque proposé **0 %** : plan écarté par la " \
+        "méthode v2 (règle « pas AAA »)" in text
+    write_champion(champ_file, [rule({"field": "symbol", "op": "==", "value": "BBB"}, name="pas BBB")])
+    plan = asyncio.run(T.build_plan("AAA", "stock", now=now))
+    assert plan["methode"]["garde"] and plan["sizing"]["risk_amount_eur"] == 20.0
+    write_champion(champ_file, [])
+    assert "methode" not in asyncio.run(T.build_plan("AAA", "stock", now=now))
+
+
+async def test_scanner_reprend_le_verdict_du_plan(champ_file, scan_env, monkeypatch):
+    """Le scanner trie avec le verdict que build_plan a mis sur le plan (le même que le plan affiché)."""
+    write_champion(champ_file, [rule({"field": "symbol", "op": "==", "value": "ZZZ"}, name="pas ZZZ")])
+
+    async def build_plan(symbol, *a, **k):
+        p = fake_plan(symbol)
+        if symbol == "BBB":
+            p["methode"] = {"garde": False, "regles": ["vu par build_plan"], "version": "v2"}
+        return p
+
+    monkeypatch.setattr(T, "build_plan", build_plan)
+    result = await scanner.scan(NOW, Settings(None), save=False)
+    assert [e["regles"] for e in result["ecartees_methode"]] == [["vu par build_plan"]]
+    assert "BBB" not in [p["symbol"] for p in result["picks"]]

@@ -4,13 +4,17 @@
   filtres. Elle est d'abord CHALLENGER : le labo compare, sur les trades en direct journalisés depuis sa
   création et sur les seuls marchés de ses nouvelles règles, ce que garde le challenger et ce que garde
   le champion (mêmes plans, filtres différents ; rien n'est journalisé deux fois). R comparé : pour les
-  actions, celui de la mise de Simão (r_20e) ; écart et z en grappes par jour (validator.pooled_z).
-  Jugé seulement à des regards fixes (`challenger_looks_days`, en jours de trades distincts) : écart
-  ≥ challenger_min_gain, z ≥ challenger_min_z (Bonferroni sur 3 regards), aucun marché touché en recul,
-  capture du potentiel +10 tenue, au moins challenger_min_trades trades. Promouvable, il n'est PAS mis
-  en place seul : une proposition « promouvoir vX » attend l'accord de Simão (même circuit que les
-  règles) ; sans réponse, il reste mesuré et le regard suivant remplace la proposition. Pas assez net
-  au dernier regard, il est retiré. Seuils dans lab_config (validator.DEFAULTS).
+  actions, celui de la mise de Simão (grade.cost_r, au barème IBKR du compte) ; écart et z en grappes par
+  jour (validator.pooled_z). Jugé seulement à des regards fixes (`challenger_looks_days`, en jours de
+  trades distincts) : écart ≥ challenger_min_gain, z ≥ seuil du challenger n° k (validator.challenger_z :
+  alpha dépensé sur le rang k, Bonferroni sur 3 regards, t de Student ; k mémorisé à sa création), aucun
+  marché touché en recul, capture du potentiel +10 tenue, au moins challenger_min_trades trades.
+  Promouvable, il n'est PAS mis en place seul : une proposition « promouvoir vX » attend l'accord de
+  Simão (même circuit que les règles) ; sans réponse, il reste mesuré et le regard suivant remplace la
+  proposition. Pas assez net au dernier regard, il est retiré ; une promotion du dernier regard restée
+  sans réponse `challenger_answer_days` jours aussi. Seuils dans lab_config (validator.DEFAULTS).
+- Une promotion note la frontière de ce qui était journalisé (« vu_a_la_promotion », comme les leçons) :
+  le grade des marchés touchés repart des jours d'après (grade._scope), jamais des jours de l'essai.
 - Une règle refusée est rangée dans la mémoire des échecs (« refusée par Simão ») : jamais reproposée.
 - Le champion est écrit dans un petit fichier JSON (lab_champion.json, à côté de la base) que JARVIS
   en direct lit : ses filtres s'y appliquent avec EXACTEMENT le même code SQL que le labo (kept_sql,
@@ -18,6 +22,7 @@
 - Le serveur web n'écrit jamais dans la base : les décisions de Simão et les types de catalyseurs
   passent par la file data/lab_queue/ (sous-dossiers decisions/ et types/), lue par le worker.
 """
+import hashlib
 import json
 import logging
 import os
@@ -158,6 +163,33 @@ def challenger(conn) -> dict | None:
     return next((r for r in versions(conn) if r["role"] == "challenger"), None)
 
 
+def version_settings(conn, version: str | None) -> dict:
+    """Données gardées avec une version (colonne settings) ; {} si absente ou illisible."""
+    try:
+        row = conn.execute("SELECT settings FROM method_versions WHERE version = ?", (version,)).fetchone()
+        data = json.loads(row[0]) if row and row[0] else {}
+    except (sqlite3.OperationalError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def judged_challengers(conn, exclude: str | None = None) -> int:
+    """Challengers (versions filtres) jugés à au moins un regard, hors `exclude` : ceux qui ont dépensé leur alpha.
+    Un challenger retiré sans aucun regard (filet des 100 jours) n'a rien dépensé."""
+    return sum(1 for v in versions(conn) if v.get("base") and v["version"] != exclude
+               and (_progress(conn, f"regard:{v['version']}") or 0) > 0)
+
+
+def challenger_rank(conn, chall: dict) -> int:
+    """Rang k du challenger dans la dépense de l'alpha (validator.challenger_z) : 1 + les challengers précédents
+    jugés à au moins un regard. Mémorisé à sa création (settings) pour ne pas bouger pendant l'essai ; calculé de
+    la même façon pour un challenger créé avant ce suivi (un seul challenger à la fois : les autres sont finis)."""
+    k = version_settings(conn, chall["version"]).get("rang_challenger")
+    if isinstance(k, int) and not isinstance(k, bool) and k >= 1:
+        return k
+    return 1 + judged_challengers(conn, chall["version"])
+
+
 def base_of(v: dict, conn) -> str | None:
     return v.get("base") or v.get("version") or generation_version(conn)
 
@@ -181,18 +213,25 @@ def touched_markets(champ: dict, chall: dict) -> list[str] | None:
     return sorted({m for r in new for m in r["markets"]})
 
 
-def compared_r(market: str, result: str | None, r_net: float) -> float:
-    """R comparé : pour les actions, celui de la mise de Simão (r_20e, frais IBKR réels) quand le résultat
-    du simulateur le permet ; sinon le R net du labo."""
-    if market != "stock" or not result:
-        return r_net
-    from app.lab import strategies as ST  # import tardif : strategies tire killmode
+def market_rules(rules: list[dict], market: str) -> list[dict]:
+    """Règles qui s'appliquent au marché (`markets` absent : tous les marchés)."""
+    return [r for r in rules if not r.get("markets") or market in r["markets"]]
 
-    try:
-        r = ST.cost_variants("stock", json.loads(result))["r_20e"]
-    except (ValueError, KeyError, TypeError, ZeroDivisionError):  # comme grade.cost_r : stop à l'entrée
-        r = None
-    return r_net if r is None else r
+
+def filters_key(rules: list[dict], market: str) -> str:
+    """Empreinte des filtres EFFECTIFS d'un marché (règles qui le touchent, seuils figés compris) : une promotion
+    qui ne la change pas ne change aucun trade gardé sur ce marché (grade gardé)."""
+    items = sorted(json.dumps({"kind": r["kind"], "cond": r["cond"]}, sort_keys=True, ensure_ascii=False)
+                   for r in market_rules(rules, market))
+    return hashlib.sha256(json.dumps(items).encode()).hexdigest()[:16]
+
+
+def compared_r(market: str, result: str | None, r_net: float) -> float:
+    """R comparé : le R du grade (grade.cost_r) ; pour les actions, celui de la mise de Simão (frais IBKR réels,
+    au barème du compte) quand le résultat du simulateur le permet ; sinon le R net du labo."""
+    from app.lab import grade as GR  # import tardif : grade importe ce module
+
+    return GR.cost_r(market, r_net, result)
 
 
 def measure_days(day_sums: dict) -> dict:
@@ -246,19 +285,22 @@ def compare(conn, champ: dict, chall: dict, cfg: dict | None = None) -> dict:
         movers = {tuple(m) for m in conn.execute(
             "SELECT market, day, symbol FROM day_moves WHERE up_pct >= ? AND day >= ?", (STATS.MOVE_PCT, first_day))}
     out = {"base": base, "depuis_ts": since, "trades_lignes": len(rows), "marches": markets}
-    for name in ("champion", "challenger"):
+    day_sums: dict = {}
+    for days in by_market.values():
+        for day, v in days.items():
+            day_sums[day] = [a + b for a, b in zip(day_sums.get(day, [0.0, 0, 0.0, 0]), v)]
+    for name, (i, j) in (("champion", (0, 1)), ("challenger", (2, 3))):
         n, total = acc[name]
+        # IC95 de l'espérance absolue (grappes par jour, t de Student, comme le grade) : l'étiquette absolue
+        # (absolute_fr) dit « positive mais non prouvée » quand sa borne basse n'est pas > 0.
+        ci = STATS.mean_ci({d: (v[i], v[j]) for d, v in day_sums.items() if v[j]}, total, n)[2] if n else None
         out[name] = {"version": (champ if name == "champion" else chall)["version"], "declenches": n,
-                     "esperance_r": round(total / n, 4) if n else None,
+                     "esperance_r": round(total / n, 4) if n else None, "ic95": ci,
                      "capture": len(caught[name] & movers)}
     before, after = out["champion"]["capture"], out["challenger"]["capture"]
     allowed = before * cfg["max_capture_drop"] if before >= 10 else 1
     out["capture_ok"] = before - after <= allowed + 1e-9
     out["baisse_capture_permise"] = allowed
-    day_sums: dict = {}
-    for days in by_market.values():
-        for day, v in days.items():
-            day_sums[day] = [a + b for a, b in zip(day_sums.get(day, [0.0, 0, 0.0, 0]), v)]
     out.update(measure_days(day_sums))
     out["par_marche"] = {m: measure_days(days) for m, days in sorted(by_market.items())}
     out["meilleur"] = out["delta_r"] is not None and out["delta_r"] >= cfg["challenger_min_gain"]
@@ -280,6 +322,26 @@ def next_look(cfg: dict, done: int = 0) -> int | None:
     return next((k for k in looks(cfg) if k > done), None)
 
 
+def judged_cfg(conn, chall: dict, cmp: dict, cfg: dict, upcoming: int | None = None) -> dict:
+    """`cfg` avec le seuil z EFFECTIF du challenger (challenger_min_z) et son rang (challenger_rang), lus par
+    promotion_fails, verdict, promotion_text et les affichages : la décision et les textes disent le même seuil.
+    Jours du regard : ceux de la comparaison ; `upcoming` (prochain regard) pour l'affichage entre deux regards,
+    le seuil qui s'appliquera alors."""
+    k = challenger_rank(conn, chall)
+    return cfg | {"challenger_min_z": V.challenger_z(k, max(cmp["jours"], upcoming or 0), cfg), "challenger_rang": k}
+
+
+def z_min(cmp: dict, cfg: dict) -> float:
+    """Seuil z effectif : celui de judged_cfg, sinon celui d'un premier challenger aux jours de la comparaison."""
+    z = cfg.get("challenger_min_z")
+    return z if z is not None else V.challenger_z(cfg.get("challenger_rang", 1), cmp["jours"], cfg)
+
+
+def threshold_fr(cmp: dict, cfg: dict) -> str:
+    """« seuil z 2,53 (challenger n° 1) »."""
+    return f"seuil z {num_fr(z_min(cmp, cfg))} (challenger n° {cfg.get('challenger_rang', 1)})"
+
+
 def promotion_fails(cmp: dict, cfg: dict) -> list[str]:
     """Conditions de promotion non tenues (vide : promouvable)."""
     fails = []
@@ -288,8 +350,8 @@ def promotion_fails(cmp: dict, cfg: dict) -> list[str]:
         fails.append(f"{n} trades gardés (minimum {cfg['challenger_min_trades']})")
     if delta is None or delta < cfg["challenger_min_gain"]:
         fails.append(f"écart {fr(delta, 3)} par trade (minimum {fr(cfg['challenger_min_gain'])})")
-    if z is None or z < cfg["challenger_min_z"]:
-        fails.append(f"z = {'n/d' if z is None else f'{z:.2f}'} (seuil {cfg['challenger_min_z']:.2f})".replace(".", ","))
+    if z is None or z < z_min(cmp, cfg):
+        fails.append(f"z = {num_fr(z)}, {threshold_fr(cmp, cfg)}")
     for m, x in cmp["par_marche"].items():
         if x["delta_r"] is not None and x["delta_r"] < 0:
             fails.append(f"{MARKET_FR.get(m, m)} : {fr(x['delta_r'], 3)} par trade")
@@ -299,19 +361,38 @@ def promotion_fails(cmp: dict, cfg: dict) -> list[str]:
     return fails
 
 
-def verdict(cmp: dict, cfg: dict, now: datetime | None = None, done: int = 0, pending: bool = False) -> str:
+def promotion_expired(pending, now: datetime | None, cfg: dict) -> bool:
+    """Promotion proposée depuis au moins `challenger_answer_days` jours sans réponse de Simão (`pending` : la
+    promotion en attente, avec sa date « le » ; un simple booléen n'expire jamais)."""
+    if not isinstance(pending, dict) or not pending.get("le") or now is None:
+        return False
+    try:
+        at = datetime.fromisoformat(pending["le"])
+    except (TypeError, ValueError):
+        return False
+    at = at if at.tzinfo else at.replace(tzinfo=timezone.utc)
+    return (now - at).total_seconds() >= cfg["challenger_answer_days"] * 86400
+
+
+def verdict(cmp: dict, cfg: dict, now: datetime | None = None, done: int = 0, pending=False) -> str:
     """« promouvoir » (proposé à Simão), « retirer » ou « attendre ». Jugé seulement aux regards fixes
     `challenger_looks_days` (jours de trades distincts ; `done` : dernier regard fait) : promouvable si
-    écart ≥ challenger_min_gain, z ≥ challenger_min_z, aucun marché touché en recul, capture tenue et
-    au moins challenger_min_trades trades ; sinon retrait au dernier regard. Entre deux regards :
-    « attendre ». Filet : retrait après `challenger_max_days` jours, sauf promotion en attente de Simão."""
+    écart ≥ challenger_min_gain, z ≥ seuil du challenger (z_min), aucun marché touché en recul, capture
+    tenue et au moins challenger_min_trades trades ; sinon retrait au dernier regard. Entre deux regards :
+    « attendre ». `pending` : promotion en attente de Simão (dict, ou booléen). Elle protège le challenger
+    du filet (retrait après `challenger_max_days` jours) pendant `challenger_answer_days` jours ; au-delà,
+    plus rien ne la protège, et une promotion du DERNIER regard (qu'aucun regard ne remplacera) est retirée."""
     look = look_reached(cmp, cfg, done)
     if look is not None:
         if not promotion_fails(cmp, cfg):
             return "promouvoir"
         return "retirer" if look >= looks(cfg)[-1] else "attendre"
+    expired = promotion_expired(pending, now, cfg)
+    if expired and done >= looks(cfg)[-1]:
+        return "retirer"
     since = cmp.get("depuis_ts") or 0
-    if not pending and now is not None and since and now.timestamp() - since >= cfg["challenger_max_days"] * 86400:
+    if (not pending or expired) and now is not None and since and \
+            now.timestamp() - since >= cfg["challenger_max_days"] * 86400:
         return "retirer"
     return "attendre"
 
@@ -541,11 +622,14 @@ def ensure_challenger(db: LabDB, now: datetime | None = None) -> dict | None:
             version = next_version(db.conn)
             have = {x["empreinte"] for x in champ["regles"]}
             rules = champ["regles"] + [r for r in new_rules if r["empreinte"] not in have]
+            # Rang dans la dépense de l'alpha (validator.challenger_z), figé pour tout l'essai.
+            rank = 1 + judged_challengers(db.conn, version)
             db.conn.execute(
                 "INSERT INTO method_versions (version, created_at, settings, base, rules, role, started_ts) "
                 "VALUES (?, ?, ?, ?, ?, 'challenger', ?)",
                 (version, now.isoformat(timespec="seconds"),
-                 json.dumps({"base": base, "filtres": rules, "champion_au_depart": champ["version"]}, ensure_ascii=False),
+                 json.dumps({"base": base, "filtres": rules, "champion_au_depart": champ["version"],
+                             "rang_challenger": rank}, ensure_ascii=False),
                  base, json.dumps(rules, ensure_ascii=False), int(now.timestamp())))
         for rule in new_rules:
             db.conn.execute("UPDATE rules SET decision = 'en_essai' WHERE hash = ?", (rule["empreinte"],))
@@ -580,29 +664,56 @@ def _where(cmp: dict) -> str:
     return f" ({', '.join(MARKET_FR.get(m, m) for m in cmp['marches'])})" if cmp.get("marches") else ""
 
 
-def absolute_fr(h: dict) -> str:
-    """L'espérance absolue des trades gardés compte aussi : un filtre peut seulement perdre moins."""
+def absolute_label(h: dict, delta: float | None = None) -> str:
+    """Étiquette absolue des trades gardés (« méthode toujours perdante »…) ; vide si rien à dire. Un filtre peut
+    seulement perdre moins : « moins perdant » seulement quand l'écart relatif `delta` est positif (une promotion
+    l'est toujours). Espérance positive : « non prouvée » tant que la borne basse de son IC95 n'est pas > 0."""
     e = h.get("esperance_r")
-    return " Filtre moins perdant, méthode toujours perdante." if e is not None and e <= 0 else ""
+    if e is None:
+        return ""
+    if e <= 0:
+        return "filtre moins perdant, méthode toujours perdante" if delta is None or delta > 0 else \
+            "méthode toujours perdante"
+    ci = h.get("ic95")
+    if ci and ci[0] is not None and ci[0] <= 0:
+        return f"méthode positive mais non prouvée (IC95 {fr(ci[0], 3, '')} ; {fr(ci[1], 3, '')})"
+    return ""
+
+
+def absolute_fr(h: dict, delta: float | None = None) -> str:
+    """L'espérance absolue des trades gardés compte aussi : « Filtre moins perdant, méthode toujours perdante. »"""
+    label = absolute_label(h, delta)
+    return f" {label[0].upper()}{label[1:]}." if label else ""
 
 
 def promotion_text(cmp: dict, cfg: dict, champ: dict, chall: dict, look: int) -> str:
     c, h, n_looks = cmp["champion"], cmp["challenger"], looks(cfg)
     return (f"{chall['version']} = {champ['version']} + {_names(new_rules(champ, chall))}. En direct sur {cmp['jours']} "
-            f"jours de trades{_where(cmp)} : {fr(cmp['delta_r'], 3)} par trade de mieux que {champ['version']} "
-            f"(z = {num_fr(cmp['z'])}, seuil {num_fr(cfg['challenger_min_z'])}) ; {fr(h['esperance_r'], 3)} par trade sur "
+            f"jours de trades{_where(cmp)} : {fr(cmp['delta_r'], 3)} par trade de mieux que {champ['version']}, "
+            f"z = {num_fr(cmp['z'])}, {threshold_fr(cmp, cfg)} ; {fr(h['esperance_r'], 3)} par trade sur "
             f"{h['declenches']} trades gardés, contre {fr(c['esperance_r'], 3)} sur {c['declenches']} ; potentiel +10 "
             f"capturé {h['capture']} fois (contre {c['capture']}).{absolute_fr(h)} "
             f"Regard {n_looks.index(look) + 1} sur {len(n_looks)}.")
 
 
+def _noted(cmp: dict, cfg: dict) -> dict:
+    """Comparaison gardée avec la version (note) : avec le seuil z et le rang qui l'ont jugée."""
+    return cmp | {"seuil_z": round(z_min(cmp, cfg), 3), "rang_challenger": cfg.get("challenger_rang", 1)}
+
+
 def _promote(db: LabDB, champ: dict, chall: dict, cmp: dict, now: datetime) -> str:
+    from app.lab import lessons as L  # import tardif, comme validator.frontier_sql
+
     new, (c, h) = new_rules(champ, chall), (cmp["champion"], cmp["challenger"])
     stamp = now.isoformat(timespec="seconds")
     db.conn.execute("UPDATE method_versions SET role = 'ancienne', decided_at = ? WHERE version = ?",
                     (stamp, champ["version"]))
-    db.conn.execute("UPDATE method_versions SET role = 'champion', decided_at = ?, note = ? WHERE version = ?",
-                    (stamp, json.dumps(cmp, ensure_ascii=False), chall["version"]))
+    # Frontière de ce qui est journalisé à la promotion (comme les leçons) : le grade des marchés touchés ne
+    # compte que les jours d'après, jamais ceux de l'essai qui ont décidé la promotion.
+    settings = version_settings(db.conn, chall["version"]) | {"vu_a_la_promotion": L.seen_until(db.conn)}
+    db.conn.execute("UPDATE method_versions SET role = 'champion', decided_at = ?, note = ?, settings = ? "
+                    "WHERE version = ?", (stamp, json.dumps(cmp, ensure_ascii=False),
+                                          json.dumps(settings, ensure_ascii=False), chall["version"]))
     for r in new:
         db.conn.execute("UPDATE rules SET decision = 'adoptee' WHERE hash = ?", (r["empreinte"],))
     db.set("methode", "promotion", None)
@@ -641,11 +752,12 @@ def judge_challenger(db: LabDB, now: datetime | None = None, cfg: dict | None = 
         return None
     champ = champion(db.conn)
     cmp = compare(db.conn, champ, chall, cfg)
+    cfg = judged_cfg(db.conn, chall, cmp, cfg)  # seuil z du challenger n° k à ce regard
     key = f"regard:{chall['version']}"
     done = db.get("methode", key, 0)
     pending = pending_promotion(db.conn, chall["version"])
     look = look_reached(cmp, cfg, done)
-    v = verdict(cmp, cfg, now, done, pending is not None)
+    v = verdict(cmp, cfg, now, done, pending)
     if look is None and v == "attendre":
         return None
     with db.transaction():
@@ -658,9 +770,13 @@ def judge_challenger(db: LabDB, now: datetime | None = None, cfg: dict | None = 
             db.set("methode", "promotion", promo)
             log.info("Labo : promotion de %s proposée à Simão : %s", chall["version"], promo["texte"])
         elif v == "retirer":
-            why = (f"pas assez net au dernier regard ({look} jours de trades) : " + " ; ".join(promotion_fails(cmp, cfg))
-                   if look is not None else f"{cfg['challenger_max_days']} jours sans atteindre le dernier regard")
-            log.info("Labo : %s", _retire(db, champ, chall, cmp, now, why))
+            if look is not None:
+                why = f"pas assez net au dernier regard ({look} jours de trades) : " + " ; ".join(promotion_fails(cmp, cfg))
+            elif promotion_expired(pending, now, cfg):
+                why = f"promotion sans réponse de Simão ({cfg['challenger_answer_days']} jours)"
+            else:
+                why = f"{cfg['challenger_max_days']} jours sans atteindre le dernier regard"
+            log.info("Labo : %s", _retire(db, champ, chall, _noted(cmp, cfg), now, why))
         elif pending:
             db.set("methode", "promotion", None)  # le regard suivant n'est plus assez net : proposition retirée
     return v
@@ -678,7 +794,9 @@ def decide_promotion(db: LabDB, data: dict, now: datetime | None = None) -> int:
         log.info("Labo : décision sur la promotion %s dépassée, ignorée", data["promotion"])
         return 0
     champ = champion(db.conn)
-    cmp = compare(db.conn, champ, chall)
+    cfg = V.config(db.conn)
+    cmp = compare(db.conn, champ, chall, cfg)
+    cmp = _noted(cmp, judged_cfg(db.conn, chall, cmp, cfg))  # gardé avec le seuil et le rang du challenger
     with db.transaction():
         if data["decision"] == "approuvee":
             text = _promote(db, champ, chall, cmp, now)
@@ -758,11 +876,15 @@ def state(conn, cfg: dict | None = None) -> dict:
         cfg = cfg or V.config(conn)
         cmp = compare(conn, champ, chall, cfg)
         done = _progress(conn, f"regard:{chall['version']}") or 0
+        nxt = next_look(cfg, done)
+        cfg = judged_cfg(conn, chall, cmp, cfg, nxt)  # le seuil du prochain regard (celui qui jugera)
         out["challenger"] = {"version": chall["version"], "depuis": chall["creee_le"],
                              "regles": [{"nom": r["nom"], "regle": rule_fr(r)} for r in chall["regles"]],
                              "comparaison": cmp, "objectif": cfg["challenger_min_trades"],
                              "limite": cfg["challenger_max_trades"], "regards": looks(cfg), "regard_fait": done,
-                             "prochain_regard": next_look(cfg, done), "seuil_z": cfg["challenger_min_z"],
+                             "prochain_regard": nxt, "seuil_z": cfg["challenger_min_z"],
+                             "rang": cfg["challenger_rang"], "seuil_texte": threshold_fr(cmp, cfg),
+                             "etiquette": absolute_label(cmp["challenger"], cmp["delta_r"]),
                              "promotion": pending_promotion(conn, chall["version"])}
     return out
 
@@ -774,10 +896,13 @@ def state_line(st: dict) -> str:
     if ch:
         cmp = ch["comparaison"]
         nxt = ch.get("prochain_regard")
+        seuil = ch.get("seuil_texte") or f"seuil z {num_fr(ch['seuil_z'])}"
+        label = ch.get("etiquette")
         line += (f" · challenger {ch['version']} : {cmp['jours']} jours de trades en direct"
                  + (f" (prochain regard à {nxt})" if nxt else "")
                  + f", {fr(cmp['challenger']['esperance_r'], 3)} contre {fr(cmp['champion']['esperance_r'], 3)}, "
-                 f"z {num_fr(cmp['z'])} (seuil {num_fr(ch['seuil_z'])})"
+                 f"z {num_fr(cmp['z'])}, {seuil}"
+                 + (f" · {label}" if label else "")
                  + (" · promotion proposée à Simão" if ch.get("promotion") else ""))
     else:
         line += " · pas de challenger"

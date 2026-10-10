@@ -312,15 +312,20 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
   trades déclenchés **en direct** depuis sa création, sur les seuls marchés de ses nouvelles règles, en R
   à ta mise de 20 € pour les actions (frais IBKR réels), avec un écart et un z en grappes par jour. Elle
   n'est jugée qu'à 3 regards fixes, à 20, 40 et 60 jours de trades : le challenger est promouvable si
-  l'écart atteint +0,02 R par trade, z ≥ 2,13 (5 % répartis sur les 3 regards), aucun marché touché ne
-  recule, la capture du potentiel +10 tient (même tolérance que le validateur) et il garde au moins 100
-  trades. Il ne bascule pas seul : tu reçois une proposition « mettre en place la méthode v2 » (boutons,
-  `!oui N` / `!non N`), avec l'espérance des trades gardés (« filtre moins perdant, méthode toujours
-  perdante » si elle reste ≤ 0). Approuvée : « Méthode v2 en place : … » ; refusée : v2 est retirée ;
-  sans réponse, il reste mesuré et le regard suivant remplace la proposition. Pas assez net au dernier
-  regard (ou 100 jours sans l'atteindre), il est retiré (message aussi). Seuils `challenger_looks_days`,
-  `challenger_min_z`, `challenger_min_gain`, `challenger_min_trades`, `challenger_max_days` dans
-  `lab_config`. Des règles approuvées pendant un essai attendent sa fin (sauf le même matin : elles
+  l'écart atteint +0,02 R par trade, z ≥ le seuil du challenger n° k, aucun marché touché ne recule, la
+  capture du potentiel +10 tient (même tolérance que le validateur) et il garde au moins 100 trades. Le
+  seuil dépense 5 % au total sur TOUS les challengers (6·0,05/(π²k²) pour le k-ième, même série que les
+  essais du validateur ; k = 1 + challengers précédents jugés à au moins un regard, figé à sa création),
+  réparti sur les 3 regards, en t de Student à g − 1 degrés (g jours du regard) : 2,53 au premier regard
+  du premier challenger, 4,58 pour le dixième. Il ne bascule pas seul : tu reçois une proposition « mettre
+  en place la méthode v2 » (boutons, `!oui N` / `!non N`), avec l'espérance des trades gardés (« filtre
+  moins perdant, méthode toujours perdante » si elle reste ≤ 0, « positive mais non prouvée » si son IC95
+  touche 0 ; !labo et le cockpit le disent aussi). Approuvée : « Méthode v2 en place : … » ; refusée : v2
+  est retirée ; sans réponse, il reste mesuré et le regard suivant remplace la proposition ; une
+  promotion du dernier regard sans réponse depuis 14 jours est retirée. Pas assez net au dernier regard
+  (ou 100 jours sans l'atteindre), il est retiré (message aussi). Seuils `challenger_looks_days`,
+  `challenger_alpha`, `challenger_min_gain`, `challenger_min_trades`, `challenger_max_days`,
+  `challenger_answer_days` dans `lab_config`. Des règles approuvées pendant un essai attendent sa fin (sauf le même matin : elles
   rejoignent le challenger tant qu'il n'a aucun trade).
 - **Refusée** : rangée dans la mémoire des échecs (« refusée par Simão »), jamais reproposée.
 - **En direct** : le worker écrit la méthode en place dans `data/lab_champion.json`. Le scanner
@@ -329,13 +334,20 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
   du labo : … ») et dans `data/scans.jsonl`. Contexte du direct reconstruit comme au labo
   (`app/lab/live.py` : note sans la part catalyseur, volume relatif et variation de la veille, régime
   de SPY) ; champs absents traités comme « non vérifiés ». Fichier absent ou illisible : aucun filtre,
-  une ligne de journal, le direct continue. `!plan` et le cockpit ne sont pas filtrés (demandes à toi).
+  une ligne de journal, le direct continue. Tous les autres plans longs (`!plan`, `!prends`, API,
+  crypto) passent par le même filtre (`live.plan_verdict` dans `build_plan` ; crypto : contexte de
+  `lessons.crypto_row`, paire au nom du labo « BTC-USDT », régime de BTC) : un plan écarté reste
+  affiché, mais le grade ne mesurant que les trades que garde la méthode, JARVIS n'y propose aucun
+  risque (« 🏅 … 0 % : plan écarté par la méthode v2 (règle « … ») », ta règle de 20 € à part).
+  Donnée manquante (indice du régime, contexte) : plan gardé, une ligne de journal.
 - **Cockpit** : page `/cockpit/labo` (lecture seule) : grade, avancement, chiffres clés, méthode en
   place et challenger, dernières propositions, règles testées, dernier message du matin.
 - **Grade de JARVIS** (`app/lab/grade.py`, barème validé par Simão le 2026-10-07) : de F- à S+, la
   preuve mesurée par le worker (sans jeton) que la méthode en place gagne, par marché.
   - Lettre = espérance nette en R sur les 60 derniers jours de bourse de la méthode en place (hors
-    échantillon ; actions : R après commission IBKR à 20 €, `r_20e`) : S ≥ +0,40 R, A ≥ +0,25,
+    échantillon : après une promotion, seuls comptent les jours journalisés depuis, jamais ceux de
+    l'essai qui l'a décidée ; actions : R après commission IBKR à 20 €, `r_20e`, ou `r_20e_deg`
+    quand `JARVIS_IBKR_PLAN=degressif`) : S ≥ +0,40 R, A ≥ +0,25,
     B ≥ +0,15, C ≥ +0,05 (borne basse de l'IC95 en t de Student > 0 dès C), D positive mais pas
     prouvée, E entre −0,10 et 0, F < −0,10. Moins de 100 trades sur 10 jours : « non noté ». La
     fenêtre réelle est publiée (rejeu du … au …, direct depuis le …) ; coupée par un trou de plus de
@@ -358,7 +370,8 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
   - Changements : baisse immédiate ; hausse après au moins 150 nouveaux trades sur 5 nouveaux jours,
     et une hausse de **lettre** attend ton accord (proposition Approuver / Refuser en privé, `!oui N`) ;
     à partir de C, une baisse de 20 R depuis le sommet ramène tout de suite en D (coupe-circuit) ; une
-    nouvelle méthode repart de « non noté ». IC95 entièrement sous zéro sur 150 trades : méthode
+    nouvelle méthode repart de « non noté » sur les marchés dont elle change les filtres (une règle
+    actions laisse le grade crypto intact). IC95 entièrement sous zéro sur 150 trades : méthode
     déclarée morte (message). E, F ou morte : mode survie de la routine du soir. Message privé à
     chaque changement de lettre ; un − / + dans la même lettre (risque inchangé) reste dans `!grade`.
   - Le council du soir contrôle le grade (`POST /api/lab/grade/avis`, un avis par marché et par soir,

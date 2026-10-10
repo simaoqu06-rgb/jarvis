@@ -35,7 +35,7 @@ RISK_PCT = env_float("JARVIS_RISK_PCT", 3.0)  # EmperorBTC : 3 % du capital par 
 
 # Bougies utilisées pour le plan et l'estimation des délais, par marché.
 #   crypto : bougies d'1 h sur 30 jours (limite Kraken : 720), horizon 24 h
-#   action : bougies de 15 min sur ~190 séances, horizon 2 séances (26 h de cotation)
+#   action : bougies de 15 min sur ~190 séances, horizon 52 bougies (13 h de cotation, 2 séances)
 SETTINGS = {
     "crypto": {"interval": 60, "horizon_bars": 24, "label": "Kraken"},
     "stock": {"interval": 15, "horizon_bars": 52, "label": "Twelve Data"},
@@ -352,7 +352,12 @@ async def build_plan(
     from app.lab import lessons as LESSONS  # import tardif : le labo importe ce module
 
     await LESSONS.apply(plan, daily, cat, now)
-    apply_grade(plan, capital, risk_pct, now, usd_per_eur=await usd_per_eur())
+    # Filtre de la méthode championne du labo, comme au scanner : le grade est mesuré sur les trades qu'elle garde,
+    # un plan qu'elle écarte ne reçoit pas son risque (apply_grade). None : aucune règle sur ce marché.
+    from app.lab import live as LIVE  # import tardif : le labo importe ce module
+
+    methode = await LIVE.plan_verdict(plan, daily, now)
+    apply_grade(plan, capital, risk_pct, now, usd_per_eur=await usd_per_eur(), methode=methode)
     return plan
 
 
@@ -409,13 +414,15 @@ async def usd_per_eur() -> float:
 
 
 def apply_grade(plan: dict, capital: float | None, risk_pct: float | None, now: datetime,
-                trades: list[dict] | None = None, usd_per_eur: float | None = None) -> None:
+                trades: list[dict] | None = None, usd_per_eur: float | None = None, methode: dict | None = None) -> None:
     """Grade de JARVIS et taille du plan, une seule règle : risque en € = min(capital × % proposé, JARVIS_RISK_EUR)
     (JARVIS_RISK_EUR sans capital connu), au change `usd_per_eur` (1,15 par défaut). Le grade propose 0 % (F, E,
     non noté, périmé, illisible) : JARVIS ne propose pas de taille (`sizing` None) et la règle de Simão est à part
-    (`sizing_regle`, hors grade). Un risque demandé explicitement remplace le % du grade (même plafond en euros),
-    marqué hors budget s'il engage plus d'euros que ce que propose JARVIS (arrêt de la journée compris). Jamais
-    d'exception : un grade illisible vaut 0 % (fail-closed)."""
+    (`sizing_regle`, hors grade). `methode` : verdict de la méthode championne (live.plan_verdict) ; un plan
+    qu'elle écarte est hors de la population que mesure le grade : 0 % proposé, « écarté par la méthode vN ».
+    Un risque demandé explicitement remplace le % du grade (même plafond en euros), marqué hors budget s'il engage
+    plus d'euros que ce que propose JARVIS (arrêt de la journée compris). Jamais d'exception : un grade illisible
+    vaut 0 % (fail-closed)."""
     from app.lab import grade as GRADE  # import tardif : le labo importe ce module
     from app.trading import killmode as K  # import tardif : killmode importe ce module
 
@@ -424,6 +431,13 @@ def apply_grade(plan: dict, capital: float | None, risk_pct: float | None, now: 
     except Exception as exc:
         log.warning("Grade du labo illisible (%s: %s) : risque proposé 0 %%", type(exc).__name__, exc)
         g = GRADE.unreadable(exc)
+    if methode is not None:
+        plan["methode"] = methode
+    if methode and not methode.get("garde", True):
+        names = ", ".join(f"« {n} »" for n in methode.get("regles") or []) or "?"
+        rule = "règles" if len(methode.get("regles") or []) > 1 else "règle"
+        g = g | {"risque_propose": 0.0, "observation": True, "ecarte": True,
+                 "raison": f"écarté par la méthode {methode.get('version') or '?'} ({rule} {names})"}
     plan["grade"] = g
     cap = capital if capital is not None else (env_float("JARVIS_CAPITAL", 0.0) or None)
     rate = usd_per_eur or K.EURUSD_DEFAULT
@@ -545,12 +559,12 @@ def sizing_lines(p: dict) -> list[str]:
     if rule:
         g = p.get("grade") or {}
         # La lettre seule quand c'est elle qui dit 0 % ; sinon la vraie raison (arrêt du jour, budget, grade périmé,
-        # illisible, fenêtre discontinue), qu'un « grade A : 0 % » cacherait.
-        by_letter = (not (g.get("risque_grade") or 0) > 0 and not g.get("perime")
+        # illisible, fenêtre discontinue, plan écarté par la méthode), qu'un « grade A : 0 % » cacherait.
+        by_letter = (not (g.get("risque_grade") or 0) > 0 and not g.get("perime") and not g.get("ecarte")
                      and not str(g.get("raison", "")).startswith(("grade illisible", "fenêtre discontinue")))
-        why = (f"grade {g.get('grade', 'non noté')} : 0 %" if by_letter or not g.get("raison")
-               else f"0 % : {g['raison']}")
-        return [f"💰 JARVIS ne propose pas de taille ({why}). "
+        why = (f" (grade {g.get('grade', 'non noté')} : 0 %)" if by_letter or not g.get("raison")
+               else f" : plan {g['raison']}" if g.get("ecarte") else f" (0 % : {g['raison']})")
+        return [f"💰 JARVIS ne propose pas de taille{why}. "
                 f"Ta règle de {_amount(rule['risk_amount_eur'])} € : {_quantity(p, rule)} (exception, hors avis de "
                 "JARVIS)"]
     return []

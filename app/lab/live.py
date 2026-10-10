@@ -1,9 +1,12 @@
-"""Méthode championne appliquée à JARVIS en direct (scanner pré-ouverture).
+"""Méthode championne appliquée à JARVIS en direct (scanner pré-ouverture et tous les plans).
 
 Le worker du labo écrit lab_champion.json (version et filtres du champion) ; JARVIS le relit quand il
 change. Un plan qu'une règle du champion écarte n'est pas proposé : il reste visible dans le message
 du scanner (« écartées par la méthode vN ») et dans data/scans.jsonl. Le fichier absent, illisible
 ou sans filtre : aucun filtre, une seule ligne de journal ; une erreur ici ne casse jamais le scanner.
+Hors scanner (`!plan`, `!prends`, API, plans crypto), plan_verdict évalue le même filtre (service.build_plan) :
+le grade est mesuré sur les trades que garde le champion, un plan écarté ne reçoit donc pas son risque
+(risque proposé 0 %, « écarté par la méthode vN »), il reste affiché.
 
 Les règles s'évaluent avec le SQL du labo (method.evaluate_rows) sur une ligne aux mêmes champs que
 le journal du labo (generator.py) :
@@ -13,6 +16,9 @@ le journal du labo (generator.py) :
   closes, comme l'univers du labo), regime (universe.regime sur SPY), catalyst_replayed = false ;
 - regime, regime_trend, regime_vol_tercile : regime.series sur ~500 jours de SPY (table regimes du labo) ;
 - weekday, hour_utc, market, symbol, side : du jour et de l'heure du plan.
+Crypto (crypto_row) : la ligne de lessons.crypto_row (contexte du générateur), le symbole au nom du labo (paire
+OKX « XXX-USDT ») et le régime de BTC (context.regime, regime*) sur ses bougies journalières, comme
+generator.crypto_day ; BTC indisponible : les règles sur le régime ne s'appliquent pas, comme sans SPY.
 Champs du labo absents en direct (traités comme « non vérifiés », COALESCE … 0) : universe_reason,
 universe_rank, dollar_volume et gap_open_pct (de toute façon interdits dans les règles), sector (vide
 partout). Différence assumée : la note du direct utilise les réglages du moment, le labo ceux figés
@@ -113,25 +119,114 @@ def needs_index(rule: dict) -> bool:
                for leaf in V.leaves_of(rule["cond"]))
 
 
-def verdict_for(plan: dict, daily_score, daily, index_daily, now: datetime | None, s, champ: dict | None = None) -> dict:
-    """Verdict d'un plan d'action du scanner ; jamais d'exception (plan gardé en cas de souci).
-    SPY indisponible (panne propre au direct) : les règles sur le régime ne s'appliquent pas, plutôt
+def _verdict(champ: dict, index_daily, make_row, index_name: str = "SPY") -> dict:
+    """Verdict d'un plan sur la ligne que construit `make_row` ; jamais d'exception (plan gardé en cas de souci).
+    Indice indisponible (panne propre au direct) : les règles sur le régime ne s'appliquent pas, plutôt
     que d'écarter tous les plans (une règle « ne garder que » sur un champ inconnu écarte tout)."""
-    champ = champ or current()
     if champ["regles"] and not index_daily:
         try:
             kept = [r for r in champ["regles"] if not needs_index(r)]
         except Exception:
             kept = []
         if len(kept) != len(champ["regles"]):
-            _warn_once("indice", "Méthode du labo : régime de marché (SPY) indisponible, règles sur le régime "
-                                 "non appliquées")
+            _warn_once(f"indice:{index_name}", "Méthode du labo : régime de marché (%s) indisponible, règles sur le "
+                                               "régime non appliquées", index_name)
             champ = champ | {"regles": kept}
     if not champ["regles"]:
         return {"garde": True, "regles": [], "version": champ.get("version")}
     try:
-        row = stock_row(plan, daily_score, daily, index_daily, now or datetime.now(timezone.utc), s)
+        row = make_row()
     except Exception as exc:
         _warn_once("ligne", "Méthode du labo : contexte du plan impossible (%s: %s), plan gardé", type(exc).__name__, exc)
         return {"garde": True, "regles": [], "version": champ.get("version")}
     return check([row], champ)[0]
+
+
+def verdict_for(plan: dict, daily_score, daily, index_daily, now: datetime | None, s, champ: dict | None = None) -> dict:
+    """Verdict d'un plan d'action (scanner, plan_verdict) ; jamais d'exception (plan gardé en cas de souci)."""
+    champ = champ or current()
+    return _verdict(champ, index_daily,
+                    lambda: stock_row(plan, daily_score, daily, index_daily, now or datetime.now(timezone.utc), s))
+
+
+LAB_QUOTE = "USDT"  # paires du labo crypto : OKX au comptant contre USDT (« BTC-USDT »)
+INDEX_DIRECT = {"stock": "SPY", "crypto": "BTC"}  # indice du régime en direct (Alpaca, Kraken)
+
+
+def lab_symbol(symbol: str) -> str:
+    """Symbole d'un plan crypto du direct (« BTC », Kraken) au nom du labo (« BTC-USDT »)."""
+    symbol = symbol.upper()
+    return symbol if "-" in symbol else f"{symbol}-{LAB_QUOTE}"
+
+
+def crypto_row(plan: dict, daily: list[dict] | None, index_daily: list[dict] | None, now: datetime) -> dict:
+    """Ligne « journal du labo » d'un plan crypto en direct (voir le docstring du module)."""
+    from datetime import date
+
+    from app.lab import collector as CO
+    from app.lab import generator as G
+    from app.lab import lessons as L
+    from app.lab import regime as REG
+    from app.lab import universe as U
+
+    row = L.crypto_row(plan, daily, now)
+    row["symbol"] = lab_symbol(row["symbol"])
+    if index_daily:
+        day = date.fromisoformat(row["day"])
+        row["context"]["regime"] = U.regime(index_daily, CO.utc_midnight(day), G.ANNUAL_DAYS["crypto"])
+        label = REG.series(index_daily, "crypto", [day])[row["day"]]
+        row |= {"regime_label": label.get("label"), "regime_trend": label.get("trend"),
+                "regime_vol_tercile": label.get("vol_tercile")}
+    return row
+
+
+def crypto_verdict(plan: dict, daily, index_daily, now: datetime | None, champ: dict | None = None) -> dict:
+    """Verdict d'un plan crypto ; jamais d'exception (plan gardé en cas de souci)."""
+    champ = champ or current()
+    return _verdict(champ, index_daily, lambda: crypto_row(plan, daily, index_daily, now or datetime.now(timezone.utc)),
+                    INDEX_DIRECT["crypto"])
+
+
+_index: dict = {}
+
+
+async def index_daily(market: str, now: datetime) -> list[dict] | None:
+    """Bougies journalières de l'indice du régime (SPY : ~500 jours Alpaca ; BTC : Kraken), gardées pour la journée
+    UTC ; None si la source ne répond pas (les règles sur le régime ne s'appliquent alors pas)."""
+    day = now.astimezone(timezone.utc).date().isoformat()
+    if _index.get(market, (None,))[0] != day:
+        if market == "stock":
+            from app.trading import scanner
+
+            bars = await scanner._index_daily(now)
+        else:
+            from app.trading import service as T
+
+            bars = await T._optional_candles(INDEX_DIRECT["crypto"], "crypto", 1440)
+        if not bars:
+            return None  # pas gardé : réessayé au plan suivant
+        _index[market] = (day, bars)
+    return _index[market][1]
+
+
+async def plan_verdict(plan: dict, daily: list[dict] | None, now: datetime, s=None, champ: dict | None = None) -> dict | None:
+    """Verdict du champion pour un plan hors scanner (`!plan`, `!prends`, API, crypto) avec les mêmes fonctions que
+    le scanner ; None si aucune règle du champion ne touche le marché du plan (rien à évaluer) ou pour un plan
+    vendeur (le labo ne mesure que des trades longs, comme les leçons : ses règles ne disent rien d'un short).
+    Mêmes sémantiques en cas de donnée manquante : plan gardé, une ligne de journal. Jamais d'exception."""
+    try:
+        champ = champ or current()
+        market = plan.get("market")
+        rules = M.market_rules(champ["regles"], market)
+        if not rules or market not in INDEX_DIRECT or plan.get("side") != "long":
+            return None
+        champ = champ | {"regles": rules}
+        index = await index_daily(market, now) if any(needs_index(r) for r in rules) else None
+        if market == "stock":
+            from app.trading.settings import settings
+
+            return verdict_for(plan, daily, daily, index, now, settings if s is None else s, champ)
+        return crypto_verdict(plan, daily, index, now, champ)
+    except Exception as exc:
+        _warn_once("plan", "Méthode du labo : verdict du plan impossible (%s: %s), plan gardé", type(exc).__name__, exc)
+        return {"garde": True, "regles": [], "version": (champ or {}).get("version")}
