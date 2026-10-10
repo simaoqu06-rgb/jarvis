@@ -90,20 +90,29 @@ def decide(plans: list[dict]) -> dict:
 
 
 def lab_measure(market: str, symbol: str, path: str | None = None) -> dict | None:
-    """Ce que le labo a mesuré sur la méthode v1 (plans longs rejoués, hors bloc scellé) : sur ce
-    symbole et sur tout le marché, espérance des plans GO et NO GO déclenchés. None sans base."""
+    """Ce que le labo a mesuré sur la méthode de génération en cours (plans longs rejoués : origine « replay »,
+    hors bloc scellé ; ni le direct ni les autres versions n'y entrent, comme l'annonce le texte) : sur ce
+    symbole et sur tout le marché, espérance des plans GO et NO GO déclenchés, en R du labo. Deux AVG SQL, pas
+    de calcul par trade (commande interactive). None sans base."""
     from app.lab import db as lab_db  # import tardif : le labo importe le moteur de plans
 
     conn = lab_db.open_readonly(path) if path else lab_db.open_readonly()
     if conn is None:
         return None
     try:
-        out = {}
+        try:
+            version = lab_db.generation_version(conn)
+        except sqlite3.Error:  # base sans table des versions (d'avant le Labo 3) : une seule version
+            version = None
+        scope, scope_args = "origin = 'replay' AND side = 'long'", ()
+        if version is not None:
+            scope, scope_args = scope + " AND method_version = ?", (version,)
+        out = {"version": version}
         for key, where, args in (("symbole", "market = ? AND symbol = ?", (market, symbol)),
                                  ("marche", "market = ?", (market,))):
             rows = conn.execute(
-                f"SELECT decision, COUNT(*), AVG(r_net), SUM(r_net > 0) FROM trades WHERE {where} "
-                "AND triggered = 1 AND r_net IS NOT NULL GROUP BY decision", args).fetchall()
+                f"SELECT decision, COUNT(*), AVG(r_net), SUM(r_net > 0) FROM trades WHERE {where} AND {scope} "
+                "AND triggered = 1 AND r_net IS NOT NULL GROUP BY decision", args + scope_args).fetchall()
             out[key] = {d or "?": {"n": n, "r": round(r, 2), "wins": w or 0} for d, n, r, w in rows}
         return out
     except sqlite3.Error as exc:
@@ -121,15 +130,31 @@ def _group_text(g: dict) -> str:
     return " · ".join(parts) or "aucun plan déclenché"
 
 
-def measure_lines(m: dict | None, symbol: str) -> list[str]:
-    """La fiabilité affichée telle qu'elle est mesurée, sans l'embellir."""
+def _unit(market: str | None) -> str:
+    """Unité des espérances de !avis : le R du labo ; en actions, il ne compte pas encore la commission IBKR à la
+    mise de Simão (20 €), qui peut faire perdre un GO à peine positif."""
+    return {"stock": "R du labo, avant commission IBKR à 20 €", "crypto": "R du labo, frais OKX compris"}.get(
+        market, "R du labo")
+
+
+def measure_lines(m: dict | None, symbol: str, market: str | None = None) -> list[str]:
+    """La fiabilité affichée telle qu'elle est mesurée, sans l'embellir : l'écart GO − NO GO est relatif, dit avec
+    l'espérance absolue du GO et son unité (scénario 3 de GPT : un GO moins mauvais que le NO GO n'est pas un
+    gain)."""
     if m is None:
         return ["📏 Labo indisponible : aucune mesure à montrer, l'avis suit la méthode sans preuve chiffrée."]
-    lines = [f"📏 **Mesuré par le labo** (méthode v1, plans longs rejoués) : {symbol} {_group_text(m['symbole'])} ; "
-             f"tout le marché {_group_text(m['marche'])}."]
+    unit = _unit(market)
+    lines = [f"📏 **Mesuré par le labo** (méthode {m.get('version') or 'v1'}, plans longs rejoués, {unit}) : "
+             f"{symbol} {_group_text(m['symbole'])} ; tout le marché {_group_text(m['marche'])}."]
     go, nogo = m["marche"].get("GO"), m["marche"].get("NO GO")
-    if go and nogo and go["n"] >= 30 and nogo["n"] >= 30 and go["r"] > 0 and go["r"] - nogo["r"] >= 0.1:
-        lines.append("-# Le GO fait mieux que le NO GO dans le labo : la note a de la valeur sur ce marché.")
+    if go and nogo and go["n"] >= 30 and nogo["n"] >= 30 and go["r"] - nogo["r"] >= 0.1:
+        gap = f"Le GO fait mieux que le NO GO de {_fr(go['r'] - nogo['r'])} R par trade dans le labo (écart relatif)"
+        if go["r"] > 0:
+            lines.append(f"-# {gap} ; le GO gagne {_fr(go['r'])} R en moyenne ({unit}) : la note départage sur ce "
+                         "marché.")
+        else:
+            lines.append(f"-# {gap}, mais le GO perd encore {_fr(go['r'])} R en moyenne ({unit}) : moins mauvais, "
+                         "pas gagnant.")
     else:
         lines.append("-# La note GO/NO GO n'a pas encore prouvé qu'elle gagne (GO pas nettement meilleur que NO GO) : "
                      "prends cet avis comme une lecture de la méthode, pas comme une prédiction fiable.")
@@ -167,7 +192,7 @@ def opinion_text(o: dict) -> str:
     lines.append(("Ce qui invalide : " if o["plan"] else "Ce qui débloquerait : ") + o["unlock"])
     lines += [side_line(p) for p in o["plans"]]
     lines += [f"-# Plan impossible côté {e}" for e in o["errors"]]
-    lines += measure_lines(o["lab"], o["symbol"])
+    lines += measure_lines(o["lab"], o["symbol"], o["market"])
     if o["plan"]:
         lines.append("")
         lines.append(S.plan_text(o["plan"]))
