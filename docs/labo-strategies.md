@@ -1002,6 +1002,103 @@ non-biais séparent les deux. **Pragmatique** : aucun essai, une seule re-mesure
 même heure n'existe que pour les actions, et un stop serré garde un biais contre la stratégie ; les deux sont écrits.
 GO.
 
+## Déclaration n° 11 (18 octobre 2026) : stop structurel, open interest sur 7 jours, profil de la veille
+
+Écrite avant tout chiffre : aucune ligne du labo n'a été lue pour la choisir ni pour fixer ses seuils. Source : cinq
+vidéos envoyées par Simão le 18 octobre (dualisflow : TPO ; kara_trading_tools : volume par prix, open interest, murs
+du carnet, structure), compte rendu `/mnt/project-files/labo/videos-reels-2026-10-18.md`, choix « Les 3 pistes »
+(fil « Peux-tu voir cette vidéo insta ? »). La piste des murs du carnet d'ordres est abandonnée : effet affiché par la
+vidéo elle-même plus petit que les frais (+0,09 % à 4 h), non significatif (58 % contre 51 % sur 104 cas), et le labo
+n'a pas d'historique du carnet. Code : `app/lab/strategies.py`, `derivs.py`, `strat_stats.py`, `db.py`.
+
+### A. Stop derrière le dernier creux fort (deux stratégies, trois essais)
+
+Pourquoi : les pertes du labo viennent surtout des frais des stops serrés (n° 3 et 4 : au moins 0,4 R de frais pour la
+plupart des cassures de zone en 5 min). À risque constant en euros, un stop plus large réduit les frais **en R**. La
+vidéo 5 et la règle de Simão (« le stop se place là où l'espoir est parti ») disent où : derrière le dernier creux qui
+a cassé la structure, pas juste sous un creux quelconque ni sous des creux égaux (liquidité balayée).
+
+- `orb30_structure` (actions) et `cassure_zone_retest_structure` (actions, crypto) : **mêmes signaux, mêmes
+  entrées, même ordre** que `orb30` et `cassure_zone_retest` ; seul le stop change.
+- Creux fort, lu sur les bougies du signal (5 min), à la clôture de la bougie du signal `i` : creux de réaction
+  (`ZONE_SWING_SIDE` = 3 bougies de chaque côté, connu 3 bougies après) dans les `STRUCT_LOOKBACK` = 78 dernières
+  bougies, sous l'entrée, **suivi d'une clôture au-dessus du dernier sommet de réaction qui le précède** (cassure de
+  structure), clôture située entre le creux et la bougie du signal comprise. Le plus récent qui remplit la condition.
+- Stop = creux fort − 0,1 ATR (5 min, à la bougie du signal), **jamais plus serré que le stop d'origine** :
+  min(stop d'origine, stop structurel). Sans creux fort, ou si le risque dépasse 1 ATR journalier (14 j, connu la
+  veille, `STRUCT_MAX_DAILY_ATR`), le stop d'origine est gardé : la ligne est alors identique à celle de la stratégie
+  d'origine et le marque (`stop_structure` = 0).
+- Objectifs à 1, 2 et 3 R **du nouveau risque**. Une seule sortie déclarée : `r_net` (gestion v1), pour ne pas
+  multiplier les essais. Témoin comme pour la stratégie d'origine.
+
+### B. Open interest sur 7 jours : régime de purge (crypto, un essai)
+
+Pourquoi : la vidéo 3 affiche, sur 260 purges de BTC de 2022 à 2026, que la direction d'après purge est un hasard,
+mais que la probabilité d'une purge dans les 3 jours monte avec l'open interest gagné sur 7 jours (28 % entre 0 et
+2 %, 57 % entre 9 et 28 %). Affirmation de la vidéo, non vérifiée par JARVIS : c'est ce qu'on teste, comme filtre de
+risque et jamais comme signal de direction.
+
+- `cassure_zone_retest_oi7` (crypto) : les lignes de `cassure_zone_retest` dont l'open interest du perpétuel Bybit a
+  gagné **moins de 9 %** sur 7 jours au signal (dernier point de 4 h clos avant le signal, comparé au point 168 h plus
+  tôt, `derivs.context`). Open interest inconnu : ligne gardée (le filtre ne retire que ce qu'il sait), compte publié.
+  Pas de nouvelle ligne : c'est un sous-ensemble des lignes existantes, jugé comme une stratégie.
+- Descriptif, sans essai : espérance de toutes les stratégies crypto par tranche d'open interest sur 7 jours
+  (≤ 0 %, 0 à 2, 2 à 4, 4 à 6, 6 à 9, ≥ 9 %), à côté des tranches sur 24 h du lot B.
+- Limite : la collecte remonte deux jours avant le début de l'univers ; la première semaine est « inconnue ».
+
+### C. Profil de volume de la veille et ouverture hors de la valeur (actions, un essai)
+
+Pourquoi : vidéos 1 et 2 (Market Profile, volume par prix). Une ouverture au-dessus de la zone de valeur de la veille
+est une ouverture « d'initiative » des acheteurs ; c'est le contexte classique où une cassure du range d'ouverture
+vers le haut continue. `orb30` est la meilleure piste du labo, presque à l'équilibre : on teste si ce contexte la trie.
+
+- Profil de la séance régulière de la veille, bougies de 5 min aux prix négociés : `PROFILE_BINS` = 50 tranches de
+  prix entre le plus bas et le plus haut de la séance, le volume de chaque bougie réparti également sur les tranches
+  qu'elle couvre. POC : la tranche au plus gros volume. Zone de valeur : on part du POC et on ajoute à chaque pas la
+  tranche voisine (au-dessus ou au-dessous) au plus gros volume, jusqu'à 70 % du volume (`VALUE_AREA`). VAH et VAL :
+  bords haut et bas de la zone. Séance de la veille incomplète (moins de 60 bougies) : « inconnu ».
+- Colonne `ouverture_va` sur chaque ligne actions : « dessus » (ouverture > VAH), « dedans », « dessous »
+  (ouverture < VAL), ou vide.
+- `orb30_va` (actions) : les lignes de `orb30` dont l'ouverture est « dessus ». Sous-ensemble, jugé comme une
+  stratégie.
+- Descriptif, sans essai : `orb15`, `orb30`, `killmode` et v1 par position de l'ouverture.
+- Non retenu ici : objectifs au bord de la prochaine zone pleine du profil (une variable à la fois).
+
+### Jugement
+
+**Seulement sur les jours neufs** : tout l'historique visible a déjà été lu par les déclarations précédentes. Les
+cinq essais ne sont jugés que sur les séances après le **16 octobre 2026** (actions) et les jours UTC après le
+**17 octobre 2026** (crypto), comme Killmode après `SEEN_UNTIL` (`strategies.SEEN_N11`). L'historique est calculé et
+affiché à titre descriptif (« jours vus »). Règle « candidate » inchangée (D2 de la n° 8, seuil en t, n° 10 pour les
+grappes crypto et `candidate_compte`). Le bloc scellé n'est ni lu ni déplacé.
+
+### Essais
+
+152 + 5 = **157** : `orb30_structure` (actions), `cassure_zone_retest_structure` (actions et crypto),
+`cassure_zone_retest_oi7` (crypto), `orb30_va` (actions), chacun sur sa seule sortie `r_net`.
+
+### Coût
+
+Nouvelle déclaration : rattrapage complet des deux marchés (`strats:stock:d11`, `strats:crypto:d11`), comme la n° 10 ;
+pendant ce temps le tableau ne montre que les jours refaits (« Tableau partiel »). Le profil de la veille et le creux
+fort se calculent sur les bougies déjà relues : quelques millisecondes par action.
+
+### Effet attendu
+
+A : moins de trades arrêtés dans le bruit et moins de frais en R ; en contrepartie des objectifs plus loin, donc plus
+de sorties à la clôture. Le sens n'est pas connu d'avance. B et C retirent des trades : ils ne peuvent aider que si les
+trades retirés perdaient plus que les autres.
+
+### Council
+
+Position de l'analyste, sur les faits : A vise la cause mesurée des pertes (frais), B et C sont des filtres de
+contexte sur une base existante, sans paramètre ajusté après coup (seuil de 9 % pris de la vidéo, 70 % de la
+définition standard). **Sceptique** : les vidéos montrent des exemples choisis ; seule la n° B s'appuie sur une mesure,
+faite par l'auteur, non vérifiée. Accepté : c'est pour ça qu'on teste sur jours neufs. **Pragmatique** : cinq essais
+seulement, une seule sortie chacun. **Critique** : un stop plus large garde le même R mais allonge la durée des trades
+et les sorties à la clôture ; le profil reconstruit depuis des bougies de 5 min est approximatif (pas de ticks). Écrits
+en limites. GO, choix de Simão.
+
 ## Bloc scellé
 
 Le rejeu du **6 avril au 5 octobre 2026** est calculé mais rangé à part (`trades_sealed`,
