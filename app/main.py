@@ -365,8 +365,9 @@ async def trading_position(symbol: str, entry: float, side: str = "long", stop: 
 @app.get("/api/trading/advice")
 async def trading_advice():
     """Les ordres en prix (ventes, stop suiveur, renforts) et sortir, alléger ou garder pour chaque trade ouvert
-    (conseils gardés sur les trades pour être mesurés)."""
-    advices = await advice.advise_book(scheduler.book.open_trades())
+    (conseils gardés sur les trades pour être mesurés). Les KILL n'en ont pas, comme avant la clôture : ils gardent
+    la gestion que mesure leur journal (vendus à la clôture, aucun stop remonté)."""
+    advices = await advice.advise_book([t for t in scheduler.book.open_trades() if not t.get("killmode")])
     now = datetime.now(timezone.utc)
     async with scheduler._lock:
         by_id = {t["id"]: t for t in scheduler.book.trades}

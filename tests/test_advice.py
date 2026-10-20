@@ -461,3 +461,24 @@ async def test_un_kill_pris_se_vend_a_la_cloture(monkeypatch):
     await scheduler.tick_closing(NOW)
     assert len(sent) == 1
     assert "vers 15 h 59 New York, annule les TP et SL de ACME puis vends le reste au marché" in sent[0]
+
+
+async def test_positions_sans_conseil_sur_un_kill(monkeypatch):
+    """`!positions` comme le message avant clôture : un KILL garde la gestion que mesure son journal."""
+    from app import scheduler
+
+    book = S.Book(None)
+    book.trades += [trade(100.0, market="stock", symbol="ACME", killmode=True),
+                    trade(100.0, market="stock") | {"id": "t2"}]
+    monkeypatch.setattr(scheduler, "book", book)
+    monkeypatch.setattr(book, "save", lambda: None)
+    seen = []
+
+    async def fake(trades, now=None):
+        seen.extend(t["symbol"] for t in trades)
+        return []
+
+    monkeypatch.setattr(A, "advise_book", fake)
+    text = await bot.handle("!positions")
+    assert seen == ["NVDA"]
+    assert "🔪 KILL (ACME) : pas de conseil, il se vend à la clôture" in text

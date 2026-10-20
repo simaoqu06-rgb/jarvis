@@ -354,15 +354,19 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
                 return ("Aucun trade suivi. Pour une position prise hors de JARVIS : `!position NVDA 132.5` "
                         "(ton prix d'entrée), ou `!prends NVDA 132.5` pour qu'il la suive.\n"
                         + advice.stats_line(advice.advice_stats(scheduler.book.trades)))
-            advices = await advice.advise_book(trades)
+            # Comme le message avant clôture : un KILL garde la gestion que mesure son journal (aucun stop remonté).
+            kills = sorted({t["symbol"] for t in trades if t.get("killmode")})
+            advices = await advice.advise_book([t for t in trades if not t.get("killmode")])
             async with lock or asyncio.Lock():
                 by_id = {t["id"]: t for t in scheduler.book.trades}
                 for a in advices:
                     if "error" not in a and a["id"] in by_id:
                         advice.record(by_id[a["id"]], a, datetime.now(timezone.utc))
                 scheduler.book.save()
-            return advice.closing_text(advices, advice.advice_stats(scheduler.book.trades),
+            text = advice.closing_text(advices, advice.advice_stats(scheduler.book.trades),
                                        title="🧭 **Tes positions**")
+            return text + (f"\n🔪 KILL ({', '.join(kills)}) : pas de conseil, il se vend à la clôture (la règle que "
+                           "mesure son journal)." if kills else "")
         if cmd == "position":
             req = parse_trade(args)
             if req["entry"] is None:
