@@ -1031,7 +1031,7 @@ def test_stop_dans_une_minute_qui_s_effondre():
     assert res["a_lire"] == [fill_m]  # la minute d'achat (ouverte au-dessus de l'entrée) reste à lire
     c = _call(at) | {"groupe": "kill", "resultat": res | {"eurusd": 1.15, "plan_ibkr": "fixe"}}
     assert "1 sortie à 0,25 R ou plus sous le stop actif" in K.risk_line([c])
-    line = K.execution_line([c])
+    line = K.execution_line([c], NOW)
     assert "achat sur 0/1 KILL" in line and "1 stop mesuré, +0,29 R sous le stop actif" in line
     assert "1 minute encore à lire" in line
 
