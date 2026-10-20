@@ -28,6 +28,8 @@ qu'aux comptes listés dans JARVIS_DISCORD_OWNER_ID et ignore tout le reste sans
   !strategies           labo v2 : stratégies à déclencheur contre v1 et leur témoin aléatoire
   !autopsie             où les trades du labo échouent (élan contre le hasard, stops, gagnants qui frôlent le stop) ;
                         `!autopsie crypto` ou `!autopsie actions`
+  !rates                chasse aux ratés : les actions à +10 % des 20 dernières séances que JARVIS n'a pas prises,
+                        pourquoi (pas de plan, plan non déclenché, stop avant TP1) et le gap à regarder
   !potentiel            potentiel +10 : part des séances qui touchent +8 % selon le gap, types de catalyseurs
   !kill                 JARVIS Killmode, désactivé par défaut : `!kill on`, `!kill NVDA`, `!kill scan`, `!kill bilan`
   !aide                 cette liste
@@ -54,6 +56,7 @@ from app.lab import lessons as lab_lessons
 from app.lab import morning as lab_morning
 from app.lab import status as lab_status
 from app.lab import potentiel as lab_potentiel
+from app.lab import rates as lab_rates
 from app.lab import strat_stats as lab_strategies
 from app.notify.discord import split_message
 from app.trading import advice, paper, scanner
@@ -284,6 +287,16 @@ def autopsie_text(args: list[str]) -> str:
         conn.close()
 
 
+def rates_text() -> str:
+    conn = lab_db.open_readonly()
+    if conn is None:
+        return "🎣 Base du labo absente : le service jarvis-lab n'a pas encore démarré."
+    try:
+        return lab_rates.text(lab_rates.cached(conn))
+    finally:
+        conn.close()
+
+
 def potentiel_text() -> str:
     conn = lab_db.open_readonly()
     if conn is None:
@@ -454,6 +467,8 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
             return await asyncio.to_thread(strategies_text)
         if cmd == "autopsie":
             return await asyncio.to_thread(autopsie_text, args)
+        if cmd in ("rates", "ratés"):
+            return await asyncio.to_thread(rates_text)
         if cmd in ("potentiel", "potentiel10", "plus10"):
             return await asyncio.to_thread(potentiel_text)
         if cmd == "kill":

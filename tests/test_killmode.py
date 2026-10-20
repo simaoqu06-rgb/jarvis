@@ -77,7 +77,7 @@ def test_regle_killmode_refus():
 
 def test_killmode_au_labo():
     assert "killmode" in ST.STRATEGIES and ST.STRATEGIES["killmode"]["markets"] == ("stock",)
-    assert ST.DECLARATION >= 5 and len(ST.trials()) == 152  # n° 5, sorties de Gemini (n° 6), GO (n° 7), n° 8, n° 9
+    assert ST.DECLARATION >= 5 and len(ST.trials()) == 157  # n° 5, sorties de Gemini (n° 6), GO (n° 7), n° 8, n° 9, n° 11
     rows = {r["strategy"]: r for r in ST.strategy_rows(day(), "AAA", 3, 5.0)}
     k = rows["killmode"]
     assert k["triggered"] == 1 and k["signal_at"] == OPEN + 15 * 60 and k["r_net"] > 0
@@ -1062,7 +1062,7 @@ def test_stop_dans_une_minute_qui_s_effondre():
     assert res["a_lire"] == [fill_m]  # la minute d'achat (ouverte au-dessus de l'entrée) reste à lire
     c = _call(at) | {"groupe": "kill", "resultat": res | {"eurusd": 1.15, "plan_ibkr": "fixe"}}
     assert "1 sortie à 0,25 R ou plus sous le stop actif" in K.risk_line([c])
-    line = K.execution_line([c])
+    line = K.execution_line([c], NOW)
     assert "achat sur 0/1 KILL" in line and "1 stop mesuré, +0,29 R sous le stop actif" in line
     assert "1 minute encore à lire" in line
 

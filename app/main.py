@@ -32,6 +32,7 @@ from app.lab import stats as lab_stats
 from app.lab import potentiel as lab_potentiel
 from app.lab import audit as lab_audit
 from app.lab import autopsie as lab_autopsie
+from app.lab import rates as lab_rates
 from app.lab import filtres as lab_filtres
 from app.lab import strat_stats as lab_strategies
 from app.lab import status as lab_status
@@ -756,6 +757,18 @@ def lab_autopsie_get():
     conn = _lab_conn()
     try:
         return lab_autopsie.cached(conn) or lab_autopsie.report(conn)
+    finally:
+        conn.close()
+
+
+@app.get("/api/lab/rates", dependencies=[Depends(lab_key)])
+def lab_rates_get():
+    """Chasse aux ratés du potentiel +10 : actions à ≥ +10 % depuis l'ouverture sur les 20 dernières séances, raison du
+    raté (pas de plan, plan non déclenché, stop avant TP1), gap et catalyseur, ratés sans plan par tranche de gap contre
+    le taux de base de l'univers. Lecture seulement. Cache du worker, sinon calcul direct."""
+    conn = _lab_conn()
+    try:
+        return lab_rates.cached(conn) or lab_rates.report(conn)
     finally:
         conn.close()
 

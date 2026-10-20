@@ -242,7 +242,7 @@ def test_labo_separe_rattrapage_et_direct_en_attente(tmp_path):
         db.replace_strat("live", "stock", day, [_row("AAA")])
     assert RAT.remaining(db.conn, "stock") == {"replay": 0, "live": 1}
     st = STATUS.status(path)
-    assert st["n10"]["complete"]
+    assert st["declaration"]["complete"]
     lines = STATUS.text(st).splitlines()
     assert "Labo v2 : 2 lignes de stratégies (`!strategies`) · direct en attente de calcul : 1 jour actions" in lines
     assert not any("rattrapage :" in line for line in lines)

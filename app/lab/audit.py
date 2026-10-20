@@ -4,8 +4,8 @@ référence d'audit »).
 
 Archive (step, en tête de chaque passage du worker et du rattrapage) : avant que le rattrapage, Killmode complet ou la
 n° 9 ne réécrivent une ligne mesurée autrement, elle est copiée telle quelle (toutes ses colonnes) dans un fichier à
-côté de lab.db : data/archives/labo2-avant-n<déclaration>.db (n° 10 : labo2-avant-n10.db), mêmes noms de tables que
-la base :
+côté de lab.db : data/archives/labo2-avant-n<déclaration>.db, mêmes noms de tables que la base (mis en service après
+la déclaration de la n° 11 : le premier fichier automatique est labo2-avant-n11.db) :
 - strat_trades : par marché, les lignes d'une autre déclaration que celle du marché (declaration NULL, d'avant le
   suivi, ou différente) ;
 - kill_complet : les lignes d'une autre empreinte de coût (kill_complet.cost_fingerprint) ;
@@ -27,10 +27,14 @@ vigueur appariées sur (origin, market, symbol, day, strategy, slot) ; par march
 référence (strategies.ref_exit, nette de la commission IBKR en actions comme le tableau) : nombre de paires,
 déclenchements avant et après, et sur les paires déclenchées des deux côtés, moyenne de (nouveau − ancien) pour
 l'espérance, le témoin et l'écart stratégie − témoin, avec IC en grappes par jour (semaines en crypto,
-strat_stats.Mean). C'est la mesure sur données réelles du biais du simulateur en révision 1 (+0,23 R annoncé, mesuré
-seulement en rejeu à blanc) et de l'« Effet attendu » déclaré de la n° 10, sur les mêmes trades. Sauf les séances du
-direct aux plans v1 recalculés (empreinte.V1_RECALCULS, excluded) : archivées sur les anciens plans, refaites sur les
-nouveaux, elles sont exclues de l'appariement et le texte le dit.
+strat_stats.Mean). Sauf les séances du direct aux plans v1 recalculés (empreinte.V1_RECALCULS, excluded) : archivées
+sur les anciens plans, refaites sur les nouveaux, elles sont exclues de l'appariement et le texte le dit.
+Un fichier d'une déclaration plus ancienne trouvé dans le dossier (copie manuelle de labo2-avant-n10.db faite avant le
+déploiement) est apparié de la même façon aux lignes en vigueur, à part (archives[nom]["marches"]) : c'était la mesure
+prévue, sur données réelles, du biais du simulateur en révision 1 (+0,23 R annoncé, mesuré seulement en rejeu à blanc)
+et de l'« Effet attendu » de la n° 10 ; la n° 11 ne change pas les lignes des stratégies d'avant (archive n° 11 :
+≈ 0 attendu sur les lignes de la n° 10, c'est le contrôle ; des lignes plus anciennes encore en base au déploiement
+s'y mêleraient, et la note d'archive_info le dit).
 
 L'archive ne sert JAMAIS à décider : ni « candidate », ni le grade, ni le brief, ni les leçons ne la lisent. Seuls ce
 module, la route GET /api/lab/strategies/audit et la section « Audit » de `!strategies` y touchent
@@ -55,7 +59,9 @@ PREFIX = "labo2-avant-n"
 ALIAS = "avant"
 CACHE_KEY = "audit_declaration"
 # Ce que la déclaration a changé dans les mesures (note d'archive_info).
-NOTES = {10: "mesures d'avant la n° 10 : simulateur révision 1, témoin sur la journée, 5 tirages, prix ajustés"}
+NOTES = {10: "mesures d'avant la n° 10 : simulateur révision 1, témoin sur la journée, 5 tirages, prix ajustés",
+         11: "mesures d'avant la n° 11 : sans ouverture_va ni stop_structure, sans les stratégies de la n° 11 ; les "
+             "stratégies d'avant ne devaient pas changer (≈ 0 attendu à l'audit)"}
 STRAT_KEY = ("origin", "market", "symbol", "day", "strategy", "slot")
 KILL_KEY = ("day", "symbol", "cout")
 PLUS10_KEY = ("day", "symbol", "essai")
@@ -76,6 +82,30 @@ def archive_path(db_file: str | Path, decl: int) -> Path:
 
 def note(decl: int) -> str:
     return NOTES.get(decl, f"mesures d'avant la n° {decl}")
+
+
+def _note(job: dict, decl: int, replaced: list) -> str:
+    """Note d'archive_info d'un archivage : NOTES[decl] décrit les lignes de stratégies de la déclaration précédente ;
+    Killmode complet et la n° 9 ont leur propre marque (coût, mesure), et des lignes plus anciennes mêlées le disent."""
+    if job["table"] == "kill_complet":
+        return f"Killmode complet : autre empreinte de coût que {job['args'][0]}"
+    if job["table"] == "plus10_trades":
+        return f"n° 9 : séances d'une autre mesure que la n° {job['mesure']}"
+    if set(replaced) == {decl - 1}:
+        return note(decl)
+    return (f"mesures d'avant la n° {decl}, pas toutes de la n° {decl - 1} (voir remplace) : l'écart à l'audit mêle "
+            f"leurs effets")
+
+
+def on_disk(db_file: str | Path) -> list[int]:
+    """Déclarations dont un fichier d'archive est dans le dossier (labo2-avant-n<decl>.db), copies manuelles comprises."""
+    folder = Path(db_file).parent / FOLDER
+    out = []
+    for path in folder.glob(f"{PREFIX}*.db") if folder.is_dir() else ():
+        tail = path.name[len(PREFIX):-len(".db")]
+        if tail.isdigit():
+            out.append(int(tail))
+    return sorted(out)
 
 
 # --- Archive (worker) ---------------------------------------------------------------------------------------------
@@ -115,9 +145,12 @@ def _copy(conn: sqlite3.Connection, table: str, unique: tuple, where: str, args:
     cols = [c for c in _columns(conn, "main", table) if c in have]  # copie manuelle d'avant une colonne : sans elle
     match = " AND ".join(f"a.{c} IS s.{c}" for c in unique)
     total = conn.execute(f"SELECT COUNT(*) FROM main.{table} WHERE {where}", args).fetchone()[0]
+    # Table vide : rien à exclure, et sans NOT EXISTS SQLite n'écrit pas d'abord toute la sélection dans un fichier
+    # temporaire (autant de disque que l'archive elle-même au premier archivage).
+    empty = conn.execute(f"SELECT 1 FROM {ALIAS}.{table} LIMIT 1").fetchone() is None
+    absent = "" if empty else f" AND NOT EXISTS (SELECT 1 FROM {ALIAS}.{table} a WHERE {match})"
     cur = conn.execute(f"INSERT INTO {ALIAS}.{table} ({', '.join(cols)}) SELECT {', '.join('s.' + c for c in cols)} "
-                       f"FROM main.{table} s WHERE {where} AND NOT EXISTS "
-                       f"(SELECT 1 FROM {ALIAS}.{table} a WHERE {match})", args)
+                       f"FROM main.{table} s WHERE {where}{absent}", args)
     return total, cur.rowcount
 
 
@@ -173,7 +206,8 @@ def step(db: LabDB) -> dict:
                     db.conn.execute(f"INSERT INTO {ALIAS}.archive_info VALUES (?, ?, ?, ?, ?, ?, ?)",
                                     (now_iso(), job["key"], job["table"],
                                      json.dumps([("inconnue (d'avant le suivi)" if x is None else x) for x in replaced],
-                                                ensure_ascii=False), decl, json.dumps(lignes), note(decl)))
+                                                ensure_ascii=False), decl, json.dumps(lignes),
+                                     _note(job, decl, replaced)))
                 db.set(JOB, job["key"], {"fichier": path.name, "lignes": total, "ajoutees": added, "le": now_iso()})
                 out[job["key"]] = lignes
         finally:
@@ -199,8 +233,8 @@ def _col(x: str) -> str:
 
 def excluded() -> list[dict]:
     """Relecture W2 : séances du direct dont les plans v1 ont été recalculés (empreinte.V1_RECALCULS, le 06/10/2026 en
-    actions). Leurs lignes archivées partent des plans d'avant la rupture, leurs lignes n° 10 des plans recalculés : ce
-    ne sont pas « les mêmes trades », elles sortent de l'appariement."""
+    actions). Leurs lignes archivées partent des plans d'avant la rupture, leurs lignes de la déclaration en vigueur des
+    plans recalculés : ce ne sont pas « les mêmes trades », elles sortent de l'appariement."""
     return [{"marche": m, "jour": date.fromisoformat(d).isoformat(), "raison": "plans v1 recalculés"}
             for m, d in sorted({(m, d) for m, _, d in E.V1_RECALCULS})]
 
@@ -275,8 +309,11 @@ def report(conn: sqlite3.Connection, uri: bool = False) -> dict | None:
     files: dict[int, list[str]] = {}
     for market in ("stock", "crypto"):
         files.setdefault(declaration(market), []).append(market)
+    current = set(files)
+    for decl in on_disk(main):  # fichier plus ancien (copie manuelle d'avant la n° 10…) : apparié à part
+        files.setdefault(decl, ["stock", "crypto"])
     out: dict = {"declaration": ST.LATEST_DECLARATION, "marches": {}, "archives": {}, "seances_exclues": excluded()}
-    for decl, markets in files.items():
+    for decl, markets in sorted(files.items()):
         path = archive_path(main, decl)
         if not path.exists():
             continue
@@ -288,15 +325,17 @@ def report(conn: sqlite3.Connection, uri: bool = False) -> dict | None:
             info = ([dict(zip(("le", "cle", "tables", "remplace", "declaration", "lignes", "note"), r)) for r in
                      conn.execute(f"SELECT * FROM {ALIAS}.archive_info ORDER BY archived_at")]
                     if "archive_info" in tables else [])
-            out["archives"][path.name] = {"tables": sorted(tables), "archivages": info, "note": note(decl)}
+            entry = out["archives"][path.name] = {"tables": sorted(tables), "archivages": info, "note": note(decl),
+                                                  "avant": decl}
             if "strat_trades" not in tables:
                 continue
             if not uri:
                 conn.execute(f"CREATE INDEX IF NOT EXISTS {ALIAS}.strat_trades_audit ON strat_trades "
                              f"({', '.join(STRAT_KEY)})")
             archived = dict(conn.execute(f"SELECT market, COUNT(*) FROM {ALIAS}.strat_trades GROUP BY market"))
+            target = out["marches"] if decl in current else entry.setdefault("marches", {})
             for market, mk in _pairs(conn, markets).items():
-                out["marches"][market] = {
+                target[market] = {
                     "archivees": archived.get(market, 0),
                     "appariees": sum(s["paires"] for s in mk["strategies"].values()),
                     "ensemble": {k: v.result() for k, v in mk["ensemble"].items()},
@@ -329,7 +368,8 @@ def refresh(db: LabDB, now, max_age: float) -> int | None:
     if sig == last or (cached(db.conn) and now.timestamp() - at < max_age and not E.code_changed(last)):
         return None
     data = report(db.conn)
-    pairs = sum(m["appariees"] for m in (data or {}).get("marches", {}).values())
+    pairs = sum(m["appariees"] for m in (data or {}).get("marches", {}).values()) + sum(
+        m["appariees"] for a in (data or {}).get("archives", {}).values() for m in (a.get("marches") or {}).values())
     with db.transaction():
         if data is None:
             db.conn.execute("DELETE FROM stats_cache WHERE key = ?", (CACHE_KEY,))
@@ -360,15 +400,23 @@ def text(rep: dict | None) -> str | None:
     for x in rep.get("seances_exclues") or []:  # relecture W2
         lines[0] += (f" · séance du direct {SS.MARKET_FR.get(x['marche'], x['marche']).lower()} du "
                      f"{date.fromisoformat(x['jour']).strftime('%d/%m/%Y')} exclue ({x['raison']})")
-    if not rep["marches"]:
+    older = {name: a for name, a in rep["archives"].items() if a.get("marches")}
+    if not rep["marches"] and not older:
         lines.append("Aucune ligne archivée n'est encore refaite par la n° " f"{rep['declaration']}.")
-    for market, m in rep["marches"].items():
-        e = m["ensemble"]
-        per = [f"{name} {SS._r(s['ecart']['esperance_r'])}" for name, s in m["strategies"].items()
-               if (s["ecart"]["n"] or 0) >= SS.MIN_N]
-        lines.append(f"{SS.MARKET_FR.get(market, market)} : {_k(m['appariees'])} lignes appariées sur "
-                     f"{_k(m['archivees'])} archivées · espérance {SS._r(e['esperance']['esperance_r'])} R"
-                     f"{_ci(e['esperance'])} · témoin {SS._r(e['temoin']['esperance_r'])} R · écart au témoin "
-                     f"{SS._r(e['ecart']['esperance_r'])} R{_ci(e['ecart'])} ({_k(e['ecart']['n'] or 0)} trades)"
-                     + (" · écart au témoin par stratégie : " + " ; ".join(per) if per else ""))
+    lines += [_market_line(market, m) for market, m in rep["marches"].items()]
+    for name, a in older.items():  # fichier d'une déclaration plus ancienne (copie manuelle), apparié à part
+        head = f"Mesures d'avant la n° {a['avant']} ({name}), "
+        lines += [_market_line(market, m, head) for market, m in a["marches"].items()]
     return "\n".join(lines)
+
+
+def _market_line(market: str, m: dict, head: str = "") -> str:
+    e = m["ensemble"]
+    per = [f"{name} {SS._r(s['ecart']['esperance_r'])}" for name, s in m["strategies"].items()
+           if (s["ecart"]["n"] or 0) >= SS.MIN_N]
+    label = SS.MARKET_FR.get(market, market)
+    return (f"{head}{label.lower() if head else label} : {_k(m['appariees'])} lignes appariées sur "
+            f"{_k(m['archivees'])} archivées · espérance {SS._r(e['esperance']['esperance_r'])} R"
+            f"{_ci(e['esperance'])} · témoin {SS._r(e['temoin']['esperance_r'])} R · écart au témoin "
+            f"{SS._r(e['ecart']['esperance_r'])} R{_ci(e['ecart'])} ({_k(e['ecart']['n'] or 0)} trades)"
+            + (" · écart au témoin par stratégie : " + " ; ".join(per) if per else ""))

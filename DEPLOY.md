@@ -153,31 +153,39 @@ compter quelques heures avant la fin du rejeu, surtout la nuit et le week-end.
 
 ### Archive d'audit des mesures remplacées (2e tour d'avis)
 
-Quand une déclaration change la façon de mesurer (n° 10 : simulateur révision 2, témoin à la même heure, prix
-négociés), le labo réécrit ses anciennes lignes. Avant toute réécriture, le worker les copie **automatiquement**,
-une seule fois, dans `data/archives/labo2-avant-n10.db` (à côté de `lab.db`) : tables `strat_trades`, `kill_complet`
-et `plus10_trades`, plus `archive_info` (heure, ce qui est remplacé, lignes par table). Si la copie échoue (disque
-plein…), le worker ne réécrit rien (rattrapage, Killmode complet, n° 9 et recalcul du direct attendent) et le dit en
-tête de `!labo` et dans `/api/lab/status` (« ⚠️ Archive d'audit en échec depuis … (raison) »), avec le détail dans
+Quand une déclaration change les lignes du labo v2 (n° 10 : simulateur révision 2, témoin à la même heure, prix
+négociés ; n° 11 : colonnes et stratégies en plus), le labo réécrit ses anciennes lignes. Avant toute réécriture, le
+worker les copie **automatiquement**, une seule fois, dans `data/archives/labo2-avant-n<déclaration>.db` (à côté de
+`lab.db` ; `labo2-avant-n11.db` pour la première, la n° 11 étant en vigueur à la mise en service) : tables
+`strat_trades`, `kill_complet` et `plus10_trades`, plus `archive_info` (heure, ce qui est remplacé, lignes par table).
+Un fichier plus ancien du même dossier (la copie manuelle `labo2-avant-n10.db`, si elle a été faite) est gardé et
+apparié à part dans l'audit. Si la copie échoue (disque plein…), le worker ne réécrit rien (rattrapage, Killmode
+complet, n° 9 et recalcul du direct attendent) et le dit en tête de `!labo` et dans `/api/lab/status` (« ⚠️ Archive d'audit en échec depuis … (raison) »), avec le détail dans
 `docker compose logs jarvis-lab`. Il réessaie à chaque passage : une fois la place libérée, l'alerte s'en va seule.
 L'archive sert seulement à l'audit (`!strategies`, section « Audit », et `GET /api/lab/strategies/audit`) : rien
-ne la lit pour décider. Le fichier fait à peu près la taille des lignes remplacées ; `data/` n'est jamais effacé
+ne la lit pour décider. Le fichier fait à peu près la taille des lignes remplacées (pour la n° 11, presque toute la
+table des stratégies : de l'ordre de 1 Go, quelques secondes à quelques minutes au premier passage) ; `data/` n'est jamais effacé
 par le ménage.
 
 En secours (worker arrêté ou ancienne version du code), la même copie à la main, depuis le dossier de JARVIS
 (`docker compose run` lance un conteneur à part sur la même image, le même `.env` et le même `data/`, que le worker
-tourne ou non). Elle ne crée une table que si elle manque (l'image n'a pas l'outil `sqlite3`, d'où Python) :
+tourne ou non). Elle lit la déclaration en vigueur dans le code de l'image et ne crée une table que si elle manque
+(l'image n'a pas l'outil `sqlite3`, d'où Python) :
 
 ```bash
 docker compose run --rm --no-deps -T jarvis-lab python - <<'EOF'
 import os, sqlite3
+from app.lab import strategies as ST
+d = ST.DECLARATION
 db = os.getenv("JARVIS_LAB_DB", "data/lab.db")
-out = os.path.join(os.path.dirname(db) or ".", "archives", "labo2-avant-n10.db")
+out = os.path.join(os.path.dirname(db) or ".", "archives", f"labo2-avant-n{d}.db")
 os.makedirs(os.path.dirname(out), exist_ok=True)
 c = sqlite3.connect(db, timeout=300)
 c.execute("ATTACH DATABASE ? AS a", (out,))
 have = {r[0] for r in c.execute("SELECT name FROM a.sqlite_master WHERE type = 'table'")}
-for t, where in (("strat_trades", "WHERE declaration IS NULL"), ("kill_complet", ""), ("plus10_trades", "")):
+markets = "'stock', 'crypto'" if ST.CRYPTO_DECLARATION == d else "'stock'"
+old = f"WHERE market IN ({markets}) AND declaration IS NOT {d}"
+for t, where in (("strat_trades", old), ("kill_complet", ""), ("plus10_trades", "")):
     if t not in have:
         c.execute(f"CREATE TABLE a.{t} AS SELECT * FROM main.{t} {where}")
         c.commit()

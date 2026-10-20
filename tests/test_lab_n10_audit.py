@@ -106,7 +106,8 @@ def test_indicateur_n10_complete_ou_ce_qui_reste(tmp_path):
     assert n == {"numero": ST.LATEST_DECLARATION, "jours": {"stock": 0, "crypto": 0},
                  "lignes_anciennes": {"stock": 0, "crypto": 0}, "seances_n9": 0, "seances_kill_complet": 0,
                  "complete": True}
-    assert STATUS.declaration_line(n) == "n° 10 : complète (stratégies, n° 9 et Killmode complet re-mesurés)"
+    assert STATUS.declaration_line(n) == (f"n° {ST.LATEST_DECLARATION} : complète (stratégies, n° 9 et Killmode complet "
+                                         "re-mesurés)")
     db.set("replay:stock", "start", "2025-03-10")                          # deux jours d'actions à rattraper
     db.set("replay:stock", "last_day", "2025-03-11")
     _daily(db, "2025-03-10", "2025-03-11")
@@ -117,10 +118,10 @@ def test_indicateur_n10_complete_ou_ce_qui_reste(tmp_path):
     n = STATUS.declaration_state(db.conn)
     assert not n["complete"] and n["jours"] == {"stock": 2, "crypto": 0} and n["seances_n9"] == 1
     assert n["seances_kill_complet"] == 1 and KC.stale_days(db.conn) == 1
-    assert STATUS.declaration_line(n) == ("⏳ n° 10 : 2 j actions, 0 j crypto à rattraper, 1 séance n° 9 à recalculer, "
-                                          "1 séance Killmode complet à recalculer")
+    assert STATUS.declaration_line(n) == (f"⏳ n° {ST.LATEST_DECLARATION} : 2 j actions, 0 j crypto à rattraper, 1 séance "
+                                          "n° 9 à recalculer, 1 séance Killmode complet à recalculer")
     st = STATUS.status(path)
-    assert st["n10"] == n and STATUS.declaration_line(n) in STATUS.text(st)
+    assert st["declaration"] == n and STATUS.declaration_line(n) in STATUS.text(st)
     data = BRIEF.build(db.conn, BRIEF.datetime(2026, 10, 10, 20, tzinfo=BRIEF.timezone.utc), path)
     assert data["declaration"]["complete"] is False and data["declaration"]["texte"] == STATUS.declaration_line(n)
 
@@ -131,7 +132,8 @@ def test_indicateur_lignes_d_avant_sans_jour_a_refaire(tmp_path):
     _old(db, "crypto", "2025-03-12", ["AAA-USDT", "BBB-USDT"])
     n = STATUS.declaration_state(db.conn)
     assert n["lignes_anciennes"]["crypto"] == 2 and not n["complete"]
-    assert STATUS.declaration_line(n) == "⏳ n° 10 : 2 lignes d'avant sans jour à refaire (exclues)"
+    assert STATUS.declaration_line(n) == (f"⏳ n° {ST.LATEST_DECLARATION} : 2 lignes d'avant sans jour à refaire "
+                                          "(exclues)")
 
 
 def test_n9_texte_dit_les_seances_a_recalculer():
@@ -298,8 +300,16 @@ async def test_archive_faite_avant_le_premier_replace_strat(tmp_path, monkeypatc
     stock = info[-1]
     assert json.loads(stock[2]) == ["inconnue (d'avant le suivi)"] and stock[3] == ST.DECLARATION
     assert json.loads(stock[4]) == {"strat_trades": {"choisies": 4, "ajoutees": 4, "deja_la": 0}}
-    assert stock[5] == ("mesures d'avant la n° 10 : simulateur révision 1, témoin sur la journée, 5 tirages, "
-                        "prix ajustés")
+    # Lignes d'avant le suivi (pas de la déclaration précédente) : la note ne prétend pas au contrôle à ≈ 0.
+    assert stock[5] == (f"mesures d'avant la n° {ST.DECLARATION}, pas toutes de la n° {ST.DECLARATION - 1} (voir "
+                        "remplace) : l'écart à l'audit mêle leurs effets")
+    notes = {r[0]: r[5] for r in info}
+    assert notes[f"kill_complet:{KC.cost_fingerprint()}"] == (f"Killmode complet : autre empreinte de coût que "
+                                                               f"{KC.cost_fingerprint()}")
+    assert notes[f"plus10:m{P10.MESURE}"] == f"n° 9 : séances d'une autre mesure que la n° {P10.MESURE}"
+    assert AUD._note({"table": "strat_trades"}, ST.DECLARATION, [ST.DECLARATION - 1]) == AUD.NOTES[ST.DECLARATION]
+    assert AUD.NOTES[10] == ("mesures d'avant la n° 10 : simulateur révision 1, témoin sur la journée, 5 tirages, "
+                             "prix ajustés")
     # Rien du scellé : ni ses lignes, ni ses tables.
     assert not any("sealed" in t for (t,) in _read(path, "SELECT name FROM sqlite_master WHERE type = 'table'"))
     assert _read(path, "SELECT COUNT(*) FROM strat_trades WHERE day = ? OR symbol = 'SEAL'", (SEALED_DAY,)) == [(0,)]
@@ -487,6 +497,31 @@ def test_audit_apparie_nouveau_moins_ancien(tmp_path):
     assert [r[1] for r in db.conn.execute("PRAGMA database_list")] == ["main"]
 
 
+def test_audit_archive_plus_ancienne_appariee_a_part(tmp_path):
+    """Fusion avec la n° 11 : une copie manuelle d'une déclaration plus ancienne (labo2-avant-n10.db, faite avant le
+    déploiement) reste lue, appariée à part aux lignes en vigueur ; l'archive automatique garde sa place."""
+    db, days = _audit_base(tmp_path)
+    older = AUD.archive_path(db.path, ST.DECLARATION - 1)
+    conn = sqlite3.connect(older)
+    conn.execute("ATTACH DATABASE ? AS cur", (str(_archive(db)),))
+    conn.execute("CREATE TABLE strat_trades AS SELECT * FROM cur.strat_trades WHERE symbol = 'AAA'")
+    conn.commit()
+    conn.close()
+    assert AUD.on_disk(db.path) == [ST.DECLARATION - 1, ST.DECLARATION]
+    rep = AUD.report(db.conn)
+    assert list(rep["archives"]) == [older.name, f"labo2-avant-n{ST.DECLARATION}.db"]
+    assert rep["marches"]["stock"]["appariees"] == 6                          # inchangé
+    old = rep["archives"][older.name]
+    assert old["avant"] == ST.DECLARATION - 1 and old["marches"]["stock"]["archivees"] == 3
+    assert old["marches"]["stock"]["appariees"] == 3 and "marches" not in rep["archives"][_archive(db).name]
+    text = AUD.text(rep)
+    assert f"Mesures d'avant la n° {ST.DECLARATION - 1} ({older.name}), actions : 3 lignes appariées sur 3" in text
+    assert AUD.refresh(db, datetime(2026, 10, 20, 3, tzinfo=timezone.utc), 3600) == 9   # 6 + 3 paires
+    assert [r[1] for r in db.conn.execute("PRAGMA database_list")] == ["main"]
+    older.write_bytes(b"")                                                     # fichier vide : pas une archive
+    assert list(AUD.report(db.conn)["archives"]) == [f"labo2-avant-n{ST.DECLARATION}.db"]
+
+
 def test_audit_en_cache_et_texte(tmp_path):
     db, days = _audit_base(tmp_path)
     now = datetime(2026, 10, 11, 3, tzinfo=timezone.utc)
@@ -524,7 +559,7 @@ def test_audit_route_et_strategies(tmp_path, monkeypatch):
     assert r.status_code == 200 and r.json()["marches"]["stock"]["appariees"] == 6
     assert "Audit de la n°" not in bot.strategies_text()                       # pas de cache : rien dans Discord
     AUD.refresh(db, datetime(2026, 10, 11, 3, tzinfo=timezone.utc), 3600)
-    assert "Audit de la n° 10 (ancien → nouveau, mêmes trades)" in bot.strategies_text()
+    assert f"Audit de la n° {ST.LATEST_DECLARATION} (ancien → nouveau, mêmes trades)" in bot.strategies_text()
 
 
 # --- C5 : Killmode, comparaison journal / labo ---------------------------------------------------------------------
@@ -631,7 +666,7 @@ def test_sorties_de_gemini_legende_et_note_de_rebond_confirme():
             "jour") in text.splitlines()[0]
     lines = text.splitlines()
     i = next(k for k, x in enumerate(lines) if x.startswith("Rebond :"))
-    assert lines[i + 1] == "   ↳ anticipation connue ≈ +0,01 R sous H0 (bougie ambiguë), corrigée en n° 11"
+    assert lines[i + 1] == "   ↳ anticipation connue ≈ +0,01 R sous H0 (bougie ambiguë), correction à déclarer"
     assert sum("anticipation connue" in x for x in lines) == 1
     assert not any(x.startswith("✅") for x in lines)
 
@@ -667,14 +702,14 @@ def test_commande_manuelle_de_deploy_puis_archive_automatique(tmp_path):
     deploy = (root / "DEPLOY.md").read_text(encoding="utf-8")
     script = deploy.split("docker compose run --rm --no-deps -T jarvis-lab python - <<'EOF'\n")[1].split("\nEOF\n")[0]
     db = _base(tmp_path)
-    run = subprocess.run([sys.executable, "-c", script], cwd=tmp_path, capture_output=True, text=True,
-                         env=os.environ | {"JARVIS_LAB_DB": str(tmp_path / "lab.db")}, timeout=60)
-    assert run.returncode == 0 and "strat_trades 4 lignes archivées" in run.stdout
-    path = _archive(db)
-    assert _read(path, "SELECT COUNT(*) FROM strat_trades") == [(4,)]          # declaration IS NULL seule
+    run = subprocess.run([sys.executable, "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=60,
+                         env=os.environ | {"JARVIS_LAB_DB": str(tmp_path / "lab.db"), "PYTHONPATH": str(root)})
+    assert run.returncode == 0 and "strat_trades 5 lignes archivées" in run.stdout, run.stderr
+    path = _archive(db)                                                        # le fichier de la déclaration en vigueur
+    assert _read(path, "SELECT COUNT(*) FROM strat_trades") == [(5,)]          # 4 actions d'avant + 1 crypto n° 9
     out = AUD.step(db)
     assert out[f"strats:stock:d{ST.DECLARATION}"]["strat_trades"] == {"choisies": 4, "ajoutees": 0, "deja_la": 4}
-    assert out[f"strats:crypto:d{ST.CRYPTO_DECLARATION}"]["strat_trades"]["ajoutees"] == 1   # la n° 9 crypto
+    assert out[f"strats:crypto:d{ST.CRYPTO_DECLARATION}"]["strat_trades"]["ajoutees"] == 0
     assert _read(path, "SELECT COUNT(*) FROM strat_trades") == [(5,)]
 
 
@@ -684,7 +719,7 @@ def test_docs_de_la_n10_limites_et_avant_la_n11():
     section = doc.split("## Déclaration n° 10 (10 octobre 2026)")[1].split("## Bloc scellé")[0]
     for text in ("moyenne des 6 bougies qui suivent la bougie d'exécution", "se compte en bougies, pas en minutes",
                  "+0,007 R", "−0,06 R à 1 σ, −0,10 R à 0,75 σ, −0,28 R à 0,5 σ", "+0,013 R [+0,004 ; +0,023]",
-                 "`go_brut` n'a pas de témoin", "Limite de régime", "30 pas par bougie", "### Avant la n° 11",
+                 "`go_brut` n'a pas de témoin", "Limite de régime", "30 pas par bougie", "### Avant la déclaration suivante",
                  "`rattrapage.v1_trades` ne lit pas", "témoin transversal", "labo2-avant-n10.db",
                  "Pour audit, jamais pour décider", "(méthode du solde n° 5)"):
         assert text in section, text

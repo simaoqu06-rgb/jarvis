@@ -7,7 +7,8 @@ confiance, fiches catalyseurs, règles en attente et testées.
 Avis du 10 octobre (I2, I4) : jours sautés (skipped:<D>, retirés des jours faits), jours calculés sans quelques
 symboles que la source n'a pas donnés (missing_symbols), valeurs de l'univers sans trade (absent), et trades par
 révision du code (trades.code_rev) pour voir quand une même version mélange plusieurs codes.
-2e tour d'avis (C4) : une ligne « n° 10 : complète » ou ce qui reste à re-mesurer (declaration_state), aussi dans le brief.
+2e tour d'avis (C4) : une ligne « n° <déclaration en vigueur> : complète » ou ce qui reste à re-mesurer (declaration_state),
+aussi dans le brief.
 
 Deuxième tour d'avis du 10 octobre : garde du Labo 1 (garde_v1, empreinte v1 calculée au démarrage du worker ; en
 pause, une alerte en tête de !labo) et recalcul ponctuel des séances du direct d'avant une rupture (recalcul_v1 ;
@@ -117,7 +118,7 @@ def status(path: str | None = None) -> dict:
         except sqlite3.Error:
             pass
         out["labo_v2"] = labo_v2(conn)
-        out["n10"] = declaration_state(conn)
+        out["declaration"] = declaration_state(conn)
         from app.lab import archive as ARC  # import tardif, comme runner
 
         out["archive_actus"] = ARC.counts(conn)
@@ -162,7 +163,7 @@ def declaration_state(conn: sqlite3.Connection) -> dict | None:
     """2e tour d'avis (C4) : la déclaration en vigueur est-elle entièrement mesurée ? Jours à rattraper (tableau des stratégies,
     strat_stats.partial : marché partiel tant qu'il reste des jours du rejeu ou des lignes d'avant), lignes d'avant
     encore exclues, séances de la n° 9 et de Killmode complet à recalculer. « complete » : tout est à zéro, condition
-    écrite pour déclarer la suivante (docs/labo-strategies.md, « Avant la n° 11 »). None si la base n'est pas lisible."""
+    écrite pour déclarer la suivante (docs/labo-strategies.md, « Avant la déclaration suivante »). None si la base n'est pas lisible."""
     from app.lab import kill_complet as KC  # imports tardifs : tirent killmode, runner et generator
     from app.lab import plus10 as P10
     from app.lab import strat_stats as SS
@@ -181,7 +182,7 @@ def declaration_state(conn: sqlite3.Connection) -> dict | None:
 
 
 def declaration_line(n: dict | None) -> str | None:
-    """« n° 10 : complète », ou ce qui reste à re-mesurer."""
+    """« n° <déclaration en vigueur> : complète », ou ce qui reste à re-mesurer."""
     if not n:
         return None
     head = f"n° {n['numero']}"
@@ -290,7 +291,7 @@ def text(st: dict) -> str:
     pause = E.guard_text(st.get("garde_v1"))
     if pause:  # garde du Labo 1 : rien de ce qui suit n'avance côté v1
         lines.append(f"{pause} : rejeu et direct arrêtés, aucune ligne v1 écrite ; Labo 2, rattrapage et grade continuent")
-    arch = archive_line(st.get("archive_audit"), (st.get("n10") or {}).get("numero"))
+    arch = archive_line(st.get("archive_audit"), (st.get("declaration") or {}).get("numero"))
     if arch:  # relecture W1 : sans elle, le rattrapage arrêté n'avait aucune cause visible
         lines.append(arch)
     for market in ("stock", "crypto"):
@@ -326,8 +327,8 @@ def text(st: dict) -> str:
     if v2 and (v2.get("lignes") or any(sum(r.values()) for r in (v2.get("rattrapage") or {}).values())):
         lines.append(f"Labo v2 : {sum((v2.get('lignes') or {}).values())} lignes de stratégies (`!strategies`)"
                      + _rattrapage_text(v2.get("rattrapage") or {}))
-    if st.get("n10"):  # 2e tour d'avis (C4)
-        lines.append(declaration_line(st["n10"]))
+    if st.get("declaration"):  # 2e tour d'avis (C4)
+        lines.append(declaration_line(st["declaration"]))
     if st.get("archive_actus"):
         from app.lab import archive as ARC
 

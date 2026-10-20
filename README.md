@@ -439,9 +439,10 @@ Liste, seuils et sorties sont déclarés d'avance : [docs/labo-strategies.md](do
   statistiques, du brief, du grade et du validateur (`app/lab/seal.py`). Il sert une seule fois.
 - Les jours traités avant le labo v2 sont rattrapés hors séance (bougies relues à la source, rien stocké).
 - Deuxième tour d'avis : avant qu'une déclaration réécrive des lignes mesurées autrement, le worker les archive une fois
-  (`app/lab/audit.py`, `data/archives/labo2-avant-n10.db`) ; l'audit apparié ancien → nouveau sur les mêmes trades
-  est affiché pour audit, jamais pour décider (section « Audit » de `!strategies`, `GET /api/lab/strategies/audit`).
-  `!labo` dit « n° 10 : complète » ou ce qui reste à refaire.
+  (`app/lab/audit.py`, `data/archives/labo2-avant-n<déclaration>.db`, la première `labo2-avant-n11.db` ; une copie
+  manuelle `labo2-avant-n10.db` est appariée à part) ; l'audit apparié ancien → nouveau sur les mêmes trades est
+  affiché pour audit, jamais pour décider (section « Audit » de `!strategies`, `GET /api/lab/strategies/audit`).
+  `!labo` dit « n° 11 : complète » (la déclaration en vigueur) ou ce qui reste à refaire.
 - `!strategies`, `GET /api/lab/strategies`, ligne « Labo v2 » et ligne 🔒 de `!labo`.
 
 ## Avis sur un actif et conseil avant la clôture

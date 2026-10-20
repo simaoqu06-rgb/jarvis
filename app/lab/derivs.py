@@ -35,6 +35,10 @@ FUNDING_BUCKETS = ((-1e9, 0.0, "funding < 0"), (0.0, 0.0101, "funding 0 à 0,01 
                    (0.0101, 0.03, "funding 0,01 à 0,03 %"), (0.03, 1e9, "funding ≥ 0,03 %"))
 OI_BUCKETS = ((-1e9, -10.0, "OI 24 h ≤ −10 %"), (-10.0, -3.0, "OI 24 h −10 à −3 %"), (-3.0, 3.0, "OI 24 h ±3 %"),
               (3.0, 10.0, "OI 24 h +3 à +10 %"), (10.0, 1e9, "OI 24 h ≥ +10 %"))
+# Déclaration n° 11 (piste B, vidéo kara) : open interest gagné sur 7 jours, régime de purge au-delà de +9 %
+OI7_HOURS = 168
+OI7_BUCKETS = ((-1e9, 0.0, "OI 7 j ≤ 0 %"), (0.0, 2.0, "OI 7 j 0 à 2 %"), (2.0, 4.0, "OI 7 j 2 à 4 %"),
+               (4.0, 6.0, "OI 7 j 4 à 6 %"), (6.0, 9.0, "OI 7 j 6 à 9 %"), (9.0, 1e9, "OI 7 j ≥ 9 %"))
 
 
 def candidates(okx_symbol: str) -> list[str]:
@@ -141,10 +145,26 @@ def context(series: dict, symbol: str, ts: int | None) -> tuple[float | None, fl
         if k:
             funding = vals[k - 1] * 100
     if "oi" in s:
-        ts_o, vals = s["oi"]
-        k = bisect_right(ts_o, ts - OI_INTERVAL)  # intervalle de 4 h clos avant le signal
-        if k:
-            j = bisect_right(ts_o, ts_o[k - 1] - 86400)
-            if j and ts_o[j - 1] == ts_o[k - 1] - 86400 and vals[j - 1]:
-                oi_chg = (vals[k - 1] / vals[j - 1] - 1) * 100
+        oi_chg = oi_change(s, ts, 24)
     return funding, oi_chg
+
+
+def oi_change(s: dict, ts: int, hours: int) -> float | None:
+    """Variation d'open interest en % : dernier point de 4 h clos avant `ts` contre le point `hours` h plus tôt."""
+    if "oi" not in s:
+        return None
+    ts_o, vals = s["oi"]
+    k = bisect_right(ts_o, ts - OI_INTERVAL)  # intervalle de 4 h clos avant le signal
+    if not k:
+        return None
+    back = ts_o[k - 1] - hours * 3600
+    j = bisect_right(ts_o, back)
+    if j and ts_o[j - 1] == back and vals[j - 1]:
+        return (vals[k - 1] / vals[j - 1] - 1) * 100
+    return None
+
+
+def oi7(series: dict, symbol: str, ts: int | None) -> float | None:
+    """Variation d'open interest sur 7 jours connue à `ts` (n° 11), None si inconnue."""
+    s = series.get(symbol)
+    return oi_change(s, ts, OI7_HOURS) if s and ts is not None else None

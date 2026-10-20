@@ -35,19 +35,22 @@ Toutes les ~10 min :
    non ajustées relues et gardées en mémoire, hors séance US, plus10_seconds par passage.
 13. « autopsie » (autopsie.py) : où les trades échouent (MFE/MAE contre le hasard) et grade indicatif des GO
    confirmés, recalculés quand les trades changent, au plus toutes les stats_age secondes.
-14. « filtres » (filtres.py) : ce que coûte chaque filtre du scanner de 15 h 10 sur les trades v1 d'actions,
+14. « rates » (rates.py) : chasse aux ratés du potentiel +10, les actions à ≥ +10 % depuis l'ouverture des 20 dernières
+   séances et la raison du raté (pas de plan, plan non déclenché, stop avant TP1), recalculée quand les mouvements, les
+   trades ou le scanner +10 changent, au plus toutes les stats_age secondes.
+15. « filtres » (filtres.py) : ce que coûte chaque filtre du scanner de 15 h 10 sur les trades v1 d'actions,
    recalculé quand les trades ou les réglages changent, au plus toutes les stats_age secondes, hors séance US.
-15. 2e tour d'avis (C1, audit.py) : en tête de chaque passage, avant le grade, le Labo 2, le rejeu et le rattrapage, les lignes
+16. 2e tour d'avis (C1, audit.py) : en tête de chaque passage, avant le grade, le Labo 2, le rejeu et le rattrapage, les lignes
    qu'une nouvelle déclaration va réécrire (stratégies, Killmode complet, n° 9) sont copiées une fois dans le
    fichier d'archive de data/archives/ ; en échec, rien ne les réécrit dans ce passage (rattrapage, étapes
    killmode_complet et potentiel_plus10 sautées ; le direct et le rejeu n'écrivent que des jours neufs), et l'échec
    est noté (progress lab/archive_audit, alerte de !labo) jusqu'au passage qui réussit. L'étape
    « audit » met en cache l'audit apparié ancien → nouveau (pour audit, jamais pour décider).
-16. Garde du Labo 1 (deuxième tour d'avis du 10 octobre 2026) : au démarrage, l'empreinte du comportement v1
+17. Garde du Labo 1 (deuxième tour d'avis du 10 octobre 2026) : au démarrage, l'empreinte du comportement v1
    (empreinte.v1_guard, ≈ 1 s) est comparée à V1_FINGERPRINT. Écart ou calcul en échec : rejeu et direct du Labo 1
    en pause (aucune ligne v1 écrite, ni le recalcul des coûts), journal d'erreur, événement du labo et alerte dans
    !labo ; le Labo 2, le rattrapage et le grade continuent. Un calcul en échec est retenté à chaque passage.
-17. « recalcul » (recalcul_v1) : séances du direct calculées avant une rupture de comportement (empreinte.V1_RECALCULS,
+18. « recalcul » (recalcul_v1) : séances du direct calculées avant une rupture de comportement (empreinte.V1_RECALCULS,
    la séance d'actions du 06/10/2026), recalculées une fois avec le code actuel en tête de passage, avant le grade.
 Le battement (lab.heartbeat) porte l'étape en cours, affichée par /api/lab/status et !labo.
 Le rejeu couvre JARVIS_LAB_REPLAY_DAYS séances (504 ≈ 2 ans) avant le premier lancement du worker ;
@@ -78,6 +81,7 @@ from app.lab import plus10 as P10
 from app.lab import method as M
 from app.lab import potentiel as PO
 from app.lab import autopsie as AUT
+from app.lab import rates as RATES
 from app.lab import rattrapage as RAT
 from app.lab import regime as REG
 from app.lab import runner as R
@@ -490,7 +494,7 @@ async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, tra
         report["paused"]["labo1"] = paused_v1
     elif collect and not pause and not hold and E.V1_RECALCULS:
         # Séances du direct d'avant une rupture, recalculées une fois avant le grade (bougies complétées à la source :
-        # jamais pendant la séance US ; archive d'audit en échec : attend, il peut réécrire des lignes n° 10).
+        # jamais pendant la séance US ; archive d'audit en échec : attend, il peut réécrire des lignes pas encore archivées).
         try:
             report["recalcul"] = await recalcul_v1(db, now, transport)
         except Exception as exc:
@@ -652,6 +656,7 @@ async def lab2(db: LabDB, now: datetime, collect: bool = True, hold: bool = Fals
     await step("strategies", lambda: refresh_strategies(db, now, budget["stats_age"]))
     await step("audit", lambda: AUD.refresh(db, now, budget["stats_age"]))  # 2e tour d'avis (C2) : jamais lu pour décider
     await step("autopsie", lambda: AUT.step(db, now, budget["stats_age"]))
+    await step("rates", lambda: RATES.step(db, now, budget["stats_age"]))
     if not CO.CAL.session_open(now):  # un journalier relu par action : pas pendant la séance US
         await step("filtres", lambda: FIL.step(db, now, budget["stats_age"]))
     summary_day = SUM.due(now, db.get("summary", "last_day"))

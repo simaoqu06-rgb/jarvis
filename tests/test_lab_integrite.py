@@ -265,7 +265,7 @@ def test_autopsie_pendant_un_rattrapage_ne_lit_que_la_declaration_en_vigueur(tmp
     assert rep["strategies"]["stock"]["go_confirme"]["trades"] == 2
     assert rep["partiel"]["stock"]["jours_rattrapage"] == 2 and gi["partiel"] == rep["partiel"]["stock"]
     assert db.conn.execute("SELECT COUNT(*) FROM strat_trades").fetchone()[0] == 4    # vue temporaire retirée
-    note = "rattrapage de la déclaration n° 10 en cours (encore 2 jours), seuls les jours déjà refaits comptent"
+    note = "rattrapage de la déclaration n° 11 en cours (encore 2 jours), seuls les jours déjà refaits comptent"
     assert f"Grade indicatif : {note}" in "\n".join(AUT.indicatif_lines(rep["grade_indicatif"]))
     assert f"Stratégies actions : {note}" in AUT.text(rep) and AUT.compact(rep)["partiel"] == rep["partiel"]
     ro = DB.open_readonly(path)                                 # serveur web (/api/lab/autopsie) : lecture seule
