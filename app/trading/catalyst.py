@@ -135,7 +135,9 @@ async def check(symbol: str, now: datetime | None = None, days: int = 7) -> dict
                                         "days_ago": (today - date.fromisoformat(e["date"])).days}
     if isinstance(news, list):
         out["available"] = True
-        relevant = [n for n in news if _about(n, symbol, out["name"])]
+        # Les plus récentes d'abord, avant de n'en garder que 8 (Killmode juge les actus de moins de 48 h).
+        relevant = sorted((n for n in news if _about(n, symbol, out["name"])),
+                          key=lambda n: n["published_at"] or "", reverse=True)
         for n in relevant[:8]:
             t = tone(n["title"] or "")
             out["news"].append({"title": n["title"], "url": n["url"], "published_at": n["published_at"], "tone": t})

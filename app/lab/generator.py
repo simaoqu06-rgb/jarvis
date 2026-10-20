@@ -13,10 +13,20 @@ en plus la bougie « en cours » faite des bougies de 5 min déjà closes, comme
   sans lui et context.catalyst_replayed = false.
 - Délais rejoués limités aux 1 500 derniers départs (historical_timing(lookback=…)) : plus d'un an
   de bougies d'1 h ou ~58 séances de 15 min, pour tenir des centaines de plans par jour.
+- Déclaration n° 7 (actions) : à côté du plan v1 (règle d'origine), le plan tel que le direct le fait depuis
+  la PR #36 (stock_plans : stop éloigné à au moins 1/3 de l'ATR journalier par service._floor_stop, objectifs
+  et note recalculés). Il ne change rien à v1 ; il est gardé dans trades.plan (« plancher ») et rejoué par
+  strategies.go_rows.
+- Données manquantes (avis du 10 octobre, I4) : une valeur de l'univers sans trade est notée avec son motif
+  (`absent` : « historique<100 », introduction récente ; « séance vide », suspension ou trou du fournisseur ;
+  « plan impossible ») ; chaque trade garde la couverture de ses bougies (context : barres_seance,
+  ouverture_presente et couverture, la part des créneaux de 5 min remplis rapportée à celle que le symbole
+  remplit d'habitude, pour ne pas classer « incomplètes » toutes les actions peu liquides).
 """
 import logging
 from bisect import bisect_left
 from datetime import date, datetime, timezone
+from statistics import median
 
 from app.lab import collector as CO
 from app.lab import simulator as SIM
@@ -77,10 +87,66 @@ def setup_type(p: dict) -> str:
 
 
 def make_plan(symbol: str, market: str, bars: list[dict], daily: list[dict] | None, h4: list[dict] | None,
-              moment: int, s: dict) -> dict:
+              moment: int, s: dict, levels: tuple | None = None) -> dict:
     now = datetime.fromtimestamp(moment, timezone.utc)
     return T.plan_from_bars(symbol, market, "long", bars, daily, h4, now, cat=None, capital=0, s=s,
-                            timing_lookback=TIMING_LOOKBACK)
+                            timing_lookback=TIMING_LOOKBACK, levels=levels)
+
+
+def stock_plans(symbol: str, inp: dict, s: dict) -> tuple[dict, dict | None]:
+    """Plan v1 (règle d'origine) et plan du direct depuis la PR #36 (déclaration n° 7) : comme build_plan, stop
+    éloigné à au moins 1/3 de l'ATR journalier, objectifs recalculés sur ce risque et plan noté avec (donc son
+    propre GO) ; le même plan quand le stop est déjà assez loin. Plan du direct impossible : None."""
+    now = datetime.fromtimestamp(inp["moment"], timezone.utc)
+    levels = T.plan_levels(inp["bars"], "stock", "long", now=now, timing_lookback=TIMING_LOOKBACK)
+    plan = make_plan(symbol, "stock", inp["bars"], inp["daily"], inp["h4"], inp["moment"], s, levels)
+    try:
+        floored = T._floor_stop(inp["bars"], inp["daily"], "stock", "long", None, None, now, levels)
+        if floored is levels:
+            return plan, plan
+        return plan, make_plan(symbol, "stock", inp["bars"], inp["daily"], inp["h4"], inp["moment"], s, floored)
+    except T.PlanError as exc:
+        log.debug("Labo : plan du direct %s impossible (%s)", symbol, exc)
+        return plan, None
+
+
+def floor_summary(plan: dict, floored: dict | None) -> dict | None:
+    """Ce que trades.plan garde du plan du direct (n° 7) ; None s'il n'a pas pu être fait."""
+    if floored is None:
+        return None
+    sc = floored["score"]
+    return {"eloigne": floored is not plan, "entry": floored["entry"], "stop": floored["stop"],
+            "stop_source": floored["stop_source"], "targets": [t["price"] for t in floored["targets"]],
+            "go": sc["go"], "decision": sc["decision"], "composite": sc["composite"]}
+
+
+def median_fill(bars5: list[dict], market: str, before: int) -> float | None:
+    """Part médiane des créneaux de 5 min remplis par jour complet d'historique avant `before` (actions : séances
+    régulières, jours courts compris ; crypto : jours UTC) ; None sans historique."""
+    starts = [b["t"] for b in bars5 if b["t"] < before]
+    if not starts:
+        return None
+    fills = []
+    if market == "stock":
+        for d in CO.trading_days(CO.ny_day(starts[0]), CO.ny_day(before - 1)):
+            o, c = CO.session_ts(d)
+            if o >= starts[0] and c <= before:
+                fills.append((bisect_left(starts, c) - bisect_left(starts, o)) / ((c - o) // (CO.BASE_TF * 60)))
+    else:
+        counts: dict[int, int] = {}
+        for t in starts:
+            counts[t // 86400] = counts.get(t // 86400, 0) + 1
+        first = starts[0] // 86400 + (starts[0] % 86400 > 0)
+        fills = [counts.get(d, 0) / (86400 // (CO.BASE_TF * 60)) for d in range(first, before // 86400)]
+    return median(fills) if fills else None
+
+
+def coverage(bars: list[dict], start: int, end: int, fill: float | None) -> dict:
+    """Couverture des bougies simulées sur [start, end[ (séance ou 24 h) : nombre, première bougie au départ, et part
+    des créneaux remplis rapportée à la médiane du symbole (None sans historique)."""
+    slots = max(1, (end - start) // (CO.BASE_TF * 60))
+    return {"barres_seance": len(bars), "ouverture_presente": bool(bars) and bars[0]["t"] == start,
+            "couverture": round(len(bars) / slots / fill, 3) if fill else None}
 
 
 def _row(market: str, symbol: str, day: date, moment: int, plan: dict, context: dict, result: dict) -> dict:
@@ -99,10 +165,12 @@ def _row(market: str, symbol: str, day: date, moment: int, plan: dict, context: 
 
 # --- Actions ------------------------------------------------------------------------------
 
-def stock_inputs(db: LabDB, symbol: str, day: date) -> dict | None:
-    """Bougies connues à 9 h 10 et bougies de la séance à simuler."""
+def stock_inputs(db: LabDB, symbol: str, day: date, why: list | None = None) -> dict | None:
+    """Bougies connues à 9 h 10 et bougies de la séance à simuler (`why` reçoit le motif d'un None)."""
     bounds = CO.session_ts(day)
     if not bounds:
+        if why is not None:
+            why.append("séance vide")
         return None
     moment = U.stock_decision_ts(day)
     start, end = CO.stock_window(day)
@@ -110,6 +178,8 @@ def stock_inputs(db: LabDB, symbol: str, day: date) -> dict | None:
     hist = CO.known_before(bars5, CO.BASE_TF, moment)
     session = [b for b in bars5[len(hist):] if bounds[0] <= b["t"] < bounds[1]]
     if len(hist) < 100 or not session:
+        if why is not None:
+            why.append("historique<100" if len(hist) < 100 else "séance vide")
         return None
     m15 = CO.aggregate(hist, 15, "stock")
     bars = m15[-PLAN_BARS["stock"]:]
@@ -136,11 +206,16 @@ def _strategies(fn, *args) -> list[dict]:
 
 
 def stock_trade(db: LabDB, symbol: str, day: date, s: dict, meta: dict | None = None,
-                regime: dict | None = None, strat_out: list | None = None) -> dict | None:
+                regime: dict | None = None, strat_out: list | None = None,
+                index5: list[dict] | None = None, absent: list | None = None) -> dict | None:
     """Trade v1 de l'action ; avec `strat_out`, y ajoute aussi les lignes du labo v2 (strategies.py),
-    calculées sur les mêmes bougies, chargées une seule fois."""
-    inp = stock_inputs(db, symbol, day)
+    calculées sur les mêmes bougies, chargées une seule fois (`index5` : séance de SPY en 5 min). Pas de trade :
+    `absent` reçoit le symbole et le motif."""
+    why: list[str] = []
+    inp = stock_inputs(db, symbol, day, why)
     if not inp:
+        if absent is not None:
+            absent.append({"symbol": symbol, "motif": why[0] if why else "séance vide"})
         return None
     row = v1 = None
     try:
@@ -148,13 +223,15 @@ def stock_trade(db: LabDB, symbol: str, day: date, s: dict, meta: dict | None = 
     finally:
         if strat_out is not None:
             strat_out.extend(_strategies(ST.stock_day, day, symbol, inp["hist5"], inp["session"], inp["daily"],
-                                         (meta or {}).get("rank"), v1))
+                                         (meta or {}).get("rank"), v1, index5))
+    if row is None and absent is not None:
+        absent.append({"symbol": symbol, "motif": "plan impossible"})
     return row
 
 
 def _stock_v1(inp: dict, symbol: str, day: date, s: dict, meta: dict | None, regime: dict | None):
     try:
-        plan = make_plan(symbol, "stock", inp["bars"], inp["daily"], inp["h4"], inp["moment"], s)
+        plan, floored = stock_plans(symbol, inp, s)
     except T.PlanError as exc:
         log.debug("Labo : plan %s %s impossible (%s)", symbol, day, exc)
         return None, None
@@ -173,10 +250,14 @@ def _stock_v1(inp: dict, symbol: str, day: date, s: dict, meta: dict | None, reg
         # Connu à l'ouverture (9 h 30), après la décision mais avant toute exécution.
         "gap_open_pct": round((inp["session"][0]["o"] / prev_close - 1) * 100, 3) if prev_close else None,
         "sector": None, "catalyst_replayed": False,
+        **coverage(inp["session"], *inp["bounds"], median_fill(inp["hist5"], "stock", inp["bounds"][0])),
     }
     v1 = {"plan": plan, "decided_at": inp["moment"], "entry_until": inp["bounds"][1], "last_price": last_price,
-          "cost": cost, "result": result}
-    return _row("stock", symbol, day, inp["moment"], plan, context, result), v1
+          "cost": cost, "result": result, "go": plan["score"]["go"],
+          "plancher": {"plan": floored, "go": floored["score"]["go"]} if floored else None}
+    row = _row("stock", symbol, day, inp["moment"], plan, context, result)
+    row["plan"]["plancher"] = floor_summary(plan, floored)
+    return row, v1
 
 
 def _guarded(errors: list | None, symbol: str, fn, *args):
@@ -194,16 +275,20 @@ def _guarded(errors: list | None, symbol: str, fn, *args):
 
 
 def stock_day(db: LabDB, day: date, s: dict, universe: list[dict],
-              errors: list | None = None, strat_out: list | None = None) -> tuple[list[int], list[dict]]:
+              errors: list | None = None, strat_out: list | None = None,
+              absent: list | None = None) -> tuple[list[int], list[dict]]:
     """Plans et simulations de toutes les valeurs de l'univers pour la séance `day` (et, avec
-    `strat_out`, les lignes du labo v2)."""
+    `strat_out`, les lignes du labo v2 ; `absent` : les valeurs sans trade et pourquoi)."""
     if not CO.session_ts(day):
         return [], []
     cutoff = CO.ny_midnight(day)
     index_daily = db.get_bars("stock", INDEX["stock"], 1440, cutoff - 120 * 86400, cutoff)
     regime = U.regime(index_daily, cutoff, ANNUAL_DAYS["stock"])
+    bounds = CO.session_ts(day)
+    index5 = db.get_bars("stock", INDEX["stock"], CO.BASE_TF, *bounds) if strat_out is not None else None
     rows = [r for meta in universe
-            if (r := _guarded(errors, meta["symbol"], stock_trade, db, meta["symbol"], day, s, meta, regime, strat_out))]
+            if (r := _guarded(errors, meta["symbol"], stock_trade, db, meta["symbol"], day, s, meta, regime, strat_out,
+                              index5, absent))]
     return [U.stock_decision_ts(day)], rows
 
 
@@ -222,13 +307,15 @@ def crypto_symbol_day(db: LabDB, symbol: str, day: date) -> dict:
     daily = db.get_bars("crypto", symbol, 1440, cutoff - CO.DAILY_HISTORY_DAYS * 86400, cutoff + 86400)
     h1 = CO.aggregate(bars5, 60, "crypto")
     return {"bars5": bars5, "starts5": [b["t"] for b in bars5], "h1": h1,
-            "h4": CO.aggregate(h1, 240, "crypto"), "daily": daily}
+            "h4": CO.aggregate(h1, 240, "crypto"), "daily": daily, "remplissage": median_fill(bars5, "crypto", cutoff)}
 
 
-def crypto_inputs(data: dict, moment: int) -> dict | None:
+def crypto_inputs(data: dict, moment: int, why: list | None = None) -> dict | None:
     bars5, starts5 = data["bars5"], data["starts5"]
     k = bisect_left(starts5, moment - CO.BASE_TF * 60 + 1)  # bougies closes à `moment`
     if k < 100 or bars5[k - 1]["t"] + CO.BASE_TF * 60 < moment - 3600:
+        if why is not None:
+            why.append("historique<100" if k < 100 else "séance vide")
         return None  # pas assez d'historique ou paire muette depuis plus d'une heure
     hist5 = bars5[:k]
     last = hist5[-1]["c"]
@@ -250,14 +337,19 @@ def crypto_inputs(data: dict, moment: int) -> dict | None:
 
 
 def crypto_trade(data: dict, symbol: str, day: date, moment: int, s: dict, meta: dict | None = None,
-                 regime: dict | None = None, v1_out: list | None = None) -> dict | None:
-    inp = crypto_inputs(data, moment)
+                 regime: dict | None = None, v1_out: list | None = None, why: list | None = None) -> dict | None:
+    """Trade v1 d'un créneau ; pas de trade : `why` reçoit le motif."""
+    why = [] if why is None else why
+    inp = crypto_inputs(data, moment, why)
     if not inp or not inp["sim"]:
+        if inp:
+            why.append("séance vide")
         return None
     try:
         plan = make_plan(symbol, "crypto", inp["bars"], inp["daily"], inp["h4"], moment, s)
     except T.PlanError as exc:
         log.debug("Labo : plan %s %s impossible (%s)", symbol, moment, exc)
+        why.append("plan impossible")
         return None
     rank = (meta or {}).get("rank")
     cost = SIM.costs("crypto", plan["entry"], rank)
@@ -271,6 +363,7 @@ def crypto_trade(data: dict, symbol: str, day: date, moment: int, s: dict, meta:
         "rvol": m.get("rvol"), "day_change_pct": m.get("change_pct"), "dollar_volume": m.get("dollar_volume"),
         "window_utc": datetime.fromtimestamp(moment, timezone.utc).strftime("%H:%M"),
         "gap_open_pct": None, "sector": None, "catalyst_replayed": False,
+        **coverage(inp["sim"], moment, inp["horizon"], data.get("remplissage")),
     }
     if v1_out is not None:
         v1_out.append({"plan": plan, "decided_at": moment, "entry_until": inp["horizon"], "last_price": inp["last"],
@@ -279,10 +372,12 @@ def crypto_trade(data: dict, symbol: str, day: date, moment: int, s: dict, meta:
 
 
 def crypto_day(db: LabDB, day: date, s: dict, universe: list[dict], now: int | None = None,
-               errors: list | None = None, strat_out: list | None = None) -> tuple[list[int], list[dict]]:
+               errors: list | None = None, strat_out: list | None = None,
+               absent: list | None = None) -> tuple[list[int], list[dict]]:
     """Plans et simulations des créneaux du jour UTC `day` dont l'horizon est passé (tous sans `now`).
     Avec `strat_out`, et seulement quand toutes les sorties du jour sont connues
-    (strategies.crypto_complete), les lignes du labo v2."""
+    (strategies.crypto_complete), les lignes du labo v2. Une paire sans aucun trade du jour va dans `absent`,
+    avec le motif de son premier créneau manqué."""
     moments = [m for m in crypto_moments(day) if now is None or m + 86400 <= now]
     if not moments:
         return [], []
@@ -295,10 +390,15 @@ def crypto_day(db: LabDB, day: date, s: dict, universe: list[dict], now: int | N
         if data is None:
             continue
         v1s: list[dict] = []
+        why: list[str] = []
+        before = len(rows)
         for moment in moments:
-            row = _guarded(errors, meta["symbol"], crypto_trade, data, meta["symbol"], day, moment, s, meta, regime, v1s)
+            row = _guarded(errors, meta["symbol"], crypto_trade, data, meta["symbol"], day, moment, s, meta, regime, v1s,
+                           why)
             if row:
                 rows.append(row)
+        if len(rows) == before and why and absent is not None:
+            absent.append({"symbol": meta["symbol"], "motif": why[0]})
         if strat_out is not None and ST.crypto_complete(day, now):
             strat_out.extend(_strategies(ST.crypto_day, day, meta["symbol"], data["bars5"], data["daily"],
                                          meta.get("rank"), v1s))

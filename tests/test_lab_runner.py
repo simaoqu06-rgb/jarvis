@@ -27,11 +27,11 @@ async def test_rejeu_reprend_apres_une_coupure_sans_doublon(db, monkeypatch):
     real = G.stock_day
     calls = []
 
-    def flaky(db_, day, s, universe, errors=None, strat_out=None):
+    def flaky(db_, day, s, universe, errors=None, strat_out=None, absent=None):
         calls.append(day)
         if len(calls) == 2:
             raise RuntimeError("coupure")
-        return real(db_, day, s, universe, errors, strat_out)
+        return real(db_, day, s, universe, errors, strat_out, absent)
 
     monkeypatch.setattr(G, "stock_day", flaky)
     assert await R.replay(START, END, "stock", db, collect=False, now=NOW) == 1  # arrêt au jour en échec
@@ -77,6 +77,21 @@ def test_rejeu_s_arrete_avant_le_resume_du_soir():
     assert W.replay_seconds(datetime(2026, 10, 7, 11, 0, tzinfo=paris), None) == W.REPLAY_SECONDS["jour"]
 
 
+def test_rattrapage_s_arrete_avant_le_resume_du_soir():
+    """Relecture : depuis la n° 10, le rattrapage prend son budget entier à chaque passage (des centaines de jours) ;
+    2 × 10 min lancées à 22 h 25 repoussaient le résumé du soir après la routine de 22 h 52."""
+    from zoneinfo import ZoneInfo
+
+    paris = ZoneInfo("Europe/Paris")
+    at = datetime(2026, 10, 7, 22, 25, tzinfo=paris)
+    assert W.rattrapage_seconds(at, None) == 300
+    assert W.rattrapage_seconds(at, "2026-10-07") == W.RATTRAPAGE_SECONDS["nuit"] == 600   # résumé déjà fait
+    assert W.rattrapage_seconds(datetime(2026, 10, 7, 22, 29, tzinfo=paris), None) == 60
+    assert W.rattrapage_seconds(datetime(2026, 10, 7, 23, 0, tzinfo=paris), None) == 600
+    assert W.rattrapage_seconds(datetime(2026, 10, 7, 11, 0, tzinfo=paris), None) == W.RATTRAPAGE_SECONDS["jour"]
+    assert W.rattrapage_seconds(datetime(2026, 10, 7, 17, 0, tzinfo=paris), None) == 0     # séance de New York
+
+
 def test_rejeu_borne_par_periode():
     assert W.REPLAY_SECONDS["nuit"] > W.REPLAY_SECONDS["jour"] > W.REPLAY_SECONDS["seance"] > 0
     assert set(W.REPLAY_SECONDS) == set(W.CHUNK_DAYS)
@@ -88,8 +103,7 @@ async def test_journee_en_direct_idempotente(db):
     rows = db.conn.execute("SELECT id, symbol, r_net FROM trades ORDER BY symbol").fetchall()
     await R.run_live_day(END, db, markets=("stock",), collect=False, now=NOW)
     assert db.count_trades(origin="live") == 3
-    assert [r[1:] for r in db.conn.execute("SELECT id, symbol, r_net FROM trades ORDER BY symbol")] == \
-        [r[1:] for r in rows]
+    assert db.conn.execute("SELECT id, symbol, r_net FROM trades ORDER BY symbol").fetchall() == rows  # mêmes id
     assert db.get("live:stock", "last_day") == END.isoformat()
 
 
@@ -100,9 +114,14 @@ async def test_crypto_en_direct_complete_les_creneaux(tmp_path):
     noon_next = datetime.fromtimestamp(CO.utc_midnight(day) + 86400 + 12 * 3600 + 60, timezone.utc)
     await R.run_live_day(day, db, markets=("crypto",), collect=False, now=noon_next)
     assert db.count_trades(market="crypto") == 4 and db.get("live:crypto", "last_day") is None
+    first = db.conn.execute("SELECT planned_at, id FROM trades ORDER BY planned_at").fetchall()
     later = datetime.fromtimestamp(CO.utc_midnight(day) + 2 * 86400, timezone.utc)
     await R.run_live_day(day, db, markets=("crypto",), collect=False, now=later)
     assert db.count_trades(market="crypto") == 6 and db.get("live:crypto", "last_day") == day.isoformat()
+    # Les créneaux déjà journalisés, réécrits avec le jour, gardent leur id (ordre de première journalisation,
+    # lu par les mesures hors échantillon) ; les deux nouveaux viennent après.
+    after = db.conn.execute("SELECT planned_at, id FROM trades ORDER BY planned_at").fetchall()
+    assert after[:4] == first and min(i for _, i in after[4:]) > max(i for _, i in first)
 
 
 def test_version_de_methode_figee(tmp_path):
@@ -132,7 +151,8 @@ def test_etat_base_absente_puis_remplie(tmp_path, monkeypatch):
     r = client.get("/api/lab/status").json()
     assert r["exists"] and r["trades"] == {"stock": {"replay": 9}}
     assert r["replay"]["stock"] == {"start": START.isoformat(), "end": END.isoformat(), "last_day": END.isoformat(),
-                                    "days_done": 3, "days_total": 3, "pct": 100.0}
+                                    "days_done": 3, "days_total": 3, "pct": 100.0, "jours_sautes": 0,
+                                    "jours_partiels": 0, "absents": 0}
     assert r["method_version"] == "v1" and r["db_size_mb"] > 0 and "100 %" in r["text"]
 
 
@@ -193,7 +213,8 @@ async def test_symbole_en_erreur_compte_sans_bloquer_le_jour(db, monkeypatch):
     monkeypatch.setattr(G, "stock_trade", broken)
     assert await R.replay(START, START, "stock", db, collect=False, now=NOW) == 1
     assert db.count_trades() == 2
-    assert db.get("replay:stock", f"day:{START}") == {"trades": 2, "errors": 1, "error_symbols": ["BBB"]}
+    assert db.get("replay:stock", f"day:{START}") == {"trades": 2, "errors": 1, "error_symbols": ["BBB"],
+                                                      "absent": 0, "absent_motifs": {}, "absent_symbols": []}
 
 
 async def test_jour_en_echec_saute_apres_trois_essais(db, monkeypatch):

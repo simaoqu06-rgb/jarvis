@@ -12,13 +12,18 @@ from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from app import alerts, config
+from app.config import env_float
 from app.core.outbox import Outbox
 from app.lab import grade as lab_grade
+from app.lab import method as lab_method
 from app.lab import morning as lab_morning
 from app.notify import bot, discord
-from app.sources import alpaca
+from app.sources import alpaca, twelvedata
 from app.trading import calendar as CAL
 from app.trading import advice, paper, scanner
+from app.trading import plus10 as PLUS10
+from app.trading import visibilite as VIS
+from app.trading import confirm as CONFIRM
 from app.trading import proposals as PR
 from app.trading.proposals import proposals
 from app.trading import service as trading
@@ -36,6 +41,7 @@ state = alerts.State(config.ALERTS_STATE_PATH)
 book = trading.Book()
 trading.taken_trades = lambda: book.trades  # le grade tient compte du risque déjà ouvert et du jour
 paper_book = paper.PaperBook()
+confirm_state = CONFIRM.load()
 outbox = Outbox(config.OUTBOX_PATH, discord.split_message)
 _background: set[asyncio.Task] = set()
 _lock = asyncio.Lock()  # un seul job modifie l'état à la fois
@@ -162,15 +168,30 @@ async def tick_closing(now: datetime | None = None) -> None:
     ouverte. Une fois par séance ; les conseils sont gardés sur les trades pour être mesurés.
     Calculé hors du verrou global (bougies, catalyseur), qui n'est pris que pour écrire."""
     now = now or datetime.now(timezone.utc)
-    trades = [t for t in book.open_trades() if t["market"] == "stock"]
-    if not trades or not advice.closing_due(now, state.data.get("closing_advice_date")):
+    stocks = [t for t in book.open_trades() if t["market"] == "stock"]
+    # Un KILL pris se vend à la clôture (la règle que mesure son journal) : pas de conseil garder / alléger.
+    kills = [t for t in stocks if t.get("killmode")]
+    trades = [t for t in stocks if not t.get("killmode")]
+    if not stocks or not advice.closing_due(now, state.data.get("closing_advice_date")):
         return
     today = now.astimezone(NEW_YORK).date().isoformat()
     async with _lock:
         state.data["closing_advice_date"] = today  # une seule tentative : un échec ne doit pas répéter le message
         state.save()
-    advices = await advice.advise_book(trades, now)
     _, close = CAL.session_bounds(now.astimezone(NEW_YORK).date())
+    if kills:
+        last = (close - timedelta(minutes=1)).astimezone(NEW_YORK)
+        text = ("🔪 **Killmode** : vers " + f"{last.hour} h {last.minute:02d}" + " New York, annule les TP et SL de "
+                + ", ".join(sorted({t["symbol"] for t in kills})) + " puis vends le reste au marché en un ordre, avant "
+                f"la clôture ({close.astimezone(NEW_YORK).hour} h New York) : un KILL ne passe pas la nuit, c'est la "
+                "règle que mesure son journal (vendu à la dernière minute de la séance).")
+        async with _lock:
+            _queue(text, "clôture des KILL", expires_at=close)
+            _dm_trades(text)
+            _kick_outbox()
+    if not trades:
+        return
+    advices = await advice.advise_book(trades, now)
     async with _lock:
         by_id = {t["id"]: t for t in book.trades}
         for a in advices:
@@ -218,16 +239,149 @@ async def tick_scan() -> None:
                 await _post_all([f"🔭 Scanner pré-ouverture impossible : {exc}"], "scanner")
         return
     bounds = CAL.session_bounds(now_ny.date())
+    text = scanner.text(result)
+    try:  # n° 9 : liste d'attente « potentiel +10 », mesurée, jamais un GO ; son échec ne retient pas le scanner
+        text += "\n\n" + PLUS10.waitlist_text(await PLUS10.waitlist(now))
+    except Exception as exc:
+        log.warning("Potentiel +10 : liste d'attente en échec : %s", exc)
     async with _lock:
-        _queue(scanner.text(result), "scanner", expires_at=bounds[1] if bounds else None)
+        _queue(text, "scanner", expires_at=bounds[1] if bounds else None)
         state.data["scan_date"] = today
         state.save()
+        confirm_state.clear()  # GO du jour, relus après l'ouverture par tick_confirm
+        CONFIRM.register(confirm_state, result, today)
+        CONFIRM.save(confirm_state)
         for pick in result["picks"]:
             try:
                 await paper.submit(paper_book, pick["plan"], pick["features"])
             except Exception:
                 log.exception("Forward-test : envoi de %s en échec", pick["symbol"])
         _kick_outbox()
+
+
+async def _usd_per_eur() -> float | None:
+    try:
+        from app import needs  # import tardif : needs tire tout le serveur de données
+
+        return (await needs.fx_rates("EUR", ["USD"])).data["rates"]["USD"]
+    except Exception as exc:
+        log.warning("Taux EUR/USD indisponible pour la taille des GO confirmés : %s", exc)
+        return None
+
+
+def _size_rule(now: datetime) -> tuple[dict, float]:
+    """Grade du moment (actions, trades suivis) et risque en € des tailles des GO confirmés et du potentiel +10 :
+    la règle unique (risque du grade, 20 € au plus) ; ta règle de 20 € quand le grade ne propose rien (le message
+    le dit). Un grade illisible vaut 0 % (fail-closed)."""
+    try:
+        g = lab_grade.risk_now("stock", book.trades, now)
+    except Exception as exc:
+        log.warning("Grade illisible pour la taille des GO (%s: %s) : 0 %%", type(exc).__name__, exc)
+        g = lab_grade.unreadable(exc)
+    return g, trading.recommended_eur(g["risque_propose"]) or trading.rule_eur()
+
+
+async def _bars_5min(symbol: str) -> list[dict] | None:
+    try:
+        return await twelvedata.candles(symbol, 5, outputsize=100)
+    except Exception as exc:
+        log.warning("Contrôle des GO : bougies 5 min de %s indisponibles : %s", symbol, exc)
+        return None
+
+
+async def tick_confirm(now: datetime | None = None) -> None:
+    """GO du scanner relus toutes les 5 min, de 15 min après l'ouverture à 11 h 30 New York :
+    confirmé (ordre exact en MP), annulé ou expiré ; puis mesure brut/confirmé après la clôture.
+    Bougies lues hors du verrou global, qui n'est pris que pour écrire."""
+    now = now or datetime.now(timezone.utc)
+    if not confirm_state.get("gos") or confirm_state.get("closed"):
+        return
+    day = datetime.fromisoformat(confirm_state["day"]).date()
+    bounds = CAL.session_bounds(day)
+    if not bounds or now < bounds[0] + CONFIRM.WAIT:
+        return
+    day_open, close = bounds
+    if now >= close + timedelta(minutes=2):
+        bars = {s: CONFIRM.session_bars(b, day_open, now) for s in confirm_state["gos"]
+                if (b := await _bars_5min(s))}
+        rate = await _usd_per_eur()  # change du jour pour confirme_r20 (1,15 si la source ne répond pas)
+        async with _lock:
+            CONFIRM.close_day(confirm_state, bars, rate=rate)
+            CONFIRM.save(confirm_state)
+        return
+    pending = [s for s, g in confirm_state["gos"].items() if g["status"] in CONFIRM.PENDING]
+    if not pending:
+        return
+    if CONFIRM.expire_due(now, day_open):
+        async with _lock:
+            for s in pending:
+                confirm_state["gos"][s]["status"] = "expiré"
+            CONFIRM.save(confirm_state)
+            text = CONFIRM.expired_text(pending)
+            _queue(text, "scanner", expires_at=close)
+            _dm_trades(text)
+            _kick_outbox()
+        return
+    last_closed = int(now.timestamp()) // CONFIRM.BAR * CONFIRM.BAR - CONFIRM.BAR
+    if all((confirm_state["gos"][s]["last_bar"] or 0) >= last_closed for s in pending):
+        return  # pas de nouvelle bougie 5 min close : rien à relire (un crédit Twelve Data par lecture)
+    texts, rate, size = [], None, None
+    for s in pending:
+        raw = await _bars_5min(s)
+        if not raw:
+            continue
+        go = confirm_state["gos"][s]
+        ev = CONFIRM.evaluate(go, CONFIRM.session_bars(raw, day_open, now), day_open)
+        if ev:
+            go["events"].append(ev)
+            if ev["kind"] == "confirmé" and rate is None:
+                rate = await _usd_per_eur()
+            if ev["kind"] == "confirmé" and size is None:
+                size = _size_rule(now)  # une fois par passage
+            g, risk_eur = size or (None, trading.rule_eur())
+            texts.append(CONFIRM.event_text(s, go, ev, now, risk_eur, rate, g))
+    async with _lock:
+        CONFIRM.save(confirm_state)
+        if texts:
+            _queue(texts, "scanner", expires_at=close)
+            _dm_trades(texts)
+            _kick_outbox()
+
+
+async def tick_plus10(now: datetime | None = None) -> None:
+    """n° 9 : liste « potentiel +10 » confirmée au gap d'ouverture (9 h 46 New York) avec les niveaux des essais du
+    labo, puis le range de 30 min de Rebond (10 h 01) ; sur le salon et en MP. Une fois par passage et par séance."""
+    now = now or datetime.now(timezone.utc)
+    kind = PLUS10.due(now)
+    if not kind:
+        return
+    rate = await _usd_per_eur()
+    g, risk_eur = _size_rule(now)
+    try:
+        result = await PLUS10.confirmed(kind, now, risk_eur * rate if rate else None)
+    except Exception as exc:
+        log.warning("Potentiel +10 : passage %s en échec : %s", kind, exc)
+        return  # nouvelle tentative à la minute suivante, dans la fenêtre du passage
+    PLUS10.mark_done(kind, now)
+    bounds = CAL.session_bounds(now.astimezone(NEW_YORK).date())
+    text = PLUS10.confirmed_text(result | {"eurusd": rate, "risk_eur": risk_eur, "grade": g})
+    async with _lock:
+        _queue(text, "scanner", expires_at=bounds[1] if bounds else None)
+        _dm_trades(text)
+        _kick_outbox()
+
+
+async def tick_visibilite(now: datetime | None = None) -> None:
+    """Audit anti-fuite : actus Finnhub des gappers vues à 9 h 46 New York, relues à 11 h (rien n'est envoyé)."""
+    now = now or datetime.now(timezone.utc)
+    kind = VIS.due(now)
+    if not kind:
+        return
+    try:
+        await VIS.run(kind, now)
+    except Exception as exc:
+        log.warning("Visibilité Finnhub : passage %s en échec : %s", kind, exc)
+        VIS.mark_done(kind, now)  # une mesure manquée ne se rattrape pas : pas de nouvel essai chaque minute
 
 
 def report_due(now: datetime) -> bool:
@@ -288,6 +442,13 @@ async def tick_lab(now: datetime | None = None) -> dict | None:
         elif enabled():
             outbox.add(f"🏅 {PR.text(p)}\n-# À approuver ou refuser dans le cockpit.", "labo", key=f"grade:{p['id']}")
             _kick_outbox()
+    # Méthode : le challenger fait nettement mieux à un regard fixe ; il n'est mis en place qu'avec l'accord de Simão.
+    for p in lab_method.sync_proposals(proposals):
+        if bot.enabled():
+            bot.offer(p)
+        elif enabled():
+            outbox.add(f"🧪 {PR.text(p)}\n-# À approuver ou refuser dans le cockpit.", "labo", key=f"promotion:{p['id']}")
+            _kick_outbox()
     return digest
 
 
@@ -298,6 +459,9 @@ CORE_JOBS = [
     ("scanner pré-ouverture", tick_scan, MINUTE, False),  # prend le verrou lui-même, seulement pour l'état
     ("conseil avant la clôture", tick_closing, MINUTE, False),  # idem
     ("forward-test sur le compte fictif", tick_paper, 2 * MINUTE, True),
+    ("contrôle des GO après l'ouverture", tick_confirm, MINUTE, False),  # prend le verrou lui-même pour écrire
+    ("potentiel +10 confirmé", tick_plus10, MINUTE, False),  # n° 9 ; prend le verrou lui-même pour envoyer
+    ("visibilité des actus Finnhub", tick_visibilite, MINUTE, False),  # mesure seule, rien n'est envoyé
 ]
 # Seulement avec les notifications actives.
 JOBS = [

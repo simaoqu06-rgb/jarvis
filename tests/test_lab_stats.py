@@ -34,6 +34,21 @@ def test_erreur_type_inconnue_avec_un_seul_jour():
     assert m == 1.0 and se is None and ci is None
 
 
+def test_ic_en_t_de_student():
+    # 10 jours (10 trades par jour, +0,25 ou −0,05 R) : se = 0,05, demi-largeur t(0,975 ; 9) × se = 2,262 × se.
+    days = {f"d{i}": [(0.25 if i % 2 else -0.05) * 10, 10] for i in range(10)}
+    m, se, ci = S.mean_ci(days, 10.0, 100)
+    assert m == pytest.approx(0.1) and se == pytest.approx(0.05)
+    assert (ci[1] - ci[0]) / 2 == pytest.approx(2.2622 * se, abs=1e-4)
+    assert ci[0] < 0 < m - S.Z95 * se  # avec 1,96, la borne basse passait au-dessus de zéro
+
+
+def test_seuil_de_degradation_en_student():
+    # Bonferroni à 5 % sur ~80 tranches, en t à G − 1 degrés de liberté : ≈ 3,79 à 20 jours, 3,2 à l'infini.
+    assert S.t_quantile(S.DEGRADE_P, 19) == pytest.approx(3.79, abs=0.01)
+    assert S.t_quantile(S.DEGRADE_P, 100_000) == pytest.approx(S.DEGRADE_Z, abs=0.03)
+
+
 def test_grappes_plus_larges_que_l_erreur_naive_quand_les_jours_se_ressemblent():
     # 10 jours, 20 trades par jour, tous les trades d'un jour identiques : 10 observations, pas 200.
     days = {f"d{i}": [(1.0 if i % 2 else -1.0) * 20, 20] for i in range(10)}
@@ -163,7 +178,26 @@ def test_tranche_degradee_signalee_et_petite_tranche_jamais(db):
     st = S.compute(db.conn)
     found = [d for d in st["degradations"] if d["dimension"] == "setup"]
     assert [d["valeur"] for d in found] == ["divergence"]
-    assert all(d["n"] >= S.MIN_TRADES and d["z"] <= -S.DEGRADE_Z for d in st["degradations"])
+    # Seuil en t de Student sur les jours de la tranche (80 au plus ici) : plus exigeant que 3,2.
+    assert all(d["n"] >= S.MIN_TRADES and d["z"] <= -S.t_quantile(S.DEGRADE_P, 79) < -S.DEGRADE_Z
+               for d in st["degradations"])
+
+
+def test_tranche_de_trois_jours_jamais_degradee(db):
+    """Direct crypto du 9 octobre : 3 jours très corrélés (849 trades) jugés comme 849 trades
+    indépendants donnaient z −9,3. Il faut DEGRADE_MIN_DAYS jours avant de signaler une tranche."""
+    synthetic_trades(db, n_days=80, per_day=50, seed=8, market="crypto", base=-0.2)
+    synthetic_trades(db, n_days=3, per_day=300, seed=9, market="crypto", base=-0.75, noise=0.8,
+                     origin="live", first=date(2024, 6, 1))
+    assert not [d for d in S.compute(db.conn)["degradations"] if d["dimension"] == "origine"]
+
+
+def test_tranche_assez_longue_toujours_signalee(db):
+    synthetic_trades(db, n_days=80, per_day=50, seed=8, market="crypto", base=-0.2)
+    synthetic_trades(db, n_days=S.DEGRADE_MIN_DAYS, per_day=50, seed=9, market="crypto", base=-0.75, noise=0.8,
+                     origin="live", first=date(2024, 6, 1))
+    found = [d for d in S.compute(db.conn)["degradations"] if d["dimension"] == "origine"]
+    assert [d["valeur"] for d in found] == ["live"]
 
 
 def test_bruit_pur_sans_degradation(db):

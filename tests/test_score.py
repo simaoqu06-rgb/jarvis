@@ -99,3 +99,90 @@ def test_reglages_modifiables_et_retour_au_defaut(tmp_path):
     assert again["rsi_max"] == 75.0
     with pytest.raises(KeyError):
         again.update({"inconnu": 1})
+
+
+# --- Finnhub muet hors scanner, labo inchangé (vérification P4, A) --------------------------------
+
+def finnhub_down(**kw):
+    """Ce que renvoie catalyst.check quand aucun appel Finnhub ne répond."""
+    return {"available": False, "earnings_known": False, "name": None, "market_cap": None, "company": None,
+            "next_earnings": None, "hours_to_earnings": None, "last_earnings": None, "news": [], "positive": 0,
+            "negative": 0, "dilution": False, "fresh_news": False,
+            "errors": ["profil : délai", "résultats : délai", "actus : délai"]} | kw
+
+
+def test_finnhub_en_panne_catalyseur_neutre_et_veto(s):
+    p = plan(ok=5)
+    r = SC.evaluate(p, daily(), finnhub_down(), s)
+    tech, rsk = r["parts"]["technique"]["score"], r["parts"]["risk"]["score"]
+    assert r["parts"]["catalyst"]["score"] == 5.0 and r["parts"]["catalyst"]["weight"] == 0.3
+    assert r["parts"]["catalyst"]["reasons"][0].startswith("catalyseur non vérifié")
+    assert r["composite"] == round(tech * 0.4 + 5.0 * 0.3 + rsk * 0.3, 1)
+    assert r["decision"] == "NO GO" and "date des résultats non vérifiée (Finnhub sans réponse)" in r["reasons"]
+    # Le labo (generator, live) note ses actions avec cat=None : note renormalisée, aucun veto ajouté.
+    lab = SC.evaluate(p, daily(), None, s)
+    assert lab["composite"] == round((tech * 0.4 + rsk * 0.3) / 0.7, 1) and lab["go"]
+    assert lab["parts"]["catalyst"]["score"] is None and lab["parts"]["catalyst"]["weight"] == 0
+
+
+def test_actus_ok_et_calendrier_muet_veto(s):
+    r = SC.evaluate(plan(), daily(), cat(earnings_known=False, hours_to_earnings=None), s)
+    assert r["decision"] == "NO GO" and r["reasons"] == ["date des résultats non vérifiée (Finnhub sans réponse)"]
+    assert SC.evaluate(plan(), daily(), cat(), s)["go"]
+    assert SC.evaluate(plan(market="crypto"), daily(), {"available": False}, s)["parts"]["catalyst"]["score"] is None
+
+
+# --- Note non prédictive au labo, affichée à côté du GO (P4, B) ----------------------------------
+
+@pytest.fixture
+def lab_slope(tmp_path, monkeypatch):
+    from app.lab import stats as STATS
+    from app.lab.db import LabDB
+
+    path = tmp_path / "lab.db"
+    monkeypatch.setenv("JARVIS_LAB_DB", str(path))
+    monkeypatch.setattr(SC, "_slopes", {"key": None, "at": 0.0, "data": {}})
+
+    def write(stock, crypto=None):
+        db = LabDB(str(path))
+        data = {"marches": {m: {"calibration_note": {"pente_r_par_point": v}}
+                            for m, v in (("stock", stock), ("crypto", crypto)) if v is not None}}
+        STATS.store(db.conn, "courant", data, 10, "2026-10-09T22:00:00+00:00")
+        db.close()
+        SC._slopes.update(key=None)
+    return write
+
+
+def scored(market="stock"):
+    p = plan(market=market)
+    return p | {"score": SC.evaluate(p, daily(), cat() if market == "stock" else None, Settings(None)), "catalyst": {}}
+
+
+def test_note_non_predictive_affichee_partout_ou_le_go_s_affiche(lab_slope):
+    from app.trading import scanner
+    from app.trading import service as T
+    from tests.test_lab3_live import fake_plan
+
+    assert SC.slope_note("stock") is None  # pas de base du labo : rien à dire
+    lab_slope(-0.0204, 0.012)
+    assert SC.slope_note("stock") == "note non prédictive au labo (pente −0,020 R/pt, actions)"
+    assert SC.slope_note("crypto") is None  # pente positive : pas de mention
+    lines = "\n".join(T.score_lines(scored()))
+    assert ("-# Note non prédictive au labo (pente −0,020 R/pt, actions) : GO = règle de sélection figée, "
+            "pas une prédiction") in lines
+    assert "non prédictive" not in "\n".join(T.score_lines(scored("crypto")))
+    result = {"at": "2026-10-07T13:10:00+00:00", "examined": 3, "passed": 1, "skipped": [], "rejected": {},
+              "picks": [{"symbol": "AAA", "features": {"gap_pct": 3.0, "rvol": 2.0, "rsi": 60, "atr_pct": 4.0},
+                         "plan": fake_plan("AAA")}]}
+    assert "-# Note non prédictive au labo (pente −0,020 R/pt, actions) : le GO est une règle de sélection figée" \
+        in scanner.text(result)
+    assert "non prédictive" not in scanner.text(result | {"picks": []})
+
+
+def test_pente_lue_une_fois_par_periode(lab_slope, monkeypatch):
+    lab_slope(-0.03)
+    assert SC.lab_slopes() == {"stock": -0.03}
+    lab_slope(0.05)
+    assert SC.lab_slopes() == {"stock": 0.05}
+    monkeypatch.setattr(SC, "_slopes", SC._slopes | {"data": {"stock": -1.0}})
+    assert SC.lab_slopes() == {"stock": -1.0}  # en cache : pas relue avant SLOPE_TTL

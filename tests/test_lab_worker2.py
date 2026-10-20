@@ -115,7 +115,7 @@ async def test_indice_collecte_mais_hors_univers(tmp_path, monkeypatch):
     async def symbols(db_, today, transport=None):
         return ["AAA", "BBB"]
 
-    async def ensure(db_, market, syms, first, last, now=None, transport=None):
+    async def ensure(db_, market, syms, first, last, now=None, transport=None, failed_out=None):
         asked[market] = list(syms)
         return 0
 

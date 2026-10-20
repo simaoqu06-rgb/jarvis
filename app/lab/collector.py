@@ -271,9 +271,11 @@ async def _fetch_daily(market: str, symbols: list[str], a: int, b: int, transpor
 
 
 async def ensure_daily(db: LabDB, market: str, symbols: list[str], first: date, last: date,
-                       now: datetime | None = None, transport=None, _reload: bool = False) -> int:
+                       now: datetime | None = None, transport=None, _reload: bool = False,
+                       failed_out: set | None = None) -> int:
     """Bougies journalières de chaque symbole entre deux dates, couverture suivie symbole par symbole :
-    un symbole en échec ou nouveau dans la liste est complété au passage suivant.
+    un symbole en échec ou nouveau dans la liste est complété au passage suivant. `failed_out` reçoit les
+    symboles d'un lot en échec (le rejeu ne calcule pas un jour sur un univers amputé, avis du 10 octobre, I4).
 
     En prolongeant un historique, on relit aussi les OVERLAP_DAYS jours déjà stockés : s'ils ont changé
     (division d'actions…), tout l'historique du symbole (journalier et 5 min) est effacé et rechargé.
@@ -296,6 +298,8 @@ async def ensure_daily(db: LabDB, market: str, symbols: list[str], first: date, 
             except SourceError as exc:
                 log.warning("Labo : journalier %s indisponible (%s), repris au prochain passage",
                             ", ".join(batch[:3]) + ("…" if len(batch) > 3 else ""), exc)
+                if failed_out is not None:
+                    failed_out.update(batch)
                 continue
             with db.transaction():
                 for symbol in batch:
@@ -310,7 +314,8 @@ async def ensure_daily(db: LabDB, market: str, symbols: list[str], first: date, 
         log.warning("Labo : opération sur titre détectée (%s) : historique rechargé", ", ".join(reload))
         for symbol in reload:
             db.delete_symbol(market, symbol)
-        stored += await ensure_daily(db, market, reload, first, last, now, transport, _reload=True)
+        stored += await ensure_daily(db, market, reload, first, last, now, transport, _reload=True,
+                                     failed_out=failed_out)
     return stored
 
 
@@ -326,12 +331,13 @@ def session_windows(a: int, b: int) -> list[tuple[int, int]]:
 
 
 async def ensure_intraday(db: LabDB, market: str, symbols: list[str], start: int, end: int,
-                          now: datetime | None = None, transport=None) -> int:
+                          now: datetime | None = None, transport=None, failed_out: set | None = None) -> int:
     """Bougies de 5 min de chaque symbole sur [start, end[ ; ne redemande que ce qui manque.
 
     Actions : une requête par séance régulière et par lot de STOCK_BATCH symboles (jamais la
     pré-ouverture ni l'après-séance, et pas plus d'une séance de données en mémoire par lot).
-    Un symbole dont une requête échoue garde sa couverture : il sera complété au passage suivant.
+    Un symbole dont une requête échoue garde sa couverture : il sera complété au passage suivant ;
+    `failed_out` le reçoit (I4 : runner.prepare_day ne calcule pas le jour sans lui).
     """
     now = now or datetime.now(timezone.utc)
     cap = int((now - SRC.alpaca.SIP_DELAY).timestamp()) if market == "stock" else int(now.timestamp())
@@ -393,6 +399,8 @@ async def ensure_intraday(db: LabDB, market: str, symbols: list[str], start: int
             for a, b in ranges:
                 cov = _extend(cov, a, b)
             db.set(job, symbol, cov)
+    if failed_out is not None:
+        failed_out.update(failed)
     return stored
 
 

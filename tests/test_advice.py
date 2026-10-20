@@ -3,6 +3,8 @@
 import sqlite3
 from datetime import datetime, timezone
 
+import pytest
+
 from app.lab import db as lab_db
 from app.notify import bot
 from app.trading import advice as A
@@ -235,8 +237,8 @@ def test_mesure_du_labo_lit_la_table_des_trades(tmp_path):
     assert A.lab_measure("stock", "NVDA", str(tmp_path / "absente.db")) is None
 
 
-def strategy(nom, z, ci, days=64, candidate=False):
-    return {"nom": nom, "jours": days, "ic95": ci, "ic95_ibkr": ci, "candidate": candidate, "temoin": {"z": z}}
+def strategy(nom, z, ci, days=64, candidate=False, **over):
+    return {"nom": nom, "jours": days, "ic95": ci, "ic95_ibkr": ci, "candidate": candidate, "temoin": {"z": z}} | over
 
 
 def lab_table(tmp_path, name, stock, crypto=None):
@@ -263,7 +265,7 @@ def test_note_des_entrees_dit_ce_que_le_labo_a_mesure_face_au_hasard(tmp_path):
         "v1": strategy("v1", 5.0, [0.1, 0.2])})  # pas une entrée sur repli ni sur cassure
     lab = A.lab_entries("stock", path)
     assert lab["repli"] == {"versions": 2, "nom": "Rebond sur une zone", "z": -1.64, "jours": 64, "prouvee": False,
-                            "perd": True}
+                            "avantage": False, "seuil": None, "perd": True}
     assert lab["cassure"]["versions"] == 2 and lab["cassure"]["z"] == 1.49 and not lab["cassure"]["perd"]
     note = A.entries_note(lab, {"repli", "cassure"}, "stock")
     assert note.startswith("-# Entrées : prix de la méthode EmperorBTC, pas une prédiction. Au labo (actions, 64 j")
@@ -285,6 +287,29 @@ def test_note_des_entrees_dit_ce_que_le_labo_a_mesure_face_au_hasard(tmp_path):
     assert "sur repli : pas encore mesuré" in A.entries_note(lab, {"cassure", "repli"}, "stock")
     assert A.lab_entries("stock", str(tmp_path / "absente.db")) is None
     assert "labo indisponible, aucune mesure face au hasard" in A.entries_note(None, {"repli"}, "stock")
+
+
+def test_note_des_entrees_lit_le_tableau_comme_strategies(tmp_path):
+    """Tableau de main : ✅ seulement à la mise de Simão (candidate_compte, n° 10), seuil en t de la stratégie
+    (seuil_t, n° 8), et les stratégies choisies après lecture des jours jugées sur les jours suivants (n° 6)."""
+    seen = {"jours_vus_jusqu_au": "2025-01-27"}
+    table = {
+        "orb15": strategy("ORB 15", 2.5, [-0.05, 0.2], seuil_t=3.63, candidate_compte=False),
+        # 4,5 sur tous les jours, mais 1,0 sur les jours suivants : c'est 1,0 qui juge.
+        "cassure_zone_retest_15m": strategy("Zone 15 min", 4.5, [0.1, 0.3], **seen,
+                                            jours_suivants=strategy("Zone 15 min", 1.0, [-0.2, 0.1], days=20)),
+        "cassure_retest": strategy("Veille puis retest", 5.0, [0.1, 0.3], **seen, jours_suivants=None)}  # pas encore
+    lab = A.lab_entries("stock", lab_table(tmp_path, "main", table))
+    assert lab["cassure"]["versions"] == 2 and lab["cassure"]["nom"] == "ORB 15" and lab["cassure"]["seuil"] == 3.63
+    assert "sur cassure : mieux que le hasard, sans preuve (il faut z 3.63) (meilleure des 2 versions testées, z +2.5)" \
+        in A.entries_note(lab, {"cassure"}, "stock")
+    table["orb30"] = strategy("ORB 30", 3.9, [0.02, 0.2], candidate=True, candidate_compte=False, seuil_t=3.6)
+    lab = A.lab_entries("stock", lab_table(tmp_path, "avantage", table))
+    assert not lab["cassure"]["prouvee"] and lab["cassure"]["avantage"]
+    assert "sur cassure : « ORB 30 » bat le hasard mais perd à 20 € ☑️" in A.entries_note(lab, {"cassure"}, "stock")
+    table["orb30"]["candidate_compte"] = True
+    lab = A.lab_entries("stock", lab_table(tmp_path, "compte", table))
+    assert "sur cassure : « ORB 30 » est prouvée ✅" in A.entries_note(lab, {"cassure"}, "stock")
 
 
 def test_renfort_juge_sur_toute_la_position():
@@ -337,17 +362,39 @@ async def test_avis_complet_sur_des_bougies(monkeypatch):
 def test_commandes_lisent_entree_stop_et_objectifs():
     assert bot.parse_trade(["nvda", "132,5", "stop", "128"]) == {
         "symbol": "NVDA", "market": "stock", "side": "long", "entry": 132.5, "stop": 128.0, "targets": None}
-    req = bot.parse_trade(["MRVL", "281", "stop", "279.5", "tp", "286.8", "290,5", "299.5"])
-    assert req["entry"] == 281 and req["stop"] == 279.5 and req["targets"] == [286.8, 290.5, 299.5]
+    req = bot.parse_trade(["eth", "short", "2500"])
+    assert req["market"] == "crypto" and req["side"] == "short" and req["entry"] == 2500 and req["stop"] is None
+    assert bot.parse_trade(["NVDA"])["entry"] is None
+    req = bot.parse_trade(["mrvl", "281", "stop", "273,9", "tp", "286.8", "290,5", "299.5"])
+    assert (req["entry"], req["stop"], req["targets"]) == (281.0, 273.9, [286.8, 290.5, 299.5])
+    req = bot.parse_trade(["mrvl", "tp", "286.8", "290.5", "281", "stop", "273.9"])
+    assert req["targets"] == [286.8, 290.5, 281.0] and req["entry"] is None  # tout nombre après tp est un objectif
     req = bot.parse_trade(["eth", "tp", "2400", "2300", "short", "2500"])  # un mot termine la liste des objectifs
     assert req["side"] == "short" and req["targets"] == [2400, 2300] and req["entry"] == 2500 and req["market"] == "crypto"
-    assert bot.parse_trade(["NVDA"])["entry"] is None
-    for bad in (["NVDA", "stop"], ["NVDA", "stop", "x"], ["NVDA", "tp"]):
-        try:
+    for bad in (["NVDA", "stop", "x"], ["NVDA", "tp"], ["mrvl", "281", "tp"]):
+        with pytest.raises(ValueError):
             bot.parse_trade(bad)
-        except ValueError:
-            continue
-        raise AssertionError(bad)
+    # La commande `!prends` jointe à `!avis` et `!position` se relit telle quelle.
+    cmd = A.take_command("NVDA", {"side": "short", "entry": 132.5, "stop": 136.0,
+                                  "targets": [{"price": 128.0}, {"price": 125.5}, {"price": 121.0}]})
+    req = bot.parse_trade(cmd.strip("`").split()[1:])
+    assert (req["side"], req["entry"], req["stop"], req["targets"]) == ("short", 132.5, 136.0, [128.0, 125.5, 121.0])
+
+
+def test_rouvre_un_trade_dont_le_stop_n_a_pas_ete_execute():
+    book = S.Book(None)
+    plan = {"symbol": "MRVL", "side": "long", "entry": 281.0, "stop": 279.5, "targets": [],
+            "created_at": "2026-10-07T13:30:00+00:00"}
+    old = book.add(plan)
+    book.close(old["id"], 276.75)
+    assert S.reopen(book, "MRVL", plan) is None  # clôturé à la main : rien à rouvrir
+    old["events"][-1]["kind"] = "stop"
+    old["stop_current"] = 279.5
+    new_plan = plan | {"stop": 273.9, "created_at": "2026-10-08T13:50:00+00:00"}
+    assert S.reopen(book, "mrvl", new_plan)["id"] == old["id"]
+    assert len(book.trades) == 1
+    t = book.trades[0]
+    assert t["status"] == "open" and t["stop_current"] == 273.9 and "non exécuté" in t["note"]
 
 
 async def test_positions_sans_trade_suivi(monkeypatch):
@@ -393,3 +440,24 @@ async def test_message_avant_la_cloture_garde_les_conseils(monkeypatch):
     assert len(sent) == 1 and "Avant la clôture US" in sent[0] and "les ordres à poser" in sent[0]
     c = book.trades[0]["conseils"][0]
     assert c["decision"] in ("GARDER", "ALLÉGER", "SORTIR") and c["orders"]
+
+
+async def test_un_kill_pris_se_vend_a_la_cloture(monkeypatch):
+    """Un KILL pris ne reçoit pas de conseil garder / alléger : sa règle le vend avant la clôture."""
+    from app import scheduler
+
+    book = S.Book(None)
+    book.trades.append(trade(100.0, market="stock", symbol="ACME", killmode=True))
+    monkeypatch.setattr(scheduler, "book", book)
+    monkeypatch.setattr(scheduler.state, "data", {})
+    monkeypatch.setattr(scheduler.state, "save", lambda: None)
+    sent = []
+    monkeypatch.setattr(scheduler, "_queue", lambda text, kind, **kw: sent.append(text))
+
+    async def fake(trades, now):
+        raise AssertionError("pas de conseil sur un KILL")
+
+    monkeypatch.setattr(A, "advise_book", fake)
+    await scheduler.tick_closing(NOW)
+    assert len(sent) == 1
+    assert "vers 15 h 59 New York, annule les TP et SL de ACME puis vends le reste au marché" in sent[0]

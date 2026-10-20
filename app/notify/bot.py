@@ -10,11 +10,17 @@ qu'aux comptes listés dans JARVIS_DISCORD_OWNER_ID et ignore tout le reste sans
   !societe NVDA         fiche société : résultats, plus fortes séances de l'année et leur actu, chiffres,
                         analystes, dirigeants, dépôts SEC, actus
   !prends NVDA          calcule le plan et suit le trade (TP/SL annoncés, cockpit) ; `!prends NVDA 132.5`
-                        = ton prix d'entrée réel, `stop 128` pour ton stop, `tp 140 145 150` pour tes objectifs
+                        = ton prix d'entrée réel, `stop 128` en plus pour ton stop, `tp 135 138 142` pour tes objectifs ;
+                        `!prends NVDA 132.5 go` = le GO confirmé du jour, avec son stop et ses objectifs
+  !sortie NVDA 131.2    ta sortie réelle : clôture le trade suivi à ce prix, ou corrige le prix de sa dernière
+                        sortie s'il est déjà terminé (stop exécuté plus bas, objectif touché sans remplissage)
+  !rouvre NVDA 132.5    le stop a été touché mais tu tiens toujours la position : rouvre le trade
+                        (même syntaxe que !prends, ex. `!rouvre MRVL 281 stop 273.9 tp 286.8 290.5 299.5`)
   !positions            les ordres à poser sur les trades suivis (ventes, stop suiveur, renforts) et
                         sortir, alléger ou garder
   !position NVDA 132.5  même chose pour une position prise hors de JARVIS (« short », `stop 128` en plus)
   !scan                 scanner pré-ouverture tout de suite
+  !confirmations        GO du scanner confirmés ou pas après l'ouverture, et ce que ça rapporte
   !bilan                bilan du forward-test sur le compte fictif
   !desaccords           trades pris contre l'avis de JARVIS (plans NO GO) comparés aux autres
   !propositions         réglages que JARVIS propose et qui attendent ta réponse
@@ -24,7 +30,14 @@ qu'aux comptes listés dans JARVIS_DISCORD_OWNER_ID et ignore tout le reste sans
   !lecons               carnet des leçons du labo (confirmées, à confirmer, démenties)
   !grade                grade de JARVIS (F- à S+), de quoi il est fait et le risque qu'il permet
   !strategies           labo v2 : stratégies à déclencheur contre v1 et leur témoin aléatoire
+  !frais                ta mise de 20 € chez IBKR : un bracket par objectif au plan Fixe contre le Dégressif et un ou
+                        deux brackets, sur les mêmes trades du labo, stratégie par stratégie (mesure, pas un essai)
+  !autopsie             où les trades du labo échouent (élan contre le hasard, stops, gagnants qui frôlent le stop) ;
+                        `!autopsie crypto` ou `!autopsie actions`
+  !rates                chasse aux ratés : les actions à +10 % des 20 dernières séances que JARVIS n'a pas prises,
+                        pourquoi (pas de plan, plan non déclenché, stop avant TP1) et le gap à regarder
   !potentiel            potentiel +10 : part des séances qui touchent +8 % selon le gap, types de catalyseurs
+  !kill                 JARVIS Killmode, désactivé par défaut : `!kill on`, `!kill NVDA`, `!kill scan`, `!kill bilan`
   !aide                 cette liste
 
 Les alertes des trades suivis (TP, stop, sortie anticipée, objectif en retard, conseil avant la clôture)
@@ -42,11 +55,13 @@ from datetime import datetime, timezone
 
 from app import config
 from app.lab import db as lab_db
+from app.lab import autopsie as lab_autopsie
 from app.lab import grade as lab_grade
 from app.lab import lessons as lab_lessons
 from app.lab import morning as lab_morning
 from app.lab import status as lab_status
 from app.lab import potentiel as lab_potentiel
+from app.lab import rates as lab_rates
 from app.lab import strat_stats as lab_strategies
 from app.core.http import SourceError
 from app.notify.discord import split_message
@@ -54,6 +69,7 @@ from app.trading import advice, company, paper, scanner
 from app.trading import proposals as PR
 from app.trading import service as trading
 from app.trading.settings import settings
+from app.trading import killmode  # JARVIS Killmode (!kill), éteint par défaut
 
 log = logging.getLogger(__name__)
 TOKEN_NAME = "DISCORD_BOT_TOKEN"
@@ -164,36 +180,30 @@ def _price(word: str) -> float | None:
 
 
 def parse_trade(args: list[str]) -> dict:
-    """« NVDA short », « eth », « SOL crypto long », « NVDA 132.5 stop 128 tp 140 145 150 » → symbole, marché,
-    sens, prix d'entrée, stop et objectifs (None quand ils ne sont pas donnés). Le premier nombre libre est
-    l'entrée ; `stop` (ou `sl`) prend le nombre suivant, `tp` (ou `objectifs`) tous les nombres qui suivent."""
+    """« NVDA short », « eth », « SOL crypto long », « NVDA 132.5 stop 128 tp 135 138 » → symbole, marché,
+    sens, prix d'entrée, stop et objectifs (None quand ils ne sont pas donnés)."""
     if not args:
         raise ValueError("donne un ticker, ex. `!plan NVDA`")
     words = [a.lower() for a in args[1:]]
-    entry = stop = targets = None
-    mode = None  # "stop" : le prochain nombre est le stop ; "tp" : les nombres qui suivent sont des objectifs
-    for w in words:
-        if w in ("stop", "sl"):
-            mode = "stop"
-            continue
-        if w in ("tp", "tps", "objectif", "objectifs"):
-            mode, targets = "tp", targets or []
-            continue
-        x = _price(w)
-        if mode == "stop":
-            if x is None:
-                raise ValueError(f"stop illisible : `{w}`")
-            stop, mode = x, None
-        elif mode == "tp" and x is not None:
-            targets.append(x)
-        elif x is not None and entry is None:
-            entry = x
-        elif mode == "tp":
-            mode = None  # un mot (« short », « crypto ») termine la liste des objectifs
-    if mode == "stop":
-        raise ValueError("stop sans prix, ex. `stop 128`")
-    if targets == []:
-        raise ValueError("objectifs sans prix, ex. `tp 140 145 150`")
+    entry = stop = None
+    targets: list[float] = []
+    in_tp = False
+    for i, w in enumerate(words):
+        if w == "tp":
+            in_tp = True
+        elif in_tp and _price(w) is not None:
+            targets.append(_price(w))
+        elif w == "stop" and i + 1 < len(words):
+            in_tp = False
+            stop = _price(words[i + 1])
+            if stop is None:
+                raise ValueError(f"stop illisible : `{words[i + 1]}`")
+        elif _price(w) is not None and (i == 0 or words[i - 1] != "stop") and entry is None:
+            entry = _price(w)
+        else:
+            in_tp = False
+    if "tp" in words and not targets:
+        raise ValueError("donne les objectifs après `tp`, ex. `tp 286.8 290.5 299.5`")
     symbol = args[0].upper()
     if symbol.endswith("USD") and len(symbol) > 4:  # « BTCUSD » → BTC
         symbol = symbol[:-3]
@@ -204,7 +214,28 @@ def parse_trade(args: list[str]) -> dict:
     else:
         market = "crypto" if symbol in CRYPTO | set(config.WATCHLIST_CRYPTO) else "stock"
     side = "short" if "short" in words else "long"
-    return {"symbol": symbol, "market": market, "side": side, "entry": entry, "stop": stop, "targets": targets}
+    go = {"go": True} if "go" in words else {}  # « go » : le GO confirmé du jour (`!prends … go`)
+    # « kill » : un KILL de Killmode pris, mesuré par son journal et pas par `!desaccords`
+    return {"symbol": symbol, "market": market, "side": side, "entry": entry, "stop": stop,
+            "targets": targets or None} | ({"killmode": True} if "kill" in words else {}) | go
+
+
+GO_STATUS_FR = {"attente": "en attente du repli", "repli": "repli vu, reprise du VWAP pas encore confirmée",
+                "annulé": "annulé", "expiré": "expiré à 11 h 30 New York"}
+
+
+def confirmed_go(symbol: str, state: dict, now: datetime | None = None) -> tuple[dict | None, str]:
+    """Le GO du scanner confirmé aujourd'hui (New York) sur `symbol`, d'après l'état des confirmations, ou None
+    et la raison en clair."""
+    day = (now or datetime.now(timezone.utc)).astimezone(trading.NEW_YORK).date().isoformat()
+    if state.get("day") != day:
+        return None, "pas de GO du scanner aujourd'hui"
+    go = (state.get("gos") or {}).get(symbol.upper())
+    if go is None:
+        return None, f"{symbol.upper()} n'est pas dans les GO du scanner du jour"
+    if go.get("status") != "confirmé":
+        return None, f"son GO est {GO_STATUS_FR.get(go.get('status'), go.get('status'))}"
+    return go, ""
 
 
 def settings_text() -> str:
@@ -217,14 +248,50 @@ def settings_text() -> str:
 
 
 def grade_text() -> str:
+    from app import scheduler
+
     conn = lab_db.open_readonly()
-    hist = []
+    hist, indicatif = [], []
     if conn is not None:
         try:
             hist = lab_grade.history(conn, limit=5)
+            indicatif = lab_autopsie.indicatif_lines((lab_autopsie.cached(conn) or {}).get("grade_indicatif"))
         finally:
             conn.close()
-    return lab_grade.text(lab_grade.current(), hist)
+    extra = lab_grade.populations_text(indicatif, lab_grade.reels(scheduler.book.trades))
+    return lab_grade.text(lab_grade.current(), hist) + ("\n" + extra if extra else "")
+
+
+def autopsie_text(args: list[str]) -> str:
+    conn = lab_db.open_readonly()
+    if conn is None:
+        return "🩺 Base du labo absente : le service jarvis-lab n'a pas encore démarré."
+    words = {a.lower() for a in args}
+    market = "crypto" if "crypto" in words else "stock" if words & {"actions", "action", "stock"} else None
+    try:
+        return lab_autopsie.text(lab_autopsie.cached(conn), market)
+    finally:
+        conn.close()
+
+
+def rates_text() -> str:
+    conn = lab_db.open_readonly()
+    if conn is None:
+        return "🎣 Base du labo absente : le service jarvis-lab n'a pas encore démarré."
+    try:
+        return lab_rates.text(lab_rates.cached(conn))
+    finally:
+        conn.close()
+
+
+def frais_text() -> str:
+    conn = lab_db.open_readonly()
+    if conn is None:
+        return "💶 Base du labo absente : le service jarvis-lab n'a pas encore démarré."
+    try:
+        return lab_strategies.costs_text(lab_strategies.cached(conn))
+    finally:
+        conn.close()
 
 
 def potentiel_text() -> str:
@@ -308,21 +375,84 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
             return text
         if cmd == "prends":
             req = parse_trade(args)
+            kill = killmode.kill_today(req["symbol"]) if req.get("killmode") else None
+            if kill:  # stop et objectifs du KILL du jour quand ils manquent : la gestion que son journal mesure
+                req["stop"] = req["stop"] if req["stop"] is not None else kill["stop"]
+                req["targets"] = req["targets"] or kill["targets"]
+            go = None
+            if req.get("go"):  # stop et objectifs du GO confirmé du jour, pas recalculés : ceux que mesure `!confirmations`
+                from app import scheduler  # import tardif : scheduler importe ce module
+                go, why = confirmed_go(req["symbol"], scheduler.confirm_state)
+                if go is None:
+                    price = f"{req['entry']:g}" if req["entry"] is not None else "<ton prix>"
+                    return (f"Pas de GO confirmé aujourd'hui pour {req['symbol']} ({why}) : rien n'est suivi. "
+                            f"`!prends {req['symbol']} {price}` sans `go` pour le suivre sur un plan recalculé.")
+                if req["side"] != "long":
+                    return f"Le GO du scanner sur {req['symbol']} est à l'achat : `!prends {req['symbol']} <ton prix> go`."
+                req["entry"] = req["entry"] if req["entry"] is not None else go.get("trigger")
+                req["stop"] = req["stop"] if req["stop"] is not None else go["stop"]
+                req["targets"] = req["targets"] or go["targets"]
+            plan = await trading.build_plan(req["symbol"], req["market"], req["side"], req["entry"], req["stop"],
+                                            req["targets"])
+            if go:
+                plan["policy"] = "go_confirme"
+            if req.get("killmode"):
+                plan["killmode"] = True
+                plan["sizing"] = killmode.taken_sizing(plan)  # 20 € hors grade, compté dans le risque ouvert
+                plan.pop("sizing_regle", None)
+            async with lock or asyncio.Lock():
+                from app import scheduler  # import tardif : scheduler importe ce module
+                scheduler.book.add(plan, "via Killmode" if req.get("killmode") else
+                                   "via GO confirmé" if go else "via Discord")
+            head = trading.disagreement_text(plan) + "\n" if trading.against_jarvis(plan) else ""
+            if go:
+                head += (f"✅ GO confirmé du jour : stop {trading._num(plan['stop'])}, objectifs "
+                         f"{' · '.join(trading._num(t['price']) for t in plan['targets'])}. Stop remonté à l'entrée "
+                         "après TP2 (ta règle), pas de sortie au temps.\n")
+                if plan.get("score") and not plan["score"]["go"]:
+                    head += ("-# La note recalculée à ton entrée est NO GO ; le trade compte quand même avec JARVIS, "
+                             "comme le GO confirmé du scanner.\n")
+            return head + "📌 Trade suivi\n" + trading.plan_text(plan)
+        if cmd == "sortie":
+            if not args:
+                return "Donne le symbole et ton prix de sortie réel, ex. `!sortie NVDA 131.2`."
+            req = parse_trade(args)
+            if req["entry"] is None:
+                return f"Donne ton prix de sortie réel, ex. `!sortie {req['symbol']} 131.2`."
+            async with lock or asyncio.Lock():
+                from app import scheduler
+                res = trading.record_exit(scheduler.book, req["symbol"], req["entry"])
+            if res is None:
+                return f"Aucun trade {req['symbol']} suivi : rien à clôturer ni à corriger."
+            return trading.exit_text(res)
+        if cmd == "rouvre":
+            req = parse_trade(args)
+            if req["entry"] is None:
+                return "Donne ton prix d'entrée, ex. `!rouvre MRVL 281 stop 273.9 tp 286.8 290.5 299.5`."
             plan = await trading.build_plan(req["symbol"], req["market"], req["side"], req["entry"], req["stop"],
                                             req["targets"])
             async with lock or asyncio.Lock():
-                from app import scheduler  # import tardif : scheduler importe ce module
-                scheduler.book.add(plan, "via Discord")
-            head = trading.disagreement_text(plan) + "\n" if trading.against_jarvis(plan) else ""
-            return head + "📌 Trade suivi\n" + trading.plan_text(plan)
+                from app import scheduler
+                old = trading.reopen(scheduler.book, req["symbol"], plan)
+            if old is None:
+                return (f"Aucun trade {req['symbol']} terminé par le stop à rouvrir. "
+                        f"`!prends {req['symbol']} {req['entry']:g}` pour en suivre un nouveau.")
+            return (f"♻️ Trade {req['symbol']} rouvert : le stop {trading._num(old['stop_current'])} n'a pas été "
+                    "exécuté chez ton courtier, l'ancienne sortie est effacée du journal.\n" + trading.plan_text(plan))
         if cmd == "scan":
             return scanner.text(await scanner.scan(save=False))
         if cmd == "bilan":
             from app import scheduler
             return paper.report_text(paper.stats(scheduler.paper_book))
+        if cmd in ("confirmations", "confirmation"):
+            from app import scheduler
+            from app.trading import confirm as CONFIRM
+
+            return CONFIRM.report_text(CONFIRM.read_log(), scheduler.confirm_state)
         if cmd in ("desaccords", "désaccords"):
             from app import scheduler
-            return trading.disagreements_text(trading.disagreements(scheduler.book))
+            slopes = await asyncio.to_thread(trading.note_slopes)
+            return trading.disagreements_text(trading.disagreements(scheduler.book, slopes))
         if cmd == "regle":
             return settings_text()
         if cmd == "labo":
@@ -334,8 +464,18 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
             return await asyncio.to_thread(grade_text)
         if cmd in ("strategies", "stratégies", "strats"):
             return await asyncio.to_thread(strategies_text)
+        if cmd in ("frais", "mise"):
+            return await asyncio.to_thread(frais_text)
+        if cmd == "autopsie":
+            return await asyncio.to_thread(autopsie_text, args)
+        if cmd in ("rates", "ratés"):
+            return await asyncio.to_thread(rates_text)
         if cmd in ("potentiel", "potentiel10", "plus10"):
             return await asyncio.to_thread(potentiel_text)
+        if cmd == "kill":
+            if args and args[0].upper().removesuffix("USD") in CRYPTO:
+                return "🔪 Killmode ne traite que les actions US (la fiche société et le catalyseur en font partie)."
+            return await killmode.command(args)
         if cmd == "propositions":
             pending = PR.proposals.pending()
             if not pending:
@@ -348,6 +488,8 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
     except (ValueError, KeyError) as exc:
         return f"⚠️ {exc}"
     except (trading.PlanError, scanner.ScanError, SourceError) as exc:
+        return f"⚠️ {exc}"
+    except killmode.KillError as exc:
         return f"⚠️ {exc}"
     return None
 

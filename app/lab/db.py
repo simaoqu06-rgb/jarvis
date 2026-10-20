@@ -16,6 +16,7 @@ génération (base IS NULL, « v1 ») : champion et challenger en sont des sous-
 import json
 import os
 import sqlite3
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,7 +44,17 @@ STRAT_COLUMNS = ("origin", "market", "symbol", "day", "strategy", "slot", "signa
                  "triggered", "filled_at", "entry_mode", "minutes_to_fill", "exit_reason", "r_net", "r_gross",
                  "tp1_hit", "mfe_r", "mae_r", "r_sans_be", "r_2r", "r_suiveur", "r_glisse_x2", "r_glisse_x3",
                  "r_retard", "r_manque", "temoin_r", "temoin_triggered", "gap_open_pct", "rank", "r_emperor",
-                 "r_emperor_alerte", "r_emperor_confirme")
+                 "r_emperor_alerte", "r_emperor_confirme", "r_vwap", "r_1430", "r_spy", "sur_vwap", "atr_pct",
+                 "vol15_adv", "stop_avant_entree", "confirmation", "r_3c", "r_20e")
+# Déclaration n° 10 : colonnes descriptives (aucune ne décide de « candidate ») et témoin des actions sur la journée,
+# ajoutées par migration, aussi sur une base neuve (strat_* et plus10_trades).
+STRAT_N10 = (("r_be_tp2", "REAL"), ("r_ouverture", "REAL"), ("r_20e_deg", "REAL"), ("r_20e_1s", "REAL"),
+             ("r_20e_2s", "REAL"), ("temoin_journee_r", "REAL"), ("temoin_journee_triggered", "INTEGER"),
+             ("temoin_tirages", "TEXT"))
+STRAT_COLUMNS += tuple(c for c, _ in STRAT_N10)
+# n° 11 : position de l'ouverture face à la zone de valeur de la veille (actions) et stop structurel appliqué (0/1)
+STRAT_N11 = (("ouverture_va", "TEXT"), ("stop_structure", "INTEGER"))
+STRAT_COLUMNS += tuple(c for c, _ in STRAT_N11)
 STRAT_DDL = """CREATE TABLE IF NOT EXISTS {name} (
     id INTEGER PRIMARY KEY,
     origin TEXT NOT NULL CHECK (origin IN ('replay', 'live')),
@@ -53,7 +64,8 @@ STRAT_DDL = """CREATE TABLE IF NOT EXISTS {name} (
     r_net REAL, r_gross REAL, tp1_hit INTEGER, mfe_r REAL, mae_r REAL,
     r_sans_be REAL, r_2r REAL, r_suiveur REAL, r_glisse_x2 REAL, r_glisse_x3 REAL, r_retard REAL, r_manque REAL,
     temoin_r REAL, temoin_triggered INTEGER, gap_open_pct REAL, rank INTEGER, r_emperor REAL,
-    r_emperor_alerte REAL, r_emperor_confirme REAL,
+    r_emperor_alerte REAL, r_emperor_confirme REAL, r_vwap REAL, r_1430 REAL, r_spy REAL, sur_vwap INTEGER,
+    atr_pct REAL, vol15_adv REAL, stop_avant_entree INTEGER, confirmation TEXT, r_3c REAL, r_20e REAL,
     UNIQUE (origin, market, symbol, day, strategy, slot)
 );
 CREATE INDEX IF NOT EXISTS {name}_day ON {name} (market, day);"""
@@ -135,6 +147,38 @@ CREATE TABLE IF NOT EXISTS derivs (
     symbol TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('funding', 'oi')), t INTEGER NOT NULL, value REAL,
     PRIMARY KEY (symbol, kind, t)
 ) WITHOUT ROWID;
+-- Déclaration n° 8, D1 (archive.py) : actus Finnhub des gappers d'avant 9 h 45 New York et calendrier des
+-- résultats, archivés avant que Finnhub gratuit (~1 an) ne les perde ; aucune route ne les lit.
+CREATE TABLE IF NOT EXISTS gap_news (
+    day TEXT NOT NULL, symbol TEXT NOT NULL, gap_pct REAL, atr_pct REAL, prev_close REAL, open REAL,
+    cutoff_ts INTEGER NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+    news_from TEXT, news_to TEXT, received INTEGER, news TEXT, fetched_at TEXT, note TEXT,
+    PRIMARY KEY (day, symbol)
+);
+CREATE INDEX IF NOT EXISTS gap_news_pending ON gap_news (status, day);
+CREATE TABLE IF NOT EXISTS earnings_days (
+    day TEXT PRIMARY KEY, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, n INTEGER, items TEXT,
+    fetched_at TEXT, note TEXT
+);
+-- Déclaration n° 8, D1 (kill_complet.py) : Killmode complet rejoué, un signal de la règle de prix par gapper
+-- et séance, avec le groupe que le pilier catalyseur (rejoué sur l'archive) lui donne.
+CREATE TABLE IF NOT EXISTS kill_complet (
+    day TEXT NOT NULL, symbol TEXT NOT NULL, groupe TEXT NOT NULL, codes TEXT, motif TEXT, empreinte TEXT NOT NULL,
+    gap_pct REAL, atr_pct REAL, entry REAL, stop REAL, signal_at INTEGER, triggered INTEGER NOT NULL,
+    exit_reason TEXT, r_net REAL, r_20e REAL, r_3c REAL, actus INTEGER, cout TEXT,
+    PRIMARY KEY (day, symbol)
+);
+-- Déclaration n° 9 (plus10.py) : scanner « potentiel +10 », une ligne par valeur éligible (S+10 ou Rebond), essai et
+-- séance, rejouée sur les bougies de 5 min non ajustées (prix réellement négociés).
+CREATE TABLE IF NOT EXISTS plus10_trades (
+    day TEXT NOT NULL, symbol TEXT NOT NULL, essai TEXT NOT NULL, liste TEXT NOT NULL, rang INTEGER NOT NULL,
+    seances INTEGER, gap_pct REAL, atr_pct REAL, entry REAL, stop REAL, signal_at INTEGER, triggered INTEGER NOT NULL,
+    exit_reason TEXT, tp1_hit INTEGER, mfe_r REAL, mae_r REAL, temoin_r REAL, temoin_triggered INTEGER,
+    r_net REAL, r_gross REAL, r_sans_be REAL, r_2r REAL, r_suiveur REAL, r_emperor REAL, r_emperor_alerte REAL,
+    r_emperor_confirme REAL, r_vwap REAL, r_1430 REAL, r_spy REAL, r_glisse_x2 REAL, r_glisse_x3 REAL, r_retard REAL,
+    r_manque REAL, r_3c REAL, r_20e REAL,
+    PRIMARY KEY (day, symbol, essai)
+);
 -- Bloc scellé (seal.py) : mêmes tables, jamais lues par les statistiques, la routine ni le grade.
 {trades_sealed}
 {strat}
@@ -142,15 +186,29 @@ CREATE TABLE IF NOT EXISTS derivs (
 """.format(trades=TRADES_DDL.format(name="trades"), trades_sealed=TRADES_DDL.format(name="trades_sealed"),
            strat=STRAT_DDL.format(name="strat_trades"), strat_sealed=STRAT_DDL.format(name="strat_trades_sealed"))
 # Colonnes ajoutées après coup (ALTER TABLE à l'ouverture par le worker ; idempotent).
+STRAT_MIGRATIONS = STRAT_N10 + STRAT_N11 + (("r_emperor", "REAL"), ("r_emperor_alerte", "REAL"), ("r_emperor_confirme", "REAL"),
+                    ("r_vwap", "REAL"), ("r_1430", "REAL"), ("r_spy", "REAL"), ("sur_vwap", "INTEGER"),
+                    ("atr_pct", "REAL"), ("vol15_adv", "REAL"), ("stop_avant_entree", "INTEGER"),
+                    ("confirmation", "TEXT"), ("r_3c", "REAL"), ("r_20e", "REAL"))
+# I2 : traçabilité des lignes, écrite par replace_trades / replace_strat (et cout.step pour cout_rev).
+TRADE_TRACE = (("code_rev", "TEXT"), ("cout_rev", "TEXT"), ("computed_at", "INTEGER"))
+STRAT_TRACE = (("code_rev", "TEXT"), ("declaration", "INTEGER"), ("computed_at", "INTEGER"))
 MIGRATIONS = {
     "rules": (("pourquoi", "TEXT"), ("council", "TEXT"), ("soiree", "TEXT"), ("decision", "TEXT"),
-              ("decided_at", "TEXT")),
-    "lessons": (("base_trade_id", "INTEGER"),),
+              ("decided_at", "TEXT"), ("seen_until", "TEXT")),
+    "lessons": (("base_trade_id", "INTEGER"), ("seen_until", "TEXT")),
     "method_versions": (("base", "TEXT"), ("rules", "TEXT"), ("role", "TEXT"), ("started_ts", "INTEGER"),
                         ("decided_at", "TEXT"), ("note", "TEXT")),
-    # Labo v2, déclarations n° 2 et 3 : sorties EmperorBTC.
-    "strat_trades": (("r_emperor", "REAL"), ("r_emperor_alerte", "REAL"), ("r_emperor_confirme", "REAL")),
-    "strat_trades_sealed": (("r_emperor", "REAL"), ("r_emperor_alerte", "REAL"), ("r_emperor_confirme", "REAL")),
+    "plus10_trades": STRAT_N10,  # n° 10 (plus10.TRADE_KEYS)
+    # Labo v2, déclarations n° 2 et 3 : sorties EmperorBTC ; n° 6 : sorties de Gemini, VWAP à la décision et
+    # mesure de Killmode (ATR, volume des 15 premières minutes, stop touché avant l'entrée) ; n° 7 : statut de la
+    # confirmation du GO (confirme, annule, expire).
+    "strat_trades": STRAT_MIGRATIONS + STRAT_TRACE,
+    "strat_trades_sealed": STRAT_MIGRATIONS + STRAT_TRACE,
+    # I2 (avis du 10 octobre) : code qui a produit la ligne (empreinte.code_rev), modèle de coût (cout_rev) et
+    # heure du calcul (epoch s) ; NULL sur les lignes d'avant le suivi (révision « inconnue »).
+    "trades": TRADE_TRACE,
+    "trades_sealed": TRADE_TRACE,
 }
 GENERATION_SQL = "SELECT version FROM method_versions WHERE base IS NULL ORDER BY created_at DESC, version DESC LIMIT 1"
 LEGACY_VERSION_SQL = "SELECT version FROM method_versions ORDER BY created_at DESC, version DESC LIMIT 1"
@@ -268,6 +326,12 @@ class LabDB:
     def keys(self, job: str) -> dict:
         return {k: json.loads(v) for k, v in self.conn.execute("SELECT key, value FROM progress WHERE job = ?", (job,))}
 
+    def bump(self, table: str) -> None:
+        """Compteur de révision des données (progress « lab », rev:trades ou rev:strat), à appeler dans la
+        transaction de l'écriture : les caches le lisent (empreinte.sig), un trade réécrit sur place sans changer
+        COUNT ni MAX(id) les invalide quand même (I3)."""
+        self.set("lab", f"rev:{table}", (self.get("lab", f"rev:{table}", 0) or 0) + 1)
+
     # --- Univers ----------------------------------------------------------------------------
     def replace_universe(self, market: str, day: str, rows: list[dict]) -> None:
         with self.transaction():
@@ -284,31 +348,51 @@ class LabDB:
 
     # --- Trades -----------------------------------------------------------------------------
     def replace_trades(self, origin: str, version: str, market: str, planned_at: list[int], rows: list[dict]) -> None:
-        """Remplace les trades de ces créneaux (rejouer un jour ne crée jamais de doublon)."""
+        """Remplace les trades de ces créneaux (rejouer un jour ne crée jamais de doublon).
+
+        Un trade déjà journalisé garde son id : l'id reste l'ordre de PREMIÈRE journalisation, celui que lisent
+        les mesures hors échantillon (leçons, grade). Le direct crypto réécrit les créneaux du jour à chaque
+        nouveau créneau échu : un DELETE puis INSERT leur donnait un id neuf, comme s'ils n'avaient jamais été vus."""
+        from app.lab import empreinte as E
         from app.lab import seal  # import tardif : seal n'importe rien, mais garde db sans dépendance
 
+        cols = ["origin", "method_version", "market", "symbol", "side", "day", "planned_at",
+                "plan", "context", "result", *TRADE_FLAT, *(c for c, _ in TRADE_TRACE)]
+        updates = ", ".join(f"{c} = excluded.{c}" for c in cols[4:])
+        trace = [E.code_rev("v1"), E.cost_rev(), int(time.time())]
         with self.transaction():
-            for t in planned_at:
+            if planned_at or rows:
+                self.bump("trades")
+            kept: dict[int, list[str]] = {t: [] for t in planned_at}
+            for r in rows:
+                if r["planned_at"] in kept:
+                    kept[r["planned_at"]].append(r["symbol"])
+            for t, symbols in kept.items():
                 for table in ("trades", "trades_sealed"):
                     self.conn.execute(f"DELETE FROM {table} WHERE origin = ? AND method_version = ? AND market = ? "
-                                      "AND planned_at = ?", (origin, version, market, t))
+                                      f"AND planned_at = ? AND symbol NOT IN ({', '.join('?' * len(symbols))})",
+                                      (origin, version, market, t, *symbols))
             for r in rows:
                 table = "trades_sealed" if seal.sealed(origin, r["day"]) else "trades"
-                cols = ["origin", "method_version", "market", "symbol", "side", "day", "planned_at",
-                        "plan", "context", "result", *TRADE_FLAT]
                 values = [origin, version, market, r["symbol"], r["side"], r["day"], r["planned_at"],
                           json.dumps(r["plan"], ensure_ascii=False), json.dumps(r["context"], ensure_ascii=False),
-                          json.dumps(r["result"], ensure_ascii=False)] + [r["flat"].get(k) for k in TRADE_FLAT]
+                          json.dumps(r["result"], ensure_ascii=False)] + [r["flat"].get(k) for k in TRADE_FLAT] + trace
                 self.conn.execute(
-                    f"INSERT OR REPLACE INTO {table} ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", values)
+                    f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))}) "
+                    "ON CONFLICT (origin, method_version, market, symbol, planned_at) DO UPDATE SET " + updates, values)
 
     def replace_strat(self, origin: str, market: str, day: str, rows: list[dict], symbols: list[str] | None = None) -> None:
         """Remplace les lignes des stratégies du jour (toutes, ou celles de `symbols`) : rejouer un jour
         ne crée jamais de doublon. Les jours du bloc scellé vont dans strat_trades_sealed."""
+        from app.lab import empreinte as E
         from app.lab import seal
+        from app.lab import strategies as ST  # import tardif : déclaration en vigueur du marché
 
         table = "strat_trades_sealed" if seal.sealed(origin, day) else "strat_trades"
+        cols = [*STRAT_COLUMNS, *(c for c, _ in STRAT_TRACE)]
+        trace = [E.code_rev("strat"), ST.CRYPTO_DECLARATION if market == "crypto" else ST.DECLARATION, int(time.time())]
         with self.transaction():
+            self.bump("strat")
             for t in ("strat_trades", "strat_trades_sealed"):
                 if symbols is None:
                     self.conn.execute(f"DELETE FROM {t} WHERE origin = ? AND market = ? AND day = ?", (origin, market, day))
@@ -316,8 +400,8 @@ class LabDB:
                     self.conn.executemany(f"DELETE FROM {t} WHERE origin = ? AND market = ? AND day = ? AND symbol = ?",
                                           [(origin, market, day, s) for s in symbols])
             self.conn.executemany(
-                f"INSERT OR REPLACE INTO {table} ({', '.join(STRAT_COLUMNS)}) VALUES ({', '.join('?' * len(STRAT_COLUMNS))})",
-                [[origin, market, r["symbol"], day, *[r.get(k) for k in STRAT_COLUMNS[4:]]] for r in rows])
+                f"INSERT OR REPLACE INTO {table} ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                [[origin, market, r["symbol"], day, *[r.get(k) for k in STRAT_COLUMNS[4:]], *trace] for r in rows])
 
     def count_trades(self, **where) -> int:
         sql = "SELECT COUNT(*) FROM trades" + (" WHERE " + " AND ".join(f"{k} = ?" for k in where) if where else "")

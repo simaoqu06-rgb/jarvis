@@ -20,7 +20,9 @@ position gagne) et la décision du moment :
   1. le prix a passé le stop → SORTIR ;
   2. résultats trimestriels avant la fin de la prochaine séance → SORTIR (pari binaire hors plan) ;
   3. augmentation de capital dans les actus → SORTIR ;
-  4. objectif en retard (3 cas passés sur 4 l'avaient touché) et position qui ne gagne pas → SORTIR ;
+  4. objectif en retard (heure passée à laquelle 3 sur 4 des cas qui l'ont touché l'avaient fait, soit
+     reached_by_p75 de tous les cas) et position qui ne gagne pas → SORTIR (le retard ne décide que si rien de
+     mesurable ne dit de garder : la mesure « garder jusqu'au prochain objectif » est retirée, voir plus bas) ;
   5. signe de retournement sur une position gagnante → ALLÉGER (la moitié tout de suite) ;
   6. gap de nuit plus grand que la distance au stop dans au moins 10 % des nuits passées → ALLÉGER (la moitié
      avant la nuit) ;
@@ -245,10 +247,25 @@ def note_line(m: dict | None) -> str:
             "elle ne prédit rien.")
 
 
+def _judged(it: dict) -> dict | None:
+    """Les mesures qui jugent une stratégie, comme le tableau du labo : une stratégie choisie après avoir lu des
+    jours (Killmode, n° 4, n° 11 : « jours_vus_jusqu_au ») n'est jugée que sur les jours suivants (None tant qu'il
+    n'y en a pas) ; les autres, sur tous leurs jours."""
+    return it.get("jours_suivants") if "jours_vus_jusqu_au" in it else it
+
+
+def _proven(it: dict) -> bool:
+    """✅ de `!strategies` : candidate_compte (n° 10), ou candidate seule dans un tableau d'avant la n° 10."""
+    return bool(it.get("candidate_compte", it.get("candidate")))
+
+
 def lab_entries(market: str, path: str | None = None) -> dict | None:
     """Pour chaque type d'entrée (repli, cassure), la version la plus favorable parmi les stratégies proches que le
     labo v2 a mesurées sur ce marché (tableau en cache, lecture seule, sans le bloc scellé) : une version prouvée
-    s'il y en a une, sinon celle qui bat le plus son témoin aléatoire. None sans base ou sans tableau."""
+    s'il y en a une, sinon celle qui bat le plus son témoin aléatoire. Lue comme `!strategies` : prouvée (✅) si
+    elle est aussi positive à la mise de Simão (candidate_compte, n° 10 ; « candidate » seule : avantage, perd à
+    20 €), seuil en t des jours de la stratégie (seuil_t, n° 8), jours suivants (_judged). None sans base ou sans
+    tableau."""
     from app.lab import db as lab_db  # import tardif : le labo importe le moteur de plans
     from app.lab import strat_stats as STRAT
 
@@ -264,13 +281,18 @@ def lab_entries(market: str, path: str | None = None) -> dict | None:
     items = (rep.get("strategies") or {}).get(market) or {}
     out: dict = {"seuil": (rep.get("declaration") or {}).get("z_candidate")}
     for kind, names in LAB_KIN.items():
-        found = [it for name, it in items.items() if name in names and (it.get("temoin") or {}).get("z") is not None]
+        found = []
+        for name, it in items.items():
+            j = _judged(it) if name in names else None
+            if j and (j.get("temoin") or {}).get("z") is not None:
+                found.append(j)
         if not found:
             continue
-        best = max(found, key=lambda it: (bool(it.get("candidate")), it["temoin"]["z"]))
+        best = max(found, key=lambda it: (_proven(it), bool(it.get("candidate")), it["temoin"]["z"]))
         ci = best.get("ic95_ibkr") or best.get("ic95")
         out[kind] = {"versions": len(found), "nom": best["nom"], "z": best["temoin"]["z"], "jours": best.get("jours"),
-                     "prouvee": bool(best.get("candidate")), "perd": bool(ci and ci[1] < 0)}
+                     "prouvee": _proven(best), "avantage": bool(best.get("candidate")), "seuil": best.get("seuil_t"),
+                     "perd": bool(ci and ci[1] < 0)}
     return out
 
 
@@ -293,12 +315,16 @@ def entries_note(lab: dict | None, kinds: set[str], market: str, adds: bool = Fa
         if k["prouvee"]:
             parts.append(f"{KIND_FR[kind]} : « {k['nom']} » est prouvée ✅")
             continue
+        if k.get("avantage"):  # n° 10 : bat le hasard, mais pas à la mise de Simão
+            parts.append(f"{KIND_FR[kind]} : « {k['nom']} » bat le hasard mais perd à 20 € ☑️")
+            continue
+        seuil = k.get("seuil") or lab.get("seuil")
         if k["z"] <= -2:
             verdict = "pire que le hasard"
         elif k["z"] < 2:
             verdict = "pas mieux que le hasard"
         else:
-            verdict = "mieux que le hasard, sans preuve" + (f" (il faut z {lab['seuil']:g})" if lab.get("seuil") else "")
+            verdict = "mieux que le hasard, sans preuve" + (f" (il faut z {seuil:g})" if seuil else "")
         best = f"meilleure des {k['versions']} versions testées" if k["versions"] > 1 else "version testée"
         parts.append(f"{KIND_FR[kind]} : {verdict}{', et perd après frais' if k['perd'] else ''} "
                      f"({best}, z {k['z']:+.1f})")
