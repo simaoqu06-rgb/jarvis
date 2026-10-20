@@ -30,6 +30,7 @@ from app.lab import morning as lab_morning
 from app.lab import page as lab_page
 from app.lab import stats as lab_stats
 from app.lab import potentiel as lab_potentiel
+from app.lab import audit as lab_audit
 from app.lab import autopsie as lab_autopsie
 from app.lab import rates as lab_rates
 from app.lab import filtres as lab_filtres
@@ -732,6 +733,21 @@ def lab_strategies_get():
         return lab_strategies.cached(conn) or lab_strategies.report(conn)
     finally:
         conn.close()
+
+
+@app.get("/api/lab/strategies/audit", dependencies=[Depends(lab_key)])
+def lab_strategies_audit_get():
+    """2e tour d'avis (C2) : audit de la déclaration en vigueur, lignes archivées avant réécriture (data/archives/) appariées aux
+    lignes refaites, nouveau − ancien par stratégie, IC en grappes. Pour audit, jamais pour décider. Cache du worker,
+    sinon calcul direct ; 404 sans archive."""
+    conn = _lab_conn()
+    try:
+        data = lab_audit.cached(conn) or lab_audit.report(conn, uri=True)
+    finally:
+        conn.close()
+    if data is None:
+        raise HTTPException(404, "Pas d'archive d'audit (aucune ligne d'une ancienne déclaration à garder)")
+    return data
 
 
 @app.get("/api/lab/autopsie", dependencies=[Depends(lab_key)])

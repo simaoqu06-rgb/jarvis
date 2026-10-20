@@ -35,7 +35,7 @@ RISK_PCT = env_float("JARVIS_RISK_PCT", 3.0)  # EmperorBTC : 3 % du capital par 
 
 # Bougies utilisées pour le plan et l'estimation des délais, par marché.
 #   crypto : bougies d'1 h sur 30 jours (limite Kraken : 720), horizon 24 h
-#   action : bougies de 15 min sur ~190 séances, horizon 2 séances (26 h de cotation)
+#   action : bougies de 15 min sur ~190 séances, horizon 52 bougies (13 h de cotation, 2 séances)
 SETTINGS = {
     "crypto": {"interval": 60, "horizon_bars": 24, "label": "Kraken"},
     "stock": {"interval": 15, "horizon_bars": 52, "label": "Twelve Data"},
@@ -327,12 +327,14 @@ async def build_plan(
     symbol: str, market: str, side: str = "long", entry: float | None = None,
     stop: float | None = None, targets: list[float] | None = None, now: datetime | None = None,
     capital: float | None = None, risk_pct: float | None = None, source: str | None = None,
-    cat: dict | None = None,
+    cat: dict | None = None, methode: bool = True,
 ) -> dict:
     """Plan complet : niveaux, délais rejoués, checklist, catalyseur et note composite.
 
     Lit les bougies (et le catalyseur pour une action) puis confie le calcul à plan_from_bars.
     `cat` : catalyseur déjà lu (le scanner l'a en main) pour ne pas rappeler Finnhub.
+    `methode` False : pas de filtre de la méthode championne (`!prends … go` : le GO confirmé a déjà été gardé par
+    le champion au scanner, et le plan recalculé au déclenchement ne doit pas lui retirer la taille proposée).
     """
     symbol, market, side = symbol.strip().upper(), _market(market), side.lower()
     now = now or datetime.now(timezone.utc)
@@ -352,7 +354,12 @@ async def build_plan(
     from app.lab import lessons as LESSONS  # import tardif : le labo importe ce module
 
     await LESSONS.apply(plan, daily, cat, now)
-    apply_grade(plan, capital, risk_pct, now, usd_per_eur=await usd_per_eur())
+    # Filtre de la méthode championne du labo, comme au scanner : le grade est mesuré sur les trades qu'elle garde,
+    # un plan qu'elle écarte ne reçoit pas son risque (apply_grade). None : aucune règle sur ce marché.
+    from app.lab import live as LIVE  # import tardif : le labo importe ce module
+
+    methode = await LIVE.plan_verdict(plan, daily, now) if methode else None
+    apply_grade(plan, capital, risk_pct, now, usd_per_eur=await usd_per_eur(), methode=methode)
     return plan
 
 
@@ -381,13 +388,14 @@ def recommended_eur(pct: float | None, capital: float | None = None) -> float | 
 def euro_sizing(entry: float, stop: float, market: str, risk_eur: float, usd_per_eur: float,
                 capital: float | None = None) -> dict | None:
     """Taille pour `risk_eur` € de risque au change `usd_per_eur` (gardé dans la taille) : actions en nombre entier
-    (0 quand une seule action dépasse ce risque : pas d'ordre), crypto en quantité fractionnaire. La taille découle
-    du stop, le levier de la taille."""
+    (0 quand une seule action dépasse ce risque : pas d'ordre), crypto en quantité fractionnaire arrondie vers le bas
+    à 6 décimales (jamais plus de risque que prévu). La taille découle du stop, le levier de la taille."""
     unit = abs(entry - stop)
     if not unit or risk_eur <= 0:
         return None
     risk_usd = risk_eur * usd_per_eur
-    quantity = math.floor(risk_usd / unit + 1e-9) if market == "stock" else round(risk_usd / unit, 6)
+    quantity = (math.floor(risk_usd / unit + 1e-9) if market == "stock"
+                else math.floor(risk_usd / unit * 1e6 + 1e-9) / 1e6)
     notional = quantity * entry
     return {"capital": capital, "risk_pct": round(risk_eur / capital * 100, 3) if capital else None,
             "risk_amount_eur": round(risk_eur, 2), "risk_amount": round(risk_usd, 2), "eurusd": usd_per_eur,
@@ -409,13 +417,15 @@ async def usd_per_eur() -> float:
 
 
 def apply_grade(plan: dict, capital: float | None, risk_pct: float | None, now: datetime,
-                trades: list[dict] | None = None, usd_per_eur: float | None = None) -> None:
+                trades: list[dict] | None = None, usd_per_eur: float | None = None, methode: dict | None = None) -> None:
     """Grade de JARVIS et taille du plan, une seule règle : risque en € = min(capital × % proposé, JARVIS_RISK_EUR)
     (JARVIS_RISK_EUR sans capital connu), au change `usd_per_eur` (1,15 par défaut). Le grade propose 0 % (F, E,
     non noté, périmé, illisible) : JARVIS ne propose pas de taille (`sizing` None) et la règle de Simão est à part
-    (`sizing_regle`, hors grade). Un risque demandé explicitement remplace le % du grade (même plafond en euros),
-    marqué hors budget s'il engage plus d'euros que ce que propose JARVIS (arrêt de la journée compris). Jamais
-    d'exception : un grade illisible vaut 0 % (fail-closed)."""
+    (`sizing_regle`, hors grade). `methode` : verdict de la méthode championne (live.plan_verdict) ; un plan
+    qu'elle écarte est hors de la population que mesure le grade : 0 % proposé, « écarté par la méthode vN ».
+    Un risque demandé explicitement remplace le % du grade (même plafond en euros), marqué hors budget s'il engage
+    plus d'euros que ce que propose JARVIS (arrêt de la journée compris). Jamais d'exception : un grade illisible
+    vaut 0 % (fail-closed)."""
     from app.lab import grade as GRADE  # import tardif : le labo importe ce module
     from app.trading import killmode as K  # import tardif : killmode importe ce module
 
@@ -424,6 +434,13 @@ def apply_grade(plan: dict, capital: float | None, risk_pct: float | None, now: 
     except Exception as exc:
         log.warning("Grade du labo illisible (%s: %s) : risque proposé 0 %%", type(exc).__name__, exc)
         g = GRADE.unreadable(exc)
+    if methode is not None:
+        plan["methode"] = methode
+    if methode and not methode.get("garde", True):
+        names = ", ".join(f"« {n} »" for n in methode.get("regles") or []) or "?"
+        rule = "règles" if len(methode.get("regles") or []) > 1 else "règle"
+        g = g | {"risque_propose": 0.0, "observation": True, "ecarte": True,
+                 "raison": f"écarté par la méthode {methode.get('version') or '?'} ({rule} {names})"}
     plan["grade"] = g
     cap = capital if capital is not None else (env_float("JARVIS_CAPITAL", 0.0) or None)
     rate = usd_per_eur or K.EURUSD_DEFAULT
@@ -516,12 +533,22 @@ def _amount(x: float, digits: int = 2) -> str:
     return f"{x:.{digits}f}".replace(".", ",")
 
 
+def crypto_qty(q: float) -> str:
+    """Quantité crypto en clair, sans notation scientifique ni arrondi vers le haut : au plus 6 chiffres significatifs
+    (tronqués), jamais moins que la partie entière, espaces comme les montants (« 37 096 774 », « 0.023 »)."""
+    if q <= 0:
+        return "0"
+    digits = max(0, min(6, 5 - math.floor(math.log10(q))))  # décimales gardées
+    text = f"{math.floor(q * 10 ** digits + 1e-9) / 10 ** digits:,.{digits}f}".replace(",", " ")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
 def _quantity(p: dict, s: dict) -> str:
     """Taille en clair : actions entières (« pas d'ordre » quand une seule action dépasse le risque), crypto en
     quantité."""
     q = s["quantity"]
     if p.get("market") != "stock":
-        return f"taille {q:g} pour {_num(s['notional'])} $" + (
+        return f"taille {crypto_qty(q)} pour {_num(s['notional'])} $" + (
             f" · levier {s['leverage']:g}×" if (s.get("leverage") or 1) > 1 else "")
     if q < 1:
         return (f"pas d'ordre, 1 action = {_amount(s['unit_risk_eur'])} € de risque, au-delà de "
@@ -538,6 +565,8 @@ def sizing_lines(p: dict) -> list[str]:
         if s.get("hors_grade"):
             line += " · taille du KILL, hors grade" + (
                 f", au-delà de {_amount(rule_eur())} € (une action au moins)" if s.get("hors_budget") else "")
+        elif (p.get("grade") or {}).get("hors_budget"):  # risk_pct explicite au-delà de ce que propose JARVIS
+            line += " · risque demandé, hors budget"
         return [line]
     if s:  # taille sans change (plan_from_bars seul : labo, anciens trades)
         return [f"💰 Risque {s['risk_pct']:g} % = {s['risk_amount']:g} · taille {s['quantity']:g} "
@@ -545,12 +574,12 @@ def sizing_lines(p: dict) -> list[str]:
     if rule:
         g = p.get("grade") or {}
         # La lettre seule quand c'est elle qui dit 0 % ; sinon la vraie raison (arrêt du jour, budget, grade périmé,
-        # illisible, fenêtre discontinue), qu'un « grade A : 0 % » cacherait.
-        by_letter = (not (g.get("risque_grade") or 0) > 0 and not g.get("perime")
+        # illisible, fenêtre discontinue, plan écarté par la méthode), qu'un « grade A : 0 % » cacherait.
+        by_letter = (not (g.get("risque_grade") or 0) > 0 and not g.get("perime") and not g.get("ecarte")
                      and not str(g.get("raison", "")).startswith(("grade illisible", "fenêtre discontinue")))
-        why = (f"grade {g.get('grade', 'non noté')} : 0 %" if by_letter or not g.get("raison")
-               else f"0 % : {g['raison']}")
-        return [f"💰 JARVIS ne propose pas de taille ({why}). "
+        why = (f" (grade {g.get('grade', 'non noté')} : 0 %)" if by_letter or not g.get("raison")
+               else f" : plan {g['raison']}" if g.get("ecarte") else f" (0 % : {g['raison']})")
+        return [f"💰 JARVIS ne propose pas de taille{why}. "
                 f"Ta règle de {_amount(rule['risk_amount_eur'])} € : {_quantity(p, rule)} (exception, hors avis de "
                 "JARVIS)"]
     return []
@@ -914,6 +943,17 @@ def against_jarvis(p: dict) -> bool:
             and p.get("policy") != "go_confirme")
 
 
+def at_rule(t: dict) -> bool:
+    """Trade pris à ta taille quand JARVIS proposait 0 % : ta règle de 20 € sous un grade à 0 % (pas de taille de
+    JARVIS, `sizing_regle` à part) ou un risque demandé alors qu'il ne proposait rien (grade.hors_budget avec un
+    risque proposé nul). C'est le pari « 20 € quand JARVIS propose 0 % », mesuré par `!desaccords` à part de la
+    note : un GO pris sous un grade F est d'accord avec la note, pas avec la taille. Un risque demandé au-delà d'un
+    risque proposé > 0 n'en est pas : JARVIS proposait de prendre le trade, seulement moins gros."""
+    g = t.get("grade") or {}
+    return bool((t.get("sizing") is None and t.get("sizing_regle"))
+                or (g.get("hors_budget") and not (g.get("risque_propose") or 0) > 0))
+
+
 def disagreement_text(p: dict) -> str:
     """Le désaccord dit franchement, avant le plan, quand Simão prend un trade noté NO GO."""
     reasons = p["score"]["reasons"] or ["note composite trop basse"]
@@ -1039,13 +1079,20 @@ def _exit_day(t: dict) -> str:
 def disagreements(book: Book, slopes: dict | None = None) -> dict:
     """Trades pris avec et contre l'avis de JARVIS : nombre, réussite et gain moyen des trades terminés, en R nets
     de frais estimés (et bruts), avec erreur type et IC à 95 % en grappes par jour de sortie (stats.mean_ci).
-    `slopes` : pente de la note au labo par marché (note_slopes), qui conditionne « JARVIS a raison »."""
+    Deux désaccords séparés : la note (« avec » : GO, « contre » : NO GO pris) et la taille (« regle » : à ta règle
+    ou à ton risque quand JARVIS proposait 0 %, at_rule ; un trade peut être dans « avec » et « regle »,
+    `avec.regle` les compte). `slopes` : pente de la note au labo par marché (note_slopes), qui conditionne
+    « JARVIS a raison »."""
     from app.lab import stats as LS  # import tardif : le labo importe ce module
 
-    groups = {"avec": [], "contre": []}
+    groups = {"avec": [], "contre": [], "regle": []}
     for t in book.trades:
-        if t.get("score") and not t.get("killmode"):
+        if t.get("killmode"):
+            continue  # un KILL pris : mesuré par le journal de Killmode
+        if t.get("score"):
             groups["contre" if against_jarvis(t) else "avec"].append(t)
+        if at_rule(t):
+            groups["regle"].append(t)
     out: dict = {}
     for name, trades in groups.items():
         done = [(t, r, realized_r_net(t)) for t, r in ((t, realized_r(t)) for t in trades) if r is not None]
@@ -1062,6 +1109,8 @@ def disagreements(book: Book, slopes: dict | None = None) -> dict:
                      "avg_r_brut": round(sum(r for _, r, _ in done) / len(done), 4) if done else None,
                      "sum_r_brut": round(sum(r for _, r, _ in done), 2),
                      "marches": sorted({t.get("market", "stock") for t, _, _ in done})}
+        if name in ("avec", "contre"):
+            out[name]["regle"] = sum(at_rule(t) for t in trades)  # dont pris à ta taille, hors avis de JARVIS
     out["pente_note"] = dict(slopes or {})
     return out
 
@@ -1081,14 +1130,19 @@ def disagreements_text(st: dict) -> str:
     lines = ["**Désaccords : toi contre JARVIS** (R nets de frais estimés, bruts entre parenthèses ; sorties au prix "
              "suivi, ou au tien avec `!sortie`)",
              f"-# Politique mesurée : {suivi_politique()}."]
-    for name, label in (("avec", "Plans GO (JARVIS d'accord)"), ("contre", "Plans NO GO pris quand même")):
-        g = st[name]
+    groups = (("avec", "Plans GO (JARVIS d'accord sur la note)"), ("contre", "Plans NO GO pris quand même"),
+              ("regle", "Taille à ta règle, hors avis de JARVIS (il proposait 0 %)"))
+    for name, label in groups:
+        g = st.get(name)
+        if g is None:  # tableau d'avant le groupe « regle »
+            continue
+        rule = (f" ; dont {g['regle']} à ta règle de taille" if g.get("regle") else "")
         if not g["closed"]:
-            lines.append(f"{label} : {g['total']} trade(s), aucun terminé.")
+            lines.append(f"{label} : {g['total']} trade(s), aucun terminé{rule}.")
             continue
         lines.append(f"{label} : {g['closed']} terminé(s) sur {g['days']} jour(s), {g['wins']} gagnant(s), "
                      f"{g['avg_r']:+.2f} R en moyenne ({g['avg_r_brut']:+.2f} brut), {g['sum_r']:+.2f} R au total"
-                     + (f" ({g['open']} en cours)" if g["open"] else ""))
+                     + (f" ({g['open']} en cours)" if g["open"] else "") + rule)
     a, c = st["avec"], st["contre"]
     slopes = st.get("pente_note") or {}
     markets = sorted(set(a.get("marches") or []) | set(c.get("marches") or []))
@@ -1144,6 +1198,22 @@ def disagreements_text(st: dict) -> str:
         else:
             lines.append(q2 + f"Pas de réponse : {mean} ({c['closed']} trades, {c['days']} jours"
                          + ("" if enough(c) else f" ; il en faut {LS.MIN_TRADES} sur {LS.DEGRADE_MIN_DAYS}") + ").")
+    r = st.get("regle")
+    q3 = "**3. Ta taille quand JARVIS n'en propose pas ?** "
+    if r is not None and not r["closed"]:
+        lines.append(q3 + "Pas de réponse : aucun trade à ta règle terminé" + (f" ({r['total']} en cours)."
+                                                                               if r["total"] else "."))
+    elif r is not None:
+        mean = f"{r['avg_r']:+.2f} R par trade, {_ci_text(r['ci'])}"
+        sure = enough(r) and r["ci"] is not None
+        if sure and r["ci"][0] > 0:
+            lines.append(q3 + f"➡️ **Tu as raison pour l'instant** : tes trades pris à ta règle rapportent ({mean}).")
+        elif sure and r["ci"][1] < 0:
+            lines.append(q3 + f"➡️ **JARVIS avait raison de ne proposer aucun risque** : tes trades pris à ta règle "
+                         f"perdent ({mean}).")
+        else:
+            lines.append(q3 + f"Pas de réponse : {mean} ({r['closed']} trades, {r['days']} jours"
+                         + ("" if enough(r) else f" ; il en faut {LS.MIN_TRADES} sur {LS.DEGRADE_MIN_DAYS}") + ").")
     lines.append("-# Les frais touchent les deux groupes presque autant : ils baissent les moyennes mais changent peu "
                  "l'écart.")
     return "\n".join(lines)

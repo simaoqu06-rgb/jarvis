@@ -133,13 +133,17 @@ def render(st: dict, proposals: list[dict], rules: list[dict], morning: dict | N
         n, last = cmp["jours"], ch["regards"][-1]
         nxt = f'prochain regard à {ch["prochain_regard"]} jours' if ch.get("prochain_regard") else "regards faits"
         rows = "".join(f'<li>{_e(r["nom"])} : <span class="muted">{_e(r["regle"])}</span></li>' for r in ch["regles"])
+        seuil = ch.get("seuil_texte") or f'seuil z {M.num_fr(ch["seuil_z"])}'
+        # Étiquette absolue (M.absolute_label) : un écart relatif positif ne dit pas que la méthode gagne.
+        label = ch.get("etiquette")
         block += (f'<div><b>Challenger : {_e(ch["version"])}</b> <span class="small muted">depuis {_e(ch["depuis"])}</span>'
                   f'<div class="bar"><span style="width:{min(100, 100 * n / max(1, last))}%"></span></div>'
                   f'<div class="small">{n} jours de trades en direct ({nxt}) · écart {_r(cmp["delta_r"])} par trade, '
-                  f'z {_e(M.num_fr(cmp["z"]))} (seuil {_e(M.num_fr(ch["seuil_z"]))}) · {_r(cmp["challenger"]["esperance_r"])} '
+                  f'z {_e(M.num_fr(cmp["z"]))}, {_e(seuil)} · {_r(cmp["challenger"]["esperance_r"])} '
                   f'sur {cmp["challenger"]["declenches"]} trades contre {_r(cmp["champion"]["esperance_r"])} pour '
                   f'{_e(champ.get("version"))} · potentiel +10 {cmp["challenger"]["capture"]} contre '
                   f'{cmp["champion"]["capture"]}</div>'
+                  + (f'<div class="small"><b>{_e(label[0].upper() + label[1:])}.</b></div>' if label else "")
                   + ('<div class="small"><b>Promotion proposée à Simão</b>, en attente de sa réponse</div>'
                      if ch.get("promotion") else "")
                   + f'<ul class="small">{rows}</ul></div>')
@@ -166,7 +170,7 @@ def render(st: dict, proposals: list[dict], rules: list[dict], morning: dict | N
                        f'<td>{_r(m.get("amelioration_moyenne_r"))}</td><td class="small muted">'
                        f'{_e((r.get("testee_le") or r.get("soumise_le") or "")[:10])}</td></tr>')
         parts.append(f'<div class="card"><h2>Règles testées</h2><table><tr><th>Règle</th><th>Verdict</th>'
-                     f'<th>Gain / trade</th><th>Le</th></tr>{"".join(trs)}</table></div>')
+                     f'<th>Écart / trade (relatif)</th><th>Le</th></tr>{"".join(trs)}</table></div>')
     if morning:
         parts.append(f'<div class="card"><h2>Message du matin · {_e(morning["jour"])}</h2><div class="small muted">'
                      f'{_e(MO.ETATS.get(morning.get("etat"), morning.get("etat")))}</div>'

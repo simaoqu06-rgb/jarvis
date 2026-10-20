@@ -464,3 +464,64 @@ def test_desaccords_egalite_ne_va_pas_a_jarvis():
     text = S.disagreements_text(st)
     assert st["avec"]["avg_r"] == pytest.approx(st["contre"]["avg_r"])
     assert "Pas de verdict : écart" in text and "JARVIS a raison" not in text and "tu as raison" not in text
+
+
+RULE = {"sizing": None, "sizing_regle": {"risk_amount_eur": 20.0, "eurusd": 1.15, "quantity": 11, "risk_amount": 23.0,
+                                         "hors_grade": True}, "grade": {"grade": "F", "risque_propose": 0.0}}
+
+
+def closed_with(book, go: bool, outcome: str, day: int, **over):
+    tr = book.add(scored(go, **over))
+    S.apply_bars(tr, [bar(*ohlc, t=T0 + day * DAY + 60 * i) for i, ohlc in enumerate(OUTCOMES[outcome])], NOW)
+    return tr
+
+
+def test_desaccords_taille_a_ta_regle_quand_jarvis_propose_0():
+    """Le pari « 20 € quand JARVIS propose 0 % » est mesuré à part : un GO pris sous un grade F est d'accord avec la
+    note, pas avec la taille ; un risque demandé alors que JARVIS ne propose rien (hors budget à 0 %) aussi. Un
+    risque demandé au-delà d'un risque proposé > 0 n'en est pas : la question 3 juge « quand JARVIS n'en propose
+    pas »."""
+    book = S.Book(None)
+    closed_with(book, True, "tp", 0, **RULE)                      # GO sous grade F, à ta règle
+    closed_with(book, True, "tp", 1)                              # GO à la taille de JARVIS
+    closed_with(book, False, "stop", 2, **RULE)                   # NO GO à ta règle
+    closed_with(book, True, "be", 3, grade={"grade": "D", "risque_propose": 0.25, "hors_budget": True})
+    closed_with(book, True, "be", 4, grade={"grade": "F", "risque_propose": 0.0, "hors_budget": True})
+    book.add(scored(True, killmode=True, **RULE))                 # KILL : mesuré par son journal, pas ici
+    assert S.at_rule(book.trades[0]) and not S.at_rule(book.trades[1]) and not S.at_rule(book.trades[3])
+    assert S.at_rule(book.trades[4])
+    st = S.disagreements(book, {"stock": 0.05})
+    assert st["regle"]["total"] == 3 and st["regle"]["closed"] == 3 and st["regle"]["avg_r_brut"] == pytest.approx(2 / 3, abs=1e-3)
+    assert st["avec"]["total"] == 4 and st["avec"]["regle"] == 2 and st["contre"]["regle"] == 1
+    text = S.disagreements_text(st)
+    assert "Plans GO (JARVIS d'accord sur la note) : 4 terminé(s)" in text and "; dont 2 à ta règle de taille" in text
+    assert "Taille à ta règle, hors avis de JARVIS (il proposait 0 %) : 3 terminé(s) sur 3 jour(s)" in text
+    assert "**3. Ta taille quand JARVIS n'en propose pas ?** Pas de réponse :" in text and "il en faut 30 sur 20" in text
+
+
+def test_grade_trades_reels_comptent_ceux_a_ta_regle():
+    """Populations de `!grade` : les trades réels pris à ta règle de taille sont comptés à part, avec leur R net."""
+    from app.lab import grade as GRADE
+
+    book = S.Book(None)
+    closed_with(book, True, "tp", 0, **RULE)
+    closed_with(book, True, "stop", 1)
+    real = GRADE.reels(book.trades)
+    assert real["stock"]["termines"] == 2 and real["stock"]["regle"] == 1 and real["stock"]["regle_net_r"] > 0
+    text = GRADE.populations_text([], real)
+    assert "· dont 1 à ta règle de taille (+" in text and "détail dans `!desaccords`" in text
+    assert "à ta règle" not in GRADE.populations_text([], {"stock": real["stock"] | {"regle": 0}})
+
+
+def test_desaccords_taille_a_ta_regle_verdicts():
+    book = S.Book(None)
+    for i in range(30):
+        closed_with(book, True, "stop", i, **RULE)
+    text = S.disagreements_text(S.disagreements(book, {"stock": 0.05}))
+    assert "➡️ **JARVIS avait raison de ne proposer aucun risque** : tes trades pris à ta règle perdent" in text
+    book = S.Book(None)
+    for i in range(30):
+        closed_with(book, True, "tp" if i % 3 else "be", i, **RULE)
+    text = S.disagreements_text(S.disagreements(book, {"stock": 0.05}))
+    assert "➡️ **Tu as raison pour l'instant** : tes trades pris à ta règle rapportent" in text
+    assert "Pas de réponse : aucun trade à ta règle terminé." in S.disagreements_text(S.disagreements(S.Book(None)))

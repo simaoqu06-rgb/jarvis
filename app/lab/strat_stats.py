@@ -70,9 +70,14 @@ Déclaration n° 10 (mesures corrigées, aucun essai de plus) :
 - Crypto : grappes par semaine ISO (Mean `key`, les positions de 24 h se chevauchent d'un jour à l'autre ; G =
   semaines dans candidate_t), le se naïf par jour publié à côté avec le facteur d'inflation. Actions : la même
   lecture en grappes par semaine, affichée (« semaines »), sans effet sur le verdict.
-- Témoin des actions à la même heure ; effet de l'heure (écart au témoin de la journée − écart au témoin de la
-  même heure) et dispersion entre tirages (écart-type des moyennes par tirage) : descriptifs.
+- Témoin des actions à la même heure ; écart à l'ancien témoin (témoin de la même heure − témoin de la journée :
+  l'heure, plus les achats d'avant l'exécution du témoin de la journée ; « effet de l'heure » jusqu'au deuxième tour d'avis) et
+  dispersion entre tirages (écart-type des moyennes par tirage) : descriptifs.
 - se de l'espérance exposé (Mean.result, se_ibkr de _item) pour l'écart labo/direct de Killmode.
+- 2e tour d'avis (C7) : ✅ réservé à une candidate absolue (candidate_compte) ; un bras meilleur qu'un autre (confirmation,
+  filtre, sorties de Gemini, catalyseur) dit « ↗ aide (relatif) », et ce que le bras amélioré perd encore à 20 €
+  quand il ne gagne pas ; lignes déclenchées sans témoin comptées (sans_temoin : hors de l'écart, dans l'espérance) ;
+  note fixe sous rebond_confirme (NOTES).
 - Entrée de v1 (entree_v1_appariee) : « limite ou rien » contre l'achat à l'ouverture, sur les GO (go_brut ramené
   au risque prévu) et sur tous les plans (r_ouverture) ; descriptif.
 """
@@ -283,8 +288,8 @@ def _acc(market: str | None = None) -> dict:
             "commission": mean(), "frais": defaultdict(mean), "funding": defaultdict(mean), "oi": defaultdict(mean),
             "ecarts": defaultdict(mean), "vwap": defaultdict(mean), "robuste": defaultdict(mean),
             "tranches": defaultdict(lambda: defaultdict(mean)), "ecart_journee": mean(), "effet_heure": mean(),
-            "tirages": defaultdict(lambda: [0.0, 0]), "oi7": defaultdict(mean), "va": defaultdict(mean),
-            "structure": [0, 0], "couts20": defaultdict(mean)}
+            "tirages": defaultdict(lambda: [0.0, 0]), "sans_temoin": 0, "oi7": defaultdict(mean),
+            "va": defaultdict(mean), "structure": [0, 0], "couts20": defaultdict(mean)}
 
 
 def _feed(a: dict, r: dict) -> None:
@@ -327,6 +332,8 @@ def _feed(a: dict, r: dict) -> None:
     if r["ecart_temoin"] is not None:
         a["temoin"].add(day, r["temoin"])
         a["ecart"].add(day, r["ecart_temoin"])
+    else:  # 2e tour d'avis (C7) : go_brut ouvert au-dessus du TP1 (NO_WITNESS) : hors de l'écart, dans l'espérance
+        a["sans_temoin"] += 1
     if r.get("journee") is not None:  # n° 10, actions : témoin de la journée (d'avant), et l'effet de l'heure
         x = values[r["refc"]]
         a["ecart_journee"].add(day, x - r["journee"] if x is not None else None)
@@ -404,7 +411,7 @@ def _item(market: str, name: str, a: dict, trials: int) -> dict:
                    "ic95": ecart["ic95"], "z": ecart["z"], "n": ecart["n"],
                    "journee": a["ecart_journee"].result() if market == "stock" else None,  # n° 10, descriptifs
                    "effet_heure": a["effet_heure"].result() if market == "stock" else None,
-                   "dispersion_tirages": _spread(a["tirages"])},
+                   "dispersion_tirages": _spread(a["tirages"]), "sans_temoin": a["sans_temoin"]},
         "regimes": {k: v.result() for k, v in sorted(a["regimes"].items())},
         "echantillon_faible": n < MIN_N,
         "se": main["se"], "se_ibkr": ibkr["se"] if ibkr else None,  # n° 10 (L5)
@@ -739,22 +746,36 @@ def diagnostic_v1(conn: sqlite3.Connection) -> dict:
 
 def partial(conn: sqlite3.Connection) -> dict:
     """I2 : marchés en rattrapage d'une nouvelle déclaration, jours restants et lignes d'une autre déclaration (ou
-    d'avant le suivi, NULL) : tant que le rattrapage n'a pas refait tous les jours, elles sortent du tableau."""
+    d'avant le suivi, NULL) : tant qu'il en reste, elles sortent du tableau.
+
+    2e tour d'avis (C3) : l'exclusion ne dépend plus des jours restants. Avant, d'anciennes lignes au-delà du dernier journalier
+    (ou d'un jour que le rattrapage n'a pas pu refaire) revenaient dans le tableau dès que remaining() tombait à 0.
+    Un marché est « partiel » s'il reste des jours du REJEU à rattraper, ou d'anciennes lignes une fois la déclaration
+    en route (curseurs du rattrapage posés, ou lignes de la déclaration déjà écrites, ou jours encore dus). Un jour du
+    direct qui attend seulement son calcul (journalier de la séance suivante, puis rattrapage) n'est pas une révision
+    en cours : seul, il ne rend pas le tableau partiel ; il est compté dans les jours restants quand le marché l'est."""
     from app.lab import rattrapage as RAT  # import tardif : tire runner et generator
 
     out = {}
     for market in ("stock", "crypto"):
-        left = sum(RAT.remaining(conn, market).values())
-        if not left:
-            continue
         decl = ST.CRYPTO_DECLARATION if market == "crypto" else ST.DECLARATION
         try:
             old = conn.execute("SELECT COUNT(*) FROM strat_trades WHERE market = ? AND declaration IS NOT ?",
                                (market, decl)).fetchone()[0]
         except sqlite3.OperationalError:  # base pas encore migrée (lecture seule) : rien ne dit la déclaration
             continue
-        out[market] = {"declaration": decl, "jours_rattrapage": left, "lignes_exclues": old}
+        left = RAT.remaining(conn, market)
+        if not left["replay"] and not (old and (left["live"] or _started(conn, market, decl))):
+            continue
+        out[market] = {"declaration": decl, "jours_rattrapage": sum(left.values()), "lignes_exclues": old}
     return out
+
+
+def _started(conn: sqlite3.Connection, market: str, decl: int) -> bool:
+    """La déclaration du marché a commencé à écrire : curseurs du rattrapage ou frontière posés, ou lignes écrites."""
+    return bool(conn.execute("SELECT 1 FROM progress WHERE job = ? LIMIT 1", (ST.progress_job(market),)).fetchone()
+                or conn.execute("SELECT 1 FROM strat_trades WHERE market = ? AND declaration = ? LIMIT 1",
+                                (market, decl)).fetchone())
 
 
 @contextmanager
@@ -838,6 +859,24 @@ def entree_v1_appariee(conn: sqlite3.Connection) -> dict | None:
                                                          (*GAP_BUCKETS, (0, 0, "gap inconnu")) if k in by_gap}}}
 
 
+def revisions(conn: sqlite3.Connection) -> dict:
+    """2e tour d'avis (C6), descriptif : lignes lues par le tableau, par marché, selon la révision du code (code_rev) et celle du
+    modèle de coût (cout_rev) qui les ont produites ; « inconnue » : écrites avant la colonne. Plusieurs révisions ne
+    disent pas que les chiffres ont changé, seulement qu'il faut le vérifier (un rattrapage dure plusieurs jours, les
+    déploiements sont fréquents)."""
+    out: dict = {}
+    try:
+        rows = conn.execute("SELECT market, code_rev, cout_rev, COUNT(*) FROM strat_trades "
+                            "GROUP BY market, code_rev, cout_rev").fetchall()
+    except sqlite3.OperationalError:  # base pas encore migrée (lecture seule)
+        return out
+    for market, code, cost, n in rows:
+        m = out.setdefault(market, {"code": {}, "cout": {}})
+        for kind, rev in (("code", code), ("cout", cost)):
+            m[kind][rev or "inconnue"] = m[kind].get(rev or "inconnue", 0) + n
+    return out
+
+
 def report(conn: sqlite3.Connection) -> dict:
     # import tardif : kill_complet et plus10 importent ce module
     from app.lab import kill_complet as KC
@@ -850,7 +889,7 @@ def report(conn: sqlite3.Connection) -> dict:
                            "robustesse": ST.STRESS, "doc": "docs/labo-strategies.md", "politique": POLICY},
            "scelle": SEAL.describe(), "strategies": {}, "sorties_gemini": None, "killmode": None,
            "confirmation_go": None, "killmode_complet": None, "potentiel_plus10": None, "diagnostic_v1": {},
-           "entree_v1": None}
+           "entree_v1": None, "revisions": {}}
     try:  # base pas encore migrée par le worker (lecture seule) : tableau vide plutôt qu'une erreur
         # I2 : pendant un rattrapage, le tableau ne lit que les lignes de la déclaration en vigueur (declaration_view).
         out["partiel"] = partial(conn) or None
@@ -863,6 +902,7 @@ def report(conn: sqlite3.Connection) -> dict:
             out["potentiel_plus10"] = P10.report(conn, trials)
             out["diagnostic_v1"] = diagnostic_v1(conn)
             out["entree_v1"] = entree_v1_appariee(conn)  # n° 10 (L4)
+            out["revisions"] = revisions(conn)  # 2e tour d'avis (C6), descriptif
     except sqlite3.Error as exc:
         out["erreur"] = f"base pas encore prête : {exc}"
     return out
@@ -897,6 +937,9 @@ def cached(conn: sqlite3.Connection) -> dict | None:
 # --- Discord ---------------------------------------------------------------------------------
 
 MARKET_FR = {"stock": "Actions", "crypto": "Crypto"}
+# 2e tour d'avis (C7) : limites connues d'une stratégie, sous sa ligne (verif2/g_temoin.md : sous H0 en volatilité en U,
+# rebond_confirme bat son témoin de +0,013 R [+0,004 ; +0,023] ; le signal reste tel quel, la n° 11 ne le corrige pas).
+NOTES = {"rebond_confirme": "anticipation connue ≈ +0,01 R sous H0 (bougie ambiguë), correction à déclarer"}
 
 
 def _r(x) -> str:
@@ -954,11 +997,14 @@ def _kill_text(kill: dict) -> str:
 
 
 def _n10_text(it: dict) -> str:
-    """n° 10, descriptifs : effet de l'heure sur le témoin, dispersion entre tirages, lecture en semaines."""
+    """n° 10, descriptifs : écart à l'ancien témoin (clé effet_heure), dispersion entre tirages, lecture en semaines.
+    2e tour d'avis (C7) : « effet de l'heure » était mal nommé ; sous H0 il lit −0,04 à −0,15 R selon la stratégie, le témoin de
+    la journée achetant aussi avant l'exécution, en « sachant » que le prix atteindra le déclencheur."""
     wit, parts = it.get("temoin") or {}, []
     heure = wit.get("effet_heure") or {}
     if heure.get("n"):
-        parts.append(f"effet de l'heure {_r(heure['esperance_r'])} R (t {_z(heure['z'])})")
+        parts.append(f"écart à l'ancien témoin (heure + achats d'avant l'exécution) {_r(heure['esperance_r'])} R "
+                     f"(t {_z(heure['z'])})")
     spread = (wit.get("dispersion_tirages") or {}).get("ecart_type_r")
     if spread is not None:
         parts.append(f"tirages ±{_r(spread).lstrip('+')} R")
@@ -981,16 +1027,81 @@ def _entree_text(e: dict) -> str:
             f", {go['au_dessus_tp1']['paires']} ouverts au-dessus du TP1 à part)")
 
 
+def _revisions_text(market: str, revs: dict) -> str | None:
+    """2e tour d'avis (C6) : « N révisions du code / du coût » d'un marché, seulement quand il y en a plus d'une.
+    Relecture W4/W7 : les lignes sans révision du coût (écrites avant la colonne cout_rev, n° 10 de la PR #53, même
+    modèle de coût) ne comptent pas pour une révision ; elles sont dites à part, sans alerte."""
+    code, cost = revs.get("code") or {}, revs.get("cout") or {}
+    known = {rev: n for rev, n in cost.items() if rev != "inconnue"}
+    unknown = cost.get("inconnue", 0)
+    mk = MARKET_FR.get(market, market).lower()
+
+    def detail(d: dict) -> str:
+        return ", ".join(f"{rev} {n:,}".replace(",", " ") for rev, n in sorted(d.items(), key=lambda kv: -kv[1]))
+
+    before = f"{unknown:,}".replace(",", " ") + f" ligne{'s' if unknown > 1 else ''}"
+    if len(code) < 2 and len(known) < 2:
+        return f"ℹ️ {before} {mk} sans révision du coût (écrites avant son suivi)" if unknown else None
+    return (f"ℹ️ Lignes {mk} de {len(code)} révision{'s' if len(code) > 1 else ''} du code ({detail(code)})"
+            + (f" / {len(known)} du coût ({detail(known)})" if known else "")
+            + " : descriptif, à vérifier si les chiffres bougent"
+            + (f" · {before} sans révision du coût (écrites avant son suivi)" if unknown else ""))
+
+
+def _lost(arm_20e: float | None, approx: bool = False) -> str:
+    """2e tour d'avis (C7) : « perd encore X R à 20 € » d'un bras qui ne gagne pas à 20 € (`approx` : estimé, « ≈ »)."""
+    if arm_20e is None or arm_20e > 0:
+        return ""
+    return f"perd encore {'≈ ' if approx else ''}{_r(abs(arm_20e)).lstrip('+')} R à 20 €"
+
+
+def _relative(helps: bool, arm_20e: float | None) -> str:
+    """2e tour d'avis (C7) : un bras meilleur qu'un autre n'est pas une candidate : « ↗ aide (relatif) », et ce que le bras
+    amélioré perd encore à 20 € quand il ne gagne pas."""
+    if not helps:
+        return ""
+    lost = _lost(arm_20e)
+    return ", ↗ aide (relatif)" + (f", {lost}" if lost else "")
+
+
+def _m20(it: dict | None) -> float | None:
+    """Espérance à 20 € d'une stratégie du tableau (mise_20e), None sans elle."""
+    return ((it or {}).get("mise_20e") or {}).get("esperance_r")
+
+
+def _arm(variant: str, arm: str) -> str | None:
+    """Nom de la stratégie d'un bras GO (n° 7 et 8)."""
+    return next((k for k, v in ST.STRATEGIES.items() if v.get("go") == variant and v.get("arm") == arm), None)
+
+
+def _no_witness(n: int | None) -> str:
+    """2e tour d'avis (C7) : lignes déclenchées sans témoin (go_brut ouvert au-dessus du TP1…), hors de l'écart au témoin."""
+    return f" · {n} ligne{'s' if n > 1 else ''} sans témoin (hors de l'écart)" if n else ""
+
+
+def _exit_losses(c: str, helped: dict) -> str:
+    """2e tour d'avis (C7) : stratégies qu'une sortie de Gemini améliore et qui perdent encore à 20 € avec elle ; estimé (≈) :
+    espérance à 20 € de la stratégie + écart moyen de la sortie, les deux sur ses trades déclenchés."""
+    out = []
+    for name, it in helped.items():
+        m20, gap = _m20(it), ((it.get("ecarts_sorties") or {}).get(c) or {}).get("esperance_r")
+        if m20 is not None and gap is not None and m20 + gap <= 0:
+            out.append(f"{name} {_lost(m20 + gap, approx=True)}")
+    return (", dont " + " ; ".join(out)) if out else ""
+
+
 def _t(res: dict) -> str:
     """« t x, seuil y » d'un écart jugé par _helps (n° 8, D4)."""
     return f"t {_z(res['z'])}, seuil {_z(res.get('seuil_t'))}"
 
 
-def _go_text(variant: str, res: dict) -> str:
-    """n° 7 : une ligne par stop, la confirmation contre le brut, GO par GO ; n° 8 : filtres FRSH et résultats."""
+def _go_text(variant: str, res: dict, items: dict | None = None) -> str:
+    """n° 7 : une ligne par stop, la confirmation contre le brut, GO par GO ; n° 8 : filtres FRSH et résultats.
+    `items` : stratégies actions du tableau (le bras amélioré à 20 €, 2e tour d'avis)."""
+    items = items or {}
     diff = res["ecart_par_go"]
     parts = [f"{res['go']} GO · confirmé ou rien − brut {_r(diff['esperance_r'])} R par GO ({_t(diff)}"
-             + (", ✅ la confirmation aide" if diff.get("aide") else "") + ")"]
+             + _relative(diff.get("aide"), _m20(items.get(_arm(variant, "confirme")))) + ")"]
     for label, g in res["par_statut"].items():
         part = f"{label}s {g['go']} : brut {_r(g['brut']['esperance_r'])} R"
         if g["confirme"] is not None:
@@ -999,7 +1110,7 @@ def _go_text(variant: str, res: dict) -> str:
     for filt, f in (res.get("filtres") or {}).items():
         c = f["ecart_au_confirme"]
         parts.append(f"{GO_FILTERS_FR.get(filt, filt)} : filtré − confirmé {_r(c['esperance_r'])} R par GO ({_t(c)}"
-                     + (", ✅ le filtre aide" if c.get("aide") else "") + f"), "
+                     + _relative(c.get("aide"), _m20(items.get(ST.GO_FILTERS.get(filt)))) + f"), "
                      f"{f['statuts'].get(GO_FILTER_STATUS_FR['filtre'], 0)} refusés")
     for label, g in (res.get("par_resultats") or {}).items():
         parts.append(f"{label} {g['go']} : brut {_r(g['brut']['esperance_r'])} R, confirmé "
@@ -1016,15 +1127,23 @@ def text(rep: dict | None) -> str:
              f"IBKR estimée · ✅ = IC au-dessus de 0, témoin battu à t ≥ seuil (loi de Student sur les jours, "
              f"{str(decl.get('z_candidate', 2)).replace('.', ',')} sur beaucoup de jours, plus haut sur peu), "
              f"robuste (glissement ×2 et ×3, retard, stress de 3 c en actions, deux moitiés des jours) et positive "
-             f"à 20 € en actions ; ☑️ = la même chose, mais perd à 20 € · crypto en grappes par semaine"]
+             f"à 20 € en actions ; ☑️ = la même chose, mais perd à 20 € · ↗ = aide par rapport à un autre bras "
+             f"(relatif, pas une candidate) · témoin non battu = pas d'avantage d'horaire après le signal ; ne dit "
+             f"rien du choix de l'action ou du jour · crypto en grappes par semaine"]
     if decl.get("politique"):
         lines.append(f"Politique mesurée : {decl['politique']}")
     for market, p in (rep.get("partiel") or {}).items():  # I2
         n, m = p["jours_rattrapage"], p["lignes_exclues"]
         old = (f"{m} ligne{'s' if m > 1 else ''} de l'ancienne déclaration exclue{'s' if m > 1 else ''}" if m
                else "aucune ligne d'une autre déclaration")
-        lines.append(f"⏳ Tableau partiel ({MARKET_FR.get(market, market).lower()}) : {n} jour{'s' if n > 1 else ''} en "
-                     f"rattrapage, {old} (n° {p['declaration']} seule en attendant)")
+        days = (f"{n} jour{'s' if n > 1 else ''} en rattrapage" if n
+                else "aucun jour en rattrapage")  # C3 : d'anciennes lignes sans jour à refaire restent exclues
+        lines.append(f"⏳ Tableau partiel ({MARKET_FR.get(market, market).lower()}) : {days}, {old} "
+                     f"(n° {p['declaration']} seule en attendant)")
+    for market, revs in (rep.get("revisions") or {}).items():  # 2e tour d'avis (C6), descriptif
+        line = _revisions_text(market, revs)
+        if line:
+            lines.append(line)
     for market, items in (rep.get("strategies") or {}).items():
         lines.append(f"**{MARKET_FR.get(market, market)}**")
         for name, it in items.items():
@@ -1042,17 +1161,22 @@ def text(rep: dict | None) -> str:
                          f"{it['jours']} j · réussite {round(100 * (it['reussite'] or 0))} % · frais "
                          f"{_r(-(it.get('frais_r') or 0)) if it.get('frais_r') is not None else 'n/d'} R{comm}{stake} · "
                          f"vs témoin {_r(wit.get('ecart_r'))} R (t {_z(wit.get('z'))}, seuil {_z(it.get('seuil_t'))})"
+                         + _no_witness(wit.get("sans_temoin"))
                          + _n10_text(it) + _n11_text(name, it) + (" · échantillon faible" if it.get("echantillon_faible") else "")
                          + _after_seen(it))
+            if name in NOTES:  # 2e tour d'avis (C7)
+                lines.append(f"   ↳ {NOTES[name]}")
     n6 = rep.get("sorties_gemini")
     if n6:
         names = {"r_vwap": "VWAP après 10 h 30", "r_1430": "time stop 14 h 30", "r_spy": "avalement de SPY"}
         stock = (rep.get("strategies") or {}).get("stock") or {}
         parts = []
         for c, res in n6["ecarts"].items():
-            helped = sum(bool(((it.get("ecarts_sorties") or {}).get(c) or {}).get("aide")) for it in stock.values())
+            helped = {name: it for name, it in stock.items()
+                      if (((it.get("ecarts_sorties") or {}).get(c) or {}).get("aide"))}
             parts.append(f"{names.get(c, c)} {_r(res['esperance_r'])} R (z {_z(res['z'])}"
-                         + (f", ✅ sur {helped} stratégie{'s' if helped > 1 else ''}" if helped else "") + ")")
+                         + (f", ↗ aide (relatif) sur {len(helped)} stratégie{'s' if len(helped) > 1 else ''}"
+                            + _exit_losses(c, helped) if helped else "") + ")")
         if parts:
             lines.append("Sorties de Gemini (n° 6), écart à la sortie v1, toutes stratégies actions : "
                          + " · ".join(parts))
@@ -1063,7 +1187,7 @@ def text(rep: dict | None) -> str:
     if kill:
         lines.append(_kill_text(kill))
     for variant, res in (rep.get("confirmation_go") or {}).items():
-        lines.append(_go_text(variant, res))
+        lines.append(_go_text(variant, res, (rep.get("strategies") or {}).get("stock")))
     if rep.get("killmode_complet"):
         from app.lab import kill_complet as KC  # import tardif
 

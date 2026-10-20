@@ -64,10 +64,11 @@ def test_a_la_taille_de_simao():
     assert r == 0.94 and r - r20 == pytest.approx(0.26, abs=0.01)  # 6 $ de commissions ≈ 0,26 R à 20 €
     stopped = [{"prix": 13.45, "raison": "stop"}] * 3
     assert C.at_size(13.81, 13.45, 13.81, stopped) == pytest.approx(-1.26)  # un stop coûte 1 R + 6 ordres
-    # Une action dépasse le budget (risque de 30 $) : un seul bracket sur TP2, deux ordres.
+    # Une action dépasse le budget (risque de 30 $) : le MP a dit « pas de taille », la mesure à 20 € ne force plus
+    # 1 action (avant : un seul bracket sur TP2, (60 − 2) / 30 R) ; compté à part (confirme_hors_mise).
     one = C.at_size(100.0, 70.0, 100.0, [{"prix": 130.0, "raison": "tp1"}, {"prix": 160.0, "raison": "tp2"},
                                          {"prix": 190.0, "raison": "tp3"}])
-    assert one == pytest.approx(round((60 - 2) / 30, 2))
+    assert one is None and C.over_stake(100.0, 70.0) and not C.over_stake(13.81, 13.45)
     assert C.at_size(13.81, 13.81, 13.81, exits) is None
 
 

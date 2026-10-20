@@ -8,7 +8,9 @@ bougies de 5 min en temps réel (Twelve Data ; Alpaca a 16 min de retard) :
 - confirmé : le prix est revenu vers l'entrée (plus bas ≤ entrée) puis une bougie 5 min, close après
   le premier quart d'heure, clôture au-dessus du VWAP de la séance → ordre stop d'achat 1 cent
   au-dessus de son plus haut, stop du plan, taille de la règle unique (risque du grade, JARVIS_RISK_EUR = 20 €
-  au plus ; ta règle de 20 €, dite hors avis de JARVIS, quand le grade ne propose rien) ;
+  au plus ; ta règle de 20 €, dite hors avis de JARVIS dans la ligne d'ordre même, quand le grade ne propose rien ;
+  aucune taille quand ce 0 % vient de l'arrêt de la journée ou du budget de risque ouvert plein, sauf
+  JARVIS_MP_TAILLE_APRES_ARRET=oui) ;
 - expiré : rien à 11 h 30 New York.
 
 Mesure, à la clôture : chaque GO est rejoué deux fois sur les bougies du jour, « brut » (acheté à
@@ -18,13 +20,15 @@ objectif et stop compte comme stop). Gains en R avant frais, gardés dans data/c
 lus par `!confirmations`. Rien ne change dans la note ni dans les plans. Deux colonnes de plus : la
 même gestion avec le stop remonté à l'entrée après TP2 (`_be2`, la règle du suivi de Simão, sans sa
 sortie libre dans le temps) et le confirmé à la taille de Simão (`confirme_r20` : actions entières pour
-JARVIS_RISK_EUR, un bracket IBKR par objectif, commission de chaque ordre). Chaque ligne garde aussi
+JARVIS_RISK_EUR, un bracket IBKR par objectif, commission de chaque ordre ; non compté, `confirme_hors_mise`,
+quand une seule action dépasse la mise : le MP a dit « pas de taille »). Chaque ligne garde aussi
 les indicateurs du scanner (`features`) et les sous-notes (`parts`) du GO.
 """
 from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from datetime import datetime, time, timedelta
 from pathlib import Path
@@ -42,6 +46,10 @@ LAST_CHECK = time(11, 30)          # heure de New York : au-delà, un GO non con
 TICK = 0.01
 
 PENDING = ("attente", "repli")
+# Choix par défaut (Simão tranchera) : après l'arrêt de la journée (−3 R) ou avec le budget de risque ouvert plein, les
+# MP automatiques (GO confirmé, potentiel +10) ne chiffrent pas de taille. « oui » : ta règle de 20 €, étiquetée, comme
+# pour les autres 0 % (F, E, périmé, illisible, discontinu, non noté). Revenir en arrière : cette seule variable.
+SIZE_AFTER_STOP = os.getenv("JARVIS_MP_TAILLE_APRES_ARRET", "non").strip().lower() in ("oui", "on", "1", "true")
 
 
 # --- État du jour -------------------------------------------------------------------------
@@ -141,30 +149,65 @@ def over_budget(entry: float, stop: float, risk_eur: float, usd_per_eur: float) 
     return f"1 action = {(entry - stop) / usd_per_eur:.0f} € de risque, au-delà de {risk_eur:g} €"
 
 
-def off_grade(grade: dict | None, risk_eur: float) -> str | None:
-    """Taille à la règle de Simão quand le grade ne propose rien (0 %) : dite comme telle, avec la ligne du grade."""
+def portfolio_stop(grade: dict | None) -> str | None:
+    """Le 0 % vient du portefeuille, pas de la méthode : « arrêt de la journée (−3,3 R) » ou « budget de risque ouvert
+    plein » ; None sinon. Lu sur les champs chiffrés de grade.risk_now (r_du_jour, risque_ouvert, risque_grade),
+    pas sur le texte de sa raison."""
+    if not grade or (grade.get("risque_propose") or 0) > 0 or not (grade.get("risque_grade") or 0) > 0:
+        return None
+    from app.lab import grade as GRADE  # import tardif : le labo importe ce module
+
+    today = grade.get("r_du_jour")
+    if today is not None and today <= GRADE.ARRET_JOUR_R:
+        return f"arrêt de la journée ({today:+.1f} R)".replace("-", "−").replace(".", ",")
+    if grade.get("risque_ouvert") is not None:
+        return "budget de risque ouvert plein"
+    return None
+
+
+def rule_size(grade: dict | None, recommended: float | None, rule: float) -> float | None:
+    """Risque en € des tailles des MP automatiques : celui du grade (`recommended`), sinon ta règle (`rule`), sauf
+    après l'arrêt de la journée ou avec le budget plein (None : pas de taille), à moins de SIZE_AFTER_STOP."""
+    if recommended:
+        return recommended
+    return rule if SIZE_AFTER_STOP or not portfolio_stop(grade) else None
+
+
+def off_grade(grade: dict | None, risk_eur: float | None) -> str | None:
+    """Taille à la règle de Simão quand le grade ne propose rien (0 %) : dite comme telle, avec la ligne du grade.
+    Sans taille (`risk_eur` None) : la ligne du grade seule, qui dit pourquoi."""
     if not grade or grade.get("risque_propose", 0) > 0:
         return None
     from app.lab import grade as GRADE  # import tardif : le labo importe ce module
 
+    if risk_eur is None:
+        return GRADE.plan_line(grade)
     return (f"-# Taille à ta règle de {risk_eur:g} € (hors avis de JARVIS : grade {grade['grade']}, 0 % proposé).\n"
             + GRADE.plan_line(grade))
 
 
-def event_text(symbol: str, go: dict, ev: dict, now: datetime, risk_eur: float, usd_per_eur: float | None,
+def event_text(symbol: str, go: dict, ev: dict, now: datetime, risk_eur: float | None, usd_per_eur: float | None,
                grade: dict | None = None) -> str:
     """`risk_eur` : la règle unique de taille (grade, plafond de 20 €), ou ta règle de 20 € quand le grade `grade`
-    ne propose rien (dit dans le message)."""
+    ne propose rien (dit dans la ligne d'ordre même) ; None : pas de taille (arrêt de la journée, budget plein)."""
     if ev["kind"] == "annulé":
         return f"❌ **{symbol} annulé** : {ev['why']}. Pas de trade."
-    risk_usd = risk_eur * usd_per_eur if usd_per_eur else None
+    risk_usd = risk_eur * usd_per_eur if usd_per_eur and risk_eur else None
     qty = shares(ev["trigger"], go["stop"], risk_usd)
-    size = (f" · **{qty} actions** ({risk_eur:g} € ≈ {risk_usd:.0f} $ de risque, "
-            f"{_num(round(qty * ev['trigger'], 2))} $)" if qty else
-            f" · {over_budget(ev['trigger'], go['stop'], risk_eur, usd_per_eur)} : pas de taille" if qty == 0 else "")
+    rule = bool(grade) and grade.get("risque_propose", 0) <= 0  # ta règle de 20 €, hors avis de JARVIS
+    if risk_eur is None:
+        size = f" · pas de taille : {portfolio_stop(grade) or 'aucun risque proposé'}"
+    elif qty:
+        cost = f"{risk_usd:.0f} $ de risque, {_num(round(qty * ev['trigger'], 2))} $"
+        size = (f" · **{qty} actions à ta règle de {risk_eur:g} €** (hors avis de JARVIS ; ≈ {cost})" if rule
+                else f" · **{qty} actions** ({risk_eur:g} € ≈ {cost})")
+    elif qty == 0:
+        size = f" · {over_budget(ev['trigger'], go['stop'], risk_eur, usd_per_eur)} : pas de taille"
+    else:
+        size = " · pas de taille : change EUR/USD indisponible"
     tps = " · ".join(f"TP{i} {_num(p)}" for i, p in enumerate(go["targets"], start=1))
     r = (go["targets"][1] - ev["trigger"]) / (ev["trigger"] - go["stop"]) if len(go["targets"]) > 1 else None
-    off = off_grade(grade, risk_eur)
+    off = off_grade(grade, risk_eur if qty else None)
     return (f"✅ **{symbol} confirmé** ({time_fr(now, now)}) : repli tenu, clôture 5 min au-dessus du VWAP "
             f"({_num(ev['vwap'])}).\nOrdre : **stop d'achat {_num(ev['trigger'])}** · stop {_num(go['stop'])}"
             f"{size}\n{tps}" + (f" · TP2 à {r:.1f} R" if r is not None else "")
@@ -215,8 +258,8 @@ def at_size(trigger: float, stop: float, filled: float, exits: list[dict], rate:
     from app.trading import killmode as K  # import tardif : killmode tire le labo, qui importe ce module
 
     risk = trigger - stop
-    if risk <= 0 or not exits:
-        return None
+    if risk <= 0 or not exits or over_stake(trigger, stop, rate):
+        return None  # une action dépasse la mise : le MP a dit « pas de taille », rien n'est compté
     q = K.shares(risk, rate)
     plan = K.IBKR_PLANS.get(K.IBKR_PLAN, K.IBKR_PLANS["fixe"])
     legs = K._legs(q, len(exits), [e | {"part": 1 / len(exits)} for e in exits])
@@ -226,6 +269,14 @@ def at_size(trigger: float, stop: float, filled: float, exits: list[dict], rate:
     if closing:
         pnl -= K.order_commission(sum(n for n, _ in closing), closing[0][1], plan)
     return round(pnl / (q * risk), 2)
+
+
+def over_stake(trigger: float, stop: float, rate: float | None = None) -> bool:
+    """Une seule action dépasse la mise de Simão (JARVIS_RISK_EUR au change `rate`, 1,15 par défaut) : 0 action."""
+    from app.trading import killmode as K  # import tardif : killmode tire le labo, qui importe ce module
+
+    risk = trigger - stop
+    return risk > 0 and math.floor(K.RISK_EUR * (rate or K.EURUSD_DEFAULT) / risk + 1e-9) == 0
 
 
 def outcome(go: dict, bars: list[dict], rate: float | None = None) -> dict:
@@ -251,8 +302,11 @@ def outcome(go: dict, bars: list[dict], rate: float | None = None) -> dict:
                 confirmed_be = simulate(filled, go["stop"], go["targets"], after[i:], be_after=2)
                 confirmed_20 = at_size(go["trigger"], go["stop"], filled, exits, rate)
                 break
-    return {"brut_r": raw, "brut_r_be2": raw_be, "confirme_r": confirmed, "confirme_r_be2": confirmed_be,
-            "confirme_r20": confirmed_20, "rempli": filled}
+    out = {"brut_r": raw, "brut_r_be2": raw_be, "confirme_r": confirmed, "confirme_r_be2": confirmed_be,
+           "confirme_r20": confirmed_20, "rempli": filled}
+    if filled is not None and over_stake(go["trigger"], go["stop"], rate):
+        out["confirme_hors_mise"] = True  # compté à part : pas de taille dans le MP, pas de R à 20 €
+    return out
 
 
 def close_day(state: dict, bars_by_symbol: dict[str, list[dict]], path: str | None = None,
@@ -325,9 +379,12 @@ def report_text(rows: list[dict], state: dict | None = None) -> str:
         line = f"• {status} : {len(group)} · brut {_mean(g_raw)} (BE TP2 {_col(group, 'brut_r_be2', len(g_raw))})"
         if status == "confirmé":
             conf = [r["confirme_r"] for r in group if r["confirme_r"] is not None]
+            over = sum(bool(r.get("confirme_hors_mise")) for r in group)
             line += (f" · avec l'ordre confirmé {_mean(conf)} ({len(conf)} déclenchés ; BE TP2 "
                      f"{_col(group, 'confirme_r_be2', len(conf))} ; à {RISK_EUR:g} € "
-                     f"{_col(group, 'confirme_r20', len(conf))})")
+                     f"{_col(group, 'confirme_r20', len(conf))}"
+                     + (f", {over} hors mise non comptés : 1 action au-delà de {RISK_EUR:g} € de risque, pas de "
+                        "taille dans le MP" if over else "") + ")")
         lines.append(line)
     old = sum("brut_r_be2" not in r for r in rows)
     if old:

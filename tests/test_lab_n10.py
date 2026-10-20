@@ -449,7 +449,7 @@ def test_effet_de_l_heure_et_dispersion_des_tirages():
     assert wit["ecart_r"] == pytest.approx(0.2) and wit["journee"]["esperance_r"] == pytest.approx(0.4)
     assert wit["effet_heure"]["esperance_r"] == pytest.approx(0.2) and wit["effet_heure"]["n"] == 60
     assert wit["dispersion_tirages"] == {"tirages": 2, "ecart_type_r": pytest.approx(0.1414, abs=1e-4)}
-    assert "effet de l'heure +0,20 R" in SS.text(SS.report(db.conn)) and "tirages ±0,14 R" in SS.text(SS.report(db.conn))
+    assert "écart à l'ancien témoin (heure + achats d'avant l'exécution) +0,20 R" in SS.text(SS.report(db.conn)) and "tirages ±0,14 R" in SS.text(SS.report(db.conn))
 
 
 def test_se_du_labo_pour_l_ecart_labo_direct():

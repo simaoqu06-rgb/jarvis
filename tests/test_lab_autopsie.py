@@ -161,3 +161,39 @@ def test_trades_reels_et_lignes_du_grade():
     assert "**Tes trades réels** (R nets de frais estimés" in txt and "Politique mesurée : ton suivi `!prends`" in txt
     assert "2 terminés" in txt and "+0.41 R en moyenne (+0.50 brut)" in txt and "trop peu" in txt
     assert GRADE.populations_text([], {"stock": {"termines": 0}}) == ""
+
+
+def test_strategies_triees_par_trades_avec_esperance_a_20_euros():
+    """Scénario 3 de GPT : une stratégie qui perd à 20 € mais touche souvent +1 R ne doit pas paraître bonne à
+    côté du repère « 50 % » : chaque ligne dit son espérance (actions : r_20e de la ligne), tri par trades."""
+    db = LabDB(":memory:")
+    _labelled(db)  # v1 : sans elle, le marché n'est pas affiché
+    rows = [(f"S{k}", d, "orb30", -0.1, -0.4, "cloture", 1.5, -0.2, 1) for k, d in enumerate(_days(40))]  # élan 100 %
+    rows += [(f"T{k}", d, "orb15", 0.3, None if k < 10 else 0.2, "stop", 0.2, -1.0, 0)
+             for k, d in enumerate(_days(60))]
+    rows += [(f"C{k}", d, "pullback", -0.05, None, "stop", 0.3, -1.0, 0) for k, d in enumerate(_days(35))]
+    db.conn.executemany(
+        "INSERT INTO strat_trades (origin, market, symbol, day, strategy, slot, triggered, r_net, r_20e, exit_reason, "
+        "mfe_r, mae_r, tp1_hit) VALUES ('replay', CASE WHEN ? = 'pullback' THEN 'crypto' ELSE 'stock' END, ?, ?, ?, 0, 1, "
+        "?, ?, ?, ?, ?, ?)", [(r[2], *r) for r in rows])
+    rep = AUT.report(db.conn)
+    orb30 = rep["strategies"]["stock"]["orb30"]
+    assert orb30["esperance_20e_r"] == pytest.approx(-0.4) and orb30["trades_20e"] == 40
+    txt = AUT.text(rep)
+    lines = [x for x in txt.splitlines() if x.startswith("-# orb")]
+    assert lines[0].startswith("-# orb15 · 60 trades · +0.200 R à 20 € (sur 50 trades)")
+    assert lines[1].startswith("-# orb30 · 40 trades · -0.400 R à 20 € · +1 R avant stop 100%")
+    assert "**v1 actions** (R du labo, avant commission IBKR à 20 €)" in txt
+    assert AUT._esp(rep["strategies"]["crypto"]["pullback"], "crypto") == "-0.050 R (frais OKX compris)"
+    assert AUT._esp({"esperance_r": 0.1, "trades": 40}, "stock") == "+0.100 R du labo (avant commission IBKR à 20 €)"
+    assert AUT.compact(rep)["strategies"]["stock"]["orb30"]["esperance_20e_r"] == pytest.approx(-0.4)
+
+
+def test_grade_indicatif_dit_son_esperance_a_20_euros():
+    db = LabDB(":memory:")
+    _go_rows(db)
+    db.conn.execute("UPDATE strat_trades SET r_20e = r_sans_be - 0.25 WHERE triggered = 1")
+    gi = AUT.go_indicatif(db.conn)
+    assert gi["go_confirme"]["par_trade_20e"] == {"trades": 2 * GRADE.FENETRE_JOURS, "esperance_r": pytest.approx(-0.15)}
+    lines = AUT.indicatif_lines(gi)
+    assert any("R par trade (IC95" in x and "· à 20 € : -0.150 R par trade ·" in x for x in lines)

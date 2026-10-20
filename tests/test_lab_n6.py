@@ -131,7 +131,7 @@ def test_tableau_ecarts_et_tranches_vwap():
     assert item["par_vwap"]["après 10 h 30, au-dessus du VWAP"]["esperance_r"] == pytest.approx(0.1)
     assert rep["sorties_gemini"]["ecarts"]["r_vwap"]["n"] == 120 and "_n6" not in rep["strategies"]
     text = SS.text(rep)
-    assert "Sorties de Gemini (n° 6)" in text and "✅ sur 1 stratégie" in text and "avant 10 h 30" in text
+    assert "Sorties de Gemini (n° 6)" in text and "↗ aide (relatif) sur 1 stratégie" in text and "avant 10 h 30" in text
 
 
 async def test_rattrapage_relit_aussi_spy(tmp_path, monkeypatch):
