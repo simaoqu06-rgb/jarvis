@@ -1,12 +1,13 @@
 """Validateur : format des règles, walk-forward, critères, essais multiples, mémoire des verdicts."""
 import json
 import random
+from datetime import date, timedelta
 
 import pytest
 
 from app.lab import validator as V
 from app.lab.db import LabDB
-from tests.lab_fixtures import synthetic_trades
+from tests.lab_fixtures import calendar_days, synthetic_trades
 
 SIGNAL_RULE = {"nom": "signal tendu", "exclude": {"field": "context.signal", "op": ">", "value": 0.8}}
 
@@ -122,7 +123,6 @@ def test_jugement_pur():
 # --- Tests imposés : bruit rejeté, règle cachée trouvée --------------------------------------
 
 def test_rejette_des_regles_au_hasard_sur_du_bruit(db):
-    synthetic_trades(db, n_days=200, per_day=30, seed=11)
     rnd = random.Random(5)
     rules = []
     for i in range(12):
@@ -139,11 +139,17 @@ def test_rejette_des_regles_au_hasard_sur_du_bruit(db):
             cond = {"field": "plan.stop_pct", "op": "<", "value": round(rnd.uniform(-4, -2), 2)}
         rules.append({"exclude": cond} if i % 2 else {"keep": {"not": cond}})
     rules.append({"exclude": {"field": "context.rvol", "op": ">", "value": "auto"}})
+    for r in rules:
+        V.submit(db, r)  # soumises avant les trades : tous les jours sont neufs
+    synthetic_trades(db, n_days=200, per_day=30, seed=11)
     verdicts = [V.test(db, r)["etat"] for r in rules]
     assert verdicts.count("rejetee") == len(rules), verdicts
 
 
 def test_trouve_la_regle_gagnante_cachee(db):
+    V.submit(db, SIGNAL_RULE)
+    other = {"exclude": {"field": "context.signal", "op": "<", "value": 0.3}}
+    V.submit(db, other)
     synthetic_trades(db, n_days=200, per_day=30, seed=12, effect=hidden())
     res = V.test(db, SIGNAL_RULE)
     assert res["etat"] == "validee", res["raisons"]
@@ -151,12 +157,14 @@ def test_trouve_la_regle_gagnante_cachee(db):
     assert m["touches_test"] >= 100 and m["amelioration_moyenne_r"] >= 0.05 and m["fenetres_meilleures"] >= 2
     assert m["p"] < 0.05 and m["essai"] == 1
     # Une règle à côté (seuil trop bas : retire surtout de bons trades) ne passe pas.
-    assert V.test(db, {"exclude": {"field": "context.signal", "op": "<", "value": 0.3}})["etat"] == "rejetee"
+    assert V.test(db, other)["etat"] == "rejetee"
 
 
 def test_seuil_auto_trouve_la_coupure_cachee(db):
+    rule = {"exclude": {"field": "context.signal", "op": ">", "value": "auto"}}
+    V.submit(db, rule)
     synthetic_trades(db, n_days=200, per_day=30, seed=13, effect=hidden(0.7, -1.0))
-    res = V.test(db, {"exclude": {"field": "context.signal", "op": ">", "value": "auto"}})
+    res = V.test(db, rule)
     assert res["etat"] == "validee", res["raisons"]
     seuils = sorted(w["seuil"] for w in res["mesures"]["fenetres"])
     # Au-dessous de 0,7 les trades sont neutres : tout seuil entre ~0,4 et 0,7 se vaut, au bruit près.
@@ -179,21 +187,25 @@ def test_seuil_auto_choisi_sans_voir_les_donnees_de_test(db):
 
 
 def test_la_barre_monte_avec_les_essais(db):
+    second = {"exclude": {"field": "context.signal", "op": ">=", "value": 0.8}}
+    V.submit(db, SIGNAL_RULE)
+    V.submit(db, second)
     synthetic_trades(db, n_days=200, per_day=30, seed=12, effect=hidden(0.8, -0.35))
     first = V.test(db, SIGNAL_RULE)
     assert first["etat"] == "validee", first["raisons"]
     assert first["mesures"]["z"] < V.z_threshold(10 ** 18)
     db.set("validator", "trials", 10 ** 18)  # 10^18 idées déjà testées : seuil p < 5e-20 (z > 9)
-    again = V.test(db, {"exclude": {"field": "context.signal", "op": ">=", "value": 0.8}})
+    again = V.test(db, second)
     assert again["etat"] == "rejetee"
     assert len(again["raisons"]) == 1 and "significativité" in again["raisons"][0]
     assert again["essai"] == 10 ** 18 + 1
 
 
 def test_memoire_des_echecs(db):
-    synthetic_trades(db, n_days=120, per_day=20, seed=15)
     rule = {"nom": "a", "exclude": {"or": [{"field": "context.rvol", "op": ">", "value": 2},
                                            {"field": "composite", "op": "<", "value": 5}]}}
+    V.submit(db, rule)
+    synthetic_trades(db, n_days=120, per_day=20, seed=15)
     first = V.test(db, rule)
     assert first["etat"] == "rejetee" and db.get("validator", "trials") == 1
     same = V.test(db, {"nom": "b", "exclude": {"or": [{"value": 5, "op": "<", "field": "composite"},
@@ -218,6 +230,7 @@ def test_historique_trop_court_reste_en_attente(db):
 
 
 def test_capture_du_potentiel_protegee(db):
+    V.submit(db, SIGNAL_RULE)
     out = synthetic_trades(db, n_days=200, per_day=30, seed=12, effect=hidden())
     # Les gros mouvements du jour sont justement les trades à signal > 0,8 qui ont touché leur TP1.
     movers = [o for o in out if o["trig"] and o["ctx"]["signal"] > 0.8 and o["r"] > 0.3]
@@ -230,6 +243,7 @@ def test_capture_du_potentiel_protegee(db):
 
 
 def test_seuils_modifiables_en_base(db):
+    V.submit(db, SIGNAL_RULE)
     synthetic_trades(db, n_days=200, per_day=30, seed=12, effect=hidden())
     V.set_config(db, "min_affected", 100000)
     assert V.config(db.conn)["min_affected"] == 100000
@@ -240,6 +254,7 @@ def test_seuils_modifiables_en_base(db):
 
 
 def test_marches_limites(db):
+    V.submit(db, SIGNAL_RULE | {"markets": ["crypto"]})
     synthetic_trades(db, n_days=200, per_day=30, seed=12, effect=hidden())
     synthetic_trades(db, n_days=200, per_day=10, seed=18, market="crypto")
     res = V.test(db, SIGNAL_RULE | {"markets": ["crypto"]})
@@ -249,7 +264,6 @@ def test_marches_limites(db):
 # --- File et traitement -----------------------------------------------------------------------
 
 def test_file_de_soumission_puis_traitement(db):
-    synthetic_trades(db, n_days=200, per_day=30, seed=12, effect=hidden())
     out = V.enqueue(db.path, SIGNAL_RULE)
     again = V.enqueue(db.path, {"exclude": SIGNAL_RULE["exclude"], "nom": "autre nom"})
     assert out["empreinte"] == again["empreinte"] and out["etat"] == "en_file"
@@ -257,6 +271,7 @@ def test_file_de_soumission_puis_traitement(db):
     assert len(files) == 1 and json.loads(files[0].read_text())["nom"] == "signal tendu"
     assert V.ingest_queue(db) == 1 and not list(V.queue_dir(db.path).glob("*.json"))
     assert V.counts(db.conn)["en_attente"] == 1
+    synthetic_trades(db, n_days=200, per_day=30, seed=12, effect=hidden())  # les nuits suivantes
     assert V.process_pending(db, 0) == []
     done = V.process_pending(db, 5)
     assert [r["etat"] for r in done] == ["validee"] and V.counts(db.conn)["validee"] == 1
@@ -280,10 +295,10 @@ def test_regle_inconnue_puis_liste(db):
 
 
 def test_regle_en_attente_de_donnees_ne_bloque_pas_la_file(db):
-    synthetic_trades(db, n_days=200, per_day=10, seed=19, market="crypto")
-    synthetic_trades(db, n_days=20, per_day=10, seed=20)  # actions : trop peu de jours pour l'instant
     V.submit(db, {"exclude": {"field": "composite", "op": "<", "value": 5}, "markets": ["stock"]})
     V.submit(db, {"exclude": {"field": "composite", "op": "<", "value": 5}, "markets": ["crypto"]})
+    synthetic_trades(db, n_days=200, per_day=10, seed=19, market="crypto")
+    synthetic_trades(db, n_days=20, per_day=10, seed=20)  # actions : trop peu de jours pour l'instant
     first = V.process_pending(db, 1)
     assert [r["etat"] for r in first] == ["en_attente"]
     second = V.process_pending(db, 1)
@@ -343,3 +358,92 @@ def test_seuils_cumules_ne_depassent_jamais_alpha():
     from app.lab.validator import trial_level
     assert sum(trial_level(n, 0.05) for n in range(1, 100_001)) <= 0.05
     assert trial_level(2, 0.05) < trial_level(1, 0.05)
+
+
+# --- Hors échantillon : seuls comptent les jours journalisés après la soumission (P3) -------------
+
+def last_day(db) -> date:
+    return date.fromisoformat(db.conn.execute("SELECT MAX(day) FROM trades").fetchone()[0])
+
+
+def test_effet_cache_avant_la_frontiere_attend_puis_rejetee(db):
+    synthetic_trades(db, n_days=120, per_day=30, seed=12, effect=hidden())  # lus par la routine du soir
+    frontier = last_day(db)
+    rule = V.submit(db, SIGNAL_RULE)
+    assert V.frontier(db.conn, rule["empreinte"]) == {"replay:stock": frontier.isoformat()}
+    res = V.run_one(db, rule["empreinte"])
+    assert res["etat"] == "en_attente" and (db.get("validator", "trials") or 0) == 0
+    assert "0 jours de trades neufs" in res["raisons"][0]
+    explo = res["mesures"]["exploratoire"]  # le même walk-forward sur les jours déjà vus : affiché, sans effet
+    assert explo["jours"] == 120 and explo["amelioration_moyenne_r"] > 0.05 and "sans effet sur le verdict" in res["raisons"][1]
+    # Les nuits suivantes : 120 jours neufs, sans effet.
+    synthetic_trades(db, n_days=120, per_day=30, seed=40, first=frontier + timedelta(days=1))
+    res = V.run_one(db, rule["empreinte"])
+    assert res["etat"] == "rejetee" and db.get("validator", "trials") == 1
+    m = res["mesures"]
+    assert m["jours"] == 120 and min(w["test"][0] for w in m["fenetres"]) > frontier.isoformat()
+    assert m["exploratoire"] == explo and m["frontiere"] == {"replay:stock": frontier.isoformat()}
+
+
+def test_effet_apres_la_frontiere_validee(db):
+    synthetic_trades(db, n_days=60, per_day=30, seed=41)
+    frontier = last_day(db)
+    rule = V.submit(db, SIGNAL_RULE)
+    synthetic_trades(db, n_days=200, per_day=30, seed=12, effect=hidden(), first=frontier + timedelta(days=1))
+    res = V.run_one(db, rule["empreinte"])
+    assert res["etat"] == "validee", res["raisons"]
+    assert res["mesures"]["jours"] == 200 and res["mesures"]["exploratoire"]["jours"] == 60
+
+
+def test_jour_vu_puis_recalcule_ne_compte_pas(db):
+    synthetic_trades(db, n_days=80, per_day=30, seed=12, effect=hidden())
+    rule = V.submit(db, SIGNAL_RULE)
+    db.conn.execute("DELETE FROM trades")  # rattrapage : mêmes jours recalculés, id neufs
+    synthetic_trades(db, n_days=80, per_day=30, seed=42, effect=hidden())
+    res = V.run_one(db, rule["empreinte"])
+    assert res["etat"] == "en_attente" and res["mesures"]["jours"] == 0
+
+
+def test_regle_d_avant_la_frontiere_garde_tous_les_jours(db):
+    synthetic_trades(db, n_days=200, per_day=30, seed=12, effect=hidden())
+    rule = V.submit(db, SIGNAL_RULE)
+    db.conn.execute("UPDATE rules SET seen_until = NULL WHERE hash = ?", (rule["empreinte"],))
+    res = V.run_one(db, rule["empreinte"])
+    assert res["etat"] == "validee" and res["mesures"]["jours"] == 200 and "frontiere" not in res["mesures"]
+
+
+def test_readme_cite_la_formule_du_code():
+    """Le seuil de p que lit Simão est celui que le code applique (6·α/(π²·n²), pas 0,05 / n)."""
+    from pathlib import Path
+
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    assert "p < 6·α/(π²·n²)" in readme and "0,05 / n" not in readme
+    assert f"{V.trial_level(1):.2f}".replace(".", ",") == "0,03" and "≈ 0,03 au 1er essai" in readme
+    assert round(V.trial_level(10) * 1e4) == 3 and "3·10⁻⁴ au 10e" in readme
+    assert "seuls comptent les jours journalisés après la soumission" in readme
+    assert "6·alpha / (π²·n²)" in V.__doc__ and "SEULS COMPTENT LES JOURS JOURNALISÉS APRÈS LA SOUMISSION" in V.__doc__
+
+
+# --- Fenêtres : blocs par marché, trou du calendrier et jours en direct (I5) -----------------------
+
+def test_fenetres_annotees_trou_et_direct():
+    replay = [d.isoformat() for d in calendar_days(date(2026, 1, 5), 60)]  # rejeu jusqu'au début d'avril
+    live = [d.isoformat() for d in calendar_days(date(2026, 10, 6), 4)]  # puis le direct
+    rows = [(d, "stock", f"S{k}", 1, 0.1 * ((k % 3) - 1), 0, k % 2) for d in replay + live for k in range(6)]
+    m = V.walk_forward(rows, set(), dict(V.DEFAULTS), "exclude", live={("stock", d) for d in live})
+    first, last = m["fenetres"][0], m["fenetres"][-1]
+    assert last["trou_max_jours"] >= 180 and last["jours_direct"] == 4 and last["test"][1] == live[-1]
+    assert first["trou_max_jours"] <= 4 and first["jours_direct"] == 0
+    # Une seule série de jours : mêmes fenêtres qu'avant (blocs du marché).
+    wins = V.market_windows(rows, 3, 1)
+    assert [{d for _, d in t} for _, t in wins] == [t for _, t in V.windows([r[0] for r in rows], 3, 1)]
+
+
+def test_blocs_par_marche_quand_les_rejeux_avancent_chacun_de_leur_cote():
+    stock = [d.isoformat() for d in calendar_days(date(2025, 1, 6), 80)]
+    crypto = [d.isoformat() for d in calendar_days(date(2025, 9, 1), 80, weekdays_only=False)]
+    rows = [(d, "stock", "S", 1, 0.0, 0, 0) for d in stock] + [(d, "crypto", "C", 1, 0.0, 0, 0) for d in crypto]
+    for fit, test in V.market_windows(rows, 3, 1):
+        assert {m for m, _ in test} == {"stock", "crypto"} and {m for m, _ in fit} == {"stock", "crypto"}
+        for market in ("stock", "crypto"):
+            assert max(d for m, d in fit if m == market) < min(d for m, d in test if m == market)

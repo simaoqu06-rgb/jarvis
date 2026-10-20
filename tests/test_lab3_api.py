@@ -240,8 +240,11 @@ async def _parcours(env, monkeypatch, live_effect, approve=True, live_days=8, pe
                                                        "pourquoi": "Un signal tendu annonce l'essoufflement.",
                                                        "council": "5 analystes sur 5 pour."})
     assert r.status_code == 200
-    # Nuit : le worker valide.
+    # Nuit : le worker lit la file (frontière : ce que le conseil a pu lire), puis le rejeu continue sur des
+    # jours que personne n'a vus ; la règle n'est jugée que sur eux.
     V.ingest_queue(db)
+    assert V.process_pending(db, 3)[0]["etat"] == "en_attente"
+    synthetic_trades(db, n_days=120, per_day=30, seed=13, effect=hidden, first=date(2025, 1, 6))
     [rule] = V.process_pending(db, 3)
     assert rule["etat"] == "validee", rule["raisons"]
     # 8 h 05 : message du matin, une seule fois.
@@ -266,18 +269,34 @@ async def _parcours(env, monkeypatch, live_effect, approve=True, live_days=8, pe
         return db, client, props, rule
     assert M.challenger(db.conn)["version"] == "v2" and M.champion(db.conn)["version"] == "v1"
     assert json.loads(M.champion_path(db.path).read_text())["challenger"] == "v2"
-    # Trades en direct des jours suivants (mêmes plans pour les deux méthodes).
+    # Trades en direct des jours suivants (mêmes plans pour les deux méthodes) ; regard à 20 puis 60 jours.
     synthetic_trades(db, n_days=live_days, per_day=per_day, seed=33, origin="live", first=date(2026, 10, 8),
                      effect=live_effect)
-    report = M.step(db, paris(2026, 10, 20, 23, 0))
+    report = M.step(db, paris(2027, 1, 4, 23, 0))
     return db, client, props, report
 
 
 async def test_parcours_complet_jusqu_a_la_bascule(env, monkeypatch):
-    db, client, props, report = await _parcours(env, monkeypatch, lambda c, r: -1.0 if c["signal"] > 0.8 else 0.1)
+    db, client, props, report = await _parcours(env, monkeypatch, lambda c, r: -1.0 if c["signal"] > 0.8 else 0.1,
+                                                live_days=20)
+    # Au 1er regard (20 jours), la promotion est proposée à Simão : rien ne bascule sans lui.
     assert report["bascule"] == "promouvoir"
+    assert M.champion(db.conn)["version"] == "v1" and M.challenger(db.conn)["version"] == "v2"
+    monkeypatch.setattr(bot, "outbox", asyncio.Queue())
+    await scheduler.tick_lab(paris(2027, 1, 4, 23, 5))
+    offered = bot.outbox.get_nowait()
+    assert offered["kind"] == "promotion" and offered["value"] == "v2" and bot.outbox.empty()
+    assert bot.lab_texts.empty()
+    await scheduler.tick_lab(paris(2027, 1, 4, 23, 6))
+    assert bot.outbox.empty()  # proposée une seule fois
+    page = client.get("/cockpit/labo").text
+    assert "20 jours de trades en direct (prochain regard à 40 jours)" in page
+    assert "Promotion proposée à Simão" in page and "méthode → v2" in page
+    answer = await bot.handle(f"!oui {offered['id']}")
+    assert "approuvée" in answer and M.champion(db.conn)["version"] == "v1"
+    assert M.step(db, paris(2027, 1, 4, 23, 10))["decisions"] == 1
     assert M.champion(db.conn)["version"] == "v2"
-    await scheduler.tick_lab(paris(2026, 10, 20, 23, 5))
+    await scheduler.tick_lab(paris(2027, 1, 4, 23, 15))
     text = bot.lab_texts.get_nowait()
     assert text.startswith("🧪 Méthode v2 en place : « signal tendu »")
     # JARVIS en direct lit le nouveau champion et écarte comme le labo.
@@ -293,10 +312,10 @@ async def test_parcours_complet_jusqu_a_la_bascule(env, monkeypatch):
 
 async def test_parcours_jusqu_au_retrait(env, monkeypatch):
     db, client, props, report = await _parcours(env, monkeypatch, lambda c, r: 1.5 if c["signal"] > 0.8 else 0.0,
-                                                live_days=15, per_day=40)
+                                                live_days=60, per_day=10)
     assert report["bascule"] == "retirer"
     assert M.champion(db.conn)["version"] == "v1" and json.loads(M.champion_path(db.path).read_text())["regles"] == []
-    await scheduler.tick_lab(paris(2026, 10, 20, 23, 5))
+    await scheduler.tick_lab(paris(2027, 1, 4, 23, 5))
     assert "Méthode v2 retirée" in bot.lab_texts.get_nowait()
 
 

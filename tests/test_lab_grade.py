@@ -1,6 +1,7 @@
 """Grade de JARVIS (F- à S+) : barème, grade officiel (baisse immédiate, hausse lente et approuvée,
 coupe-circuit, council, nouvelle méthode, version morte), risque proposé en direct et routes."""
 import json
+import random
 from datetime import date, datetime, timezone
 
 import pytest
@@ -95,6 +96,104 @@ def test_evaluation_criteres_et_kelly():
     assert perte["lettre"] == "F" and perte["kelly_pct"] == 0
     assert not perte["criteres"]["series_normales"]  # 120 pertes d'affilée
     assert not perte["criteres"]["regulier"]
+
+
+def test_ic_en_student_c_devient_d():
+    # 10 jours, espérance +0,10 R = 2 erreurs types : prouvée avec 1,96 (C), plus en t à 9 degrés (2,262).
+    m = GR.evaluate(rows([0.25 if (i // 10) % 2 else -0.05 for i in range(100)], per_day=10))
+    assert m["esperance_r"] == 0.1 and m["ic95"][0] < 0 < 0.1 - 1.96 * 0.05
+    assert m["lettre"] == "D"
+
+
+def test_kelly_corrige_de_la_correlation_du_jour():
+    # Tous les trades d'un jour ont le même R (ρ ≈ 1) : un A (3 %) laisse 2 positions sous le budget de 4 %,
+    # le Kelly est divisé par ≈ 2.
+    days = [0.8, -0.2, 0.6, 0.0]
+    m = GR.evaluate(rows([days[(i // 10) % 4] for i in range(400)], per_day=10))
+    assert m["lettre"] == "A" and m["positions_max"] == 2 and m["rho_jour"] > 0.95
+    assert m["kelly_pct"] == pytest.approx(m["kelly_brut_pct"] / (1 + m["rho_jour"]), abs=1e-3)
+    assert m["kelly_pct"] < 0.52 * m["kelly_brut_pct"]
+    # Trades indépendants (ρ ≈ 0) : Kelly presque inchangé.
+    rnd = random.Random(3)
+    m = GR.evaluate(rows([round(rnd.gauss(0.3, 1.0), 4) for _ in range(600)], per_day=20))
+    assert m["lettre"] == "B" and m["positions_max"] == 3 and m["rho_jour"] < 0.05
+    assert m["kelly_pct"] > 0.9 * m["kelly_brut_pct"] > 0
+
+
+# --- Ce que coûte vraiment un trade (R5) et fenêtre réelle (I5) -------------------------------------
+
+def sim_result(price, reason, entry=10.0, stop=9.7):
+    """Résultat du simulateur (trades.result) : une seule sortie, rempli à l'entrée."""
+    return json.dumps({"triggered": True, "fill_price": entry, "exits": [{"part": 1.0, "price": price, "reason": reason}],
+                       "order_prices": {"entry": entry, "stop": stop, "targets": [10.3, 10.6, 10.9]}})
+
+
+def test_r_du_grade_apres_commission_ibkr():
+    # Stoppé à 9,70 pour une entrée à 10 : à 20 € de risque (76 actions, 3 brackets, minimums de 1 $), -1,30 R.
+    assert GR.cost_r("stock", -1.0, sim_result(9.7, "stop")) == pytest.approx(-1.30, abs=0.01)
+    assert GR.cost_r("crypto", -1.0, sim_result(9.7, "stop")) == -1.0  # frais OKX déjà dans r_net
+    assert GR.cost_r("stock", -1.0, "{}") == -1.0 and GR.cost_r("stock", -1.0, None) == -1.0  # sans détail : r_net
+    assert GR.cost_r("stock", 0.2, '{"triggered": true, "exits": [{"part": 1}]}') == 0.2  # détail illisible
+
+
+def test_grade_sur_les_r_a_20_euros(db):
+    synthetic_trades(db, n_days=15, per_day=12, base=0.2, noise=0.3)
+    synthetic_trades(db, n_days=15, per_day=12, base=0.2, noise=0.3, market="crypto")
+    rows_, fen = GR.window(db.conn, "stock")
+    assert GR.evaluate(rows_)["lettre"] in ("B", "A") and not fen.get("discontinue")
+    # Les mêmes trades avec leur détail : +0,2 R au labo, mais -0,016 R une fois payés les ordres IBKR à 20 €.
+    db.conn.execute("UPDATE trades SET result = ? WHERE triggered = 1", (sim_result(10.06, "cloture"),))
+    rows_, _ = GR.window(db.conn, "stock")
+    assert {r[2] for r in rows_} == {-0.0156}
+    m = GR.evaluate(rows_)
+    assert m["lettre"] == "E" and m["kelly_pct"] == 0
+    crypto, _ = GR.window(db.conn, "crypto")  # crypto : r_net du labo, inchangé
+    assert GR.evaluate(crypto)["lettre"] in ("B", "A")
+    assert GR.since(db.conn, "stock", 0)["baisse_r"] > 1.0  # le coupe-circuit lit les mêmes R
+
+
+def test_signature_du_calcul(db):
+    synthetic_trades(db, n_days=2, per_day=2)
+    assert GR.signature(db)[3] == GR.GRADE_CALC == 2  # version du calcul : changer de calcul force un recalcul
+
+
+def test_fenetre_reelle_et_trou(db):
+    assert GR.span([], set())["jours"] == 0
+    days = ["2026-04-01", "2026-04-02", "2026-10-06", "2026-10-07"]
+    assert GR.span(days, {"2026-10-06", "2026-10-07"}) == {
+        "du": "2026-04-01", "au": "2026-10-07", "jours": 4, "jours_direct": 2, "trou_max_jours": 187,
+        "rejeu_du": "2026-04-01", "rejeu_au": "2026-04-02", "direct_du": "2026-10-06"}
+    assert GR.last_segment(days) == ["2026-10-06", "2026-10-07"]
+    assert GR.last_segment(["2026-01-02", "2026-01-05", "2026-01-12"]) == ["2026-01-02", "2026-01-05", "2026-01-12"]
+
+
+def test_fenetre_discontinue_sans_risque_puis_coupee(db):
+    # Rejeu de janvier à mars 2026, puis 4 jours de direct en octobre : fenêtre mixte, segment récent trop petit.
+    synthetic_trades(db, n_days=60, per_day=10, base=0.5, noise=0.5, first=date(2026, 1, 5))
+    synthetic_trades(db, n_days=4, per_day=15, base=0.5, noise=0.5, first=date(2026, 10, 6), origin="live", seed=2)
+    GR.step(db, NOW)
+    st = state(db)
+    fen = st["mesure"]["fenetre"]
+    assert fen["jours"] == 60 and fen["jours_direct"] == 4 and fen["trou_max_jours"] >= 180 and fen["discontinue"]
+    assert fen["direct_du"] == "2026-10-06" and fen["rejeu_au"] == "2026-03-27"
+    assert st["rang"] == GR.D_PLUS and st["hausse"] is None  # lettre mesurée gardée, pas de hausse proposée
+    data = GR.current()
+    g = data["marches"]["stock"]
+    assert g["discontinue"] and g["risque_grade"] == 0.0
+    r = GR.risk_now("stock", [], NOW, data)
+    assert r["risque_propose"] == 0.0 and r["raison"].startswith(
+        "fenêtre discontinue (rejeu jusqu'au 27/03/2026, direct depuis le 06/10/2026)")
+    text = GR.text(data, now=NOW)
+    assert "fenêtre : rejeu du " in text and "direct depuis le 06/10/2026 (60 jours, dont 4 en direct" in text
+    assert "fenêtre discontinue" in text
+    # Le direct atteint 16 jours et plus de 100 trades : le grade est calculé sur lui seul.
+    synthetic_trades(db, n_days=12, per_day=15, base=0.5, noise=0.5, first=date(2026, 10, 12), origin="live", seed=3)
+    rows_, fen = GR.window(db.conn, "stock")
+    assert fen["coupee_au"] == "2026-10-06" and not fen.get("discontinue")
+    assert min(r[1] for r in rows_) == "2026-10-06" and len(rows_) >= 100  # le rejeu d'avant le trou est écarté
+    GR.step(db, NOW)
+    assert not GR.current()["marches"]["stock"]["discontinue"]
+    assert "grade calculé sur les jours depuis le 06/10/2026 seulement" in GR.text(GR.current(), now=NOW)
 
 
 # --- Grade officiel (worker) ----------------------------------------------------------------------
@@ -281,7 +380,14 @@ def test_avis_hausse_de_lettre_proposee(db):
 DATA = {"marches": {"stock": {"grade": "A", "rang": GR.rank_of("A", 1), "non_note": False, "risque_grade": 3.0,
                               "risque_max": 3.0, "mode_survie": False},
                     "crypto": {"grade": "F-", "rang": 0, "non_note": False, "risque_grade": 0.0, "risque_max": 0.0,
-                               "mode_survie": True}}}
+                               "mode_survie": True}},
+        "verifie_le": NOW.isoformat()}  # grade revérifié par le labo à l'instant : pas périmé
+
+
+def full_data(stock: dict) -> dict:
+    """lab_grade.json complet pour `!grade` (mesure d'une fenêtre notée A), vérifié à NOW."""
+    m = GR.evaluate(rows([1.0 if i % 2 else -0.5 for i in range(300)], per_day=20, delay=1))
+    return {"marches": {"stock": {"version": "v1", "mesure": m} | stock}, "verifie_le": NOW.isoformat()}
 
 
 def trade(status="open", risk=1.0, stop_current=95.0, hit=0, events=()):
@@ -300,32 +406,233 @@ def test_risque_now():
     opened = [trade(risk=1.5), trade(risk=1.5), trade(risk=3.0, stop_current=100.0, hit=2)]
     assert GR.open_risk(opened) == 3.0
     g = GR.risk_now("stock", opened, NOW, DATA)
-    assert g["risque_propose"] == 1.0 and "risque déjà ouvert" in g["raison"]
+    assert g["risque_propose"] == 1.0
+    assert "plafonné par le budget de 4 % ouvert au total (3 % déjà ouverts)" in g["raison"]
     # Arrêt de la journée à −3 R (date de Paris de la clôture).
     stopped = [trade(status="closed", events=[{"kind": "stop", "price": 95.0, "at": NOW.isoformat()}])
                for _ in range(3)]
-    assert GR.day_r(stopped, NOW) == -3.0
+    assert GR.day_r(stopped, NOW) == pytest.approx(3 * (-1.0 - 5.9 / 20), abs=0.01)  # net : 5,90 $ pour 20 $ de risque
+    # Net des frais estimés (4 actions en 3 brackets IBKR), les frais avancent l'arrêt : −2,2 R bruts (deux stops et
+    # une sortie à −0,2 R), mais −3,09 R nets.
+    mixed = stopped[:2] + [trade(status="closed", events=[{"kind": "stop", "price": 99.0, "at": NOW.isoformat()}])]
+    assert GR.day_r(mixed, NOW) == pytest.approx(-3.09, abs=0.01)
+    assert "arrêt de la journée" in GR.risk_now("stock", mixed, NOW, DATA)["raison"]
     g = GR.risk_now("stock", stopped, NOW, DATA)
     assert g["risque_propose"] == 0.0 and "arrêt de la journée" in g["raison"]
 
 
-def plan():
-    return {"market": "stock", "entry": 100.0, "stop": 95.0, "sizing": {"risk_pct": 3.0}}
+def plan(entry=100.0, stop=95.0, market="stock"):
+    return {"market": market, "entry": entry, "stop": stop, "sizing": {"risk_pct": 3.0}}
 
 
 def test_plan_en_direct(monkeypatch):
+    """Une seule règle de taille : min(capital × % du grade, 20 €), au change du jour, en actions entières."""
     monkeypatch.setattr(GR, "current", lambda: DATA)
+    monkeypatch.setenv("JARVIS_CAPITAL", "10000")  # en euros
+    p = plan(10.0, 9.5)
+    T.apply_grade(p, None, None, NOW, trades=[], usd_per_eur=1.15)
+    s = p["sizing"]
+    assert s["risk_amount_eur"] == 20.0 and s["risk_amount"] == 23.0 and s["eurusd"] == 1.15
+    assert s["quantity"] == 46 and isinstance(s["quantity"], int) and s["risk_pct"] == 0.2
+    assert "sizing_regle" not in p
+    assert T.sizing_lines(p) == ["💰 Risque 20 € (23,0 $) : 46 actions pour 460 $"]
+    assert "🏅 Grade JARVIS **A** · risque proposé **3 %**" in GR.plan_line(p["grade"])
+    # Petit capital : le % du grade décide (500 € × 3 % = 15 €).
+    p = plan(10.0, 9.5)
+    T.apply_grade(p, 500.0, None, NOW, trades=[], usd_per_eur=1.15)
+    assert p["sizing"]["risk_amount_eur"] == 15.0 and p["sizing"]["quantity"] == 34  # 17,25 $ / 0,5
+    # Capital inconnu : 20 € dès que le grade propose plus de 0 %.
+    monkeypatch.delenv("JARVIS_CAPITAL")
+    p = plan(10.0, 9.5)
+    T.apply_grade(p, None, None, NOW, trades=[], usd_per_eur=1.15)
+    assert p["sizing"]["risk_amount_eur"] == 20.0 and p["sizing"]["capital"] is None
+    # Une action au-delà de 20 € : pas d'ordre, dit en clair.
+    p = plan(100.0, 70.0)
+    T.apply_grade(p, None, None, NOW, trades=[], usd_per_eur=1.15)
+    assert p["sizing"]["quantity"] == 0
+    assert "pas d'ordre, 1 action = 26,09 € de risque, au-delà de 20 €" in T.sizing_lines(p)[0]
+    # Crypto : quantité fractionnaire, comme avant.
+    data = DATA | {"marches": DATA["marches"] | {"crypto": DATA["marches"]["stock"]}}
+    monkeypatch.setattr(GR, "current", lambda: data)
+    p = plan(60000.0, 59000.0, "crypto")
+    T.apply_grade(p, None, None, NOW, trades=[], usd_per_eur=1.15)
+    assert p["sizing"]["quantity"] == 0.023 and "taille 0.023" in T.sizing_lines(p)[0]
+
+
+def test_plan_grade_f_taille_a_la_regle_hors_avis(monkeypatch):
+    """Grade à 0 % : JARVIS ne recommande rien ; la règle de 20 € de Simão est à part, marquée hors grade."""
+    data = DATA | {"marches": {"stock": DATA["marches"]["crypto"]}}
+    monkeypatch.setattr(GR, "current", lambda: data)
+    monkeypatch.setenv("JARVIS_CAPITAL", "10000")
+    p = plan(10.0, 9.5)
+    T.apply_grade(p, None, None, NOW, trades=[], usd_per_eur=1.15)
+    assert p["sizing"] is None and p["grade"]["risque_propose"] == 0.0
+    rule = p["sizing_regle"]
+    assert rule["hors_grade"] and rule["quantity"] == 46 and isinstance(rule["quantity"], int)
+    assert T.sizing_lines(p) == ["💰 JARVIS ne propose pas de taille (grade F- : 0 %). Ta règle de 20 € : 46 actions "
+                                 "pour 460 $ (exception, hors avis de JARVIS)"]
+    stopped = p | {"grade": {"grade": "A", "risque_grade": 3.0, "risque_propose": 0.0,
+                             "raison": "arrêt de la journée à −3 R atteint"}}
+    assert T.sizing_lines(stopped)[0].startswith("💰 JARVIS ne propose pas de taille (0 % : arrêt de la journée")
+    text = T.plan_text(p | {"symbol": "AAA", "side": "long", "stop_pct": -5.0, "stop_source": "creux",
+                            "targets": [], "checklist": {"verdict": "Feu vert", "score": 3, "max_score": 5,
+                                                         "items": []}, "method": "m"})
+    assert "Ta règle de 20 €" in text and "plan en observation" in text
+    # Risque demandé explicitement : gardé, signalé hors budget (JARVIS ne propose rien).
+    p = plan(10.0, 9.5)
+    T.apply_grade(p, None, 5.0, NOW, trades=[], usd_per_eur=1.15)
+    assert p["sizing"]["risk_amount_eur"] == 20.0 and "sizing_regle" not in p
+    assert p["grade"]["hors_budget"] and p["grade"]["risque_demande"] == 5.0
+    assert "⚠️ **Hors budget** : risque demandé 5 % (20 €), alors que JARVIS ne propose aucun risque" in \
+        GR.plan_line(p["grade"])
+
+
+def test_risque_demande_hors_budget(monkeypatch):
+    monkeypatch.setattr(GR, "current", lambda: DATA)
+    monkeypatch.setenv("JARVIS_CAPITAL", "1000")
+    # Grade A, 3 % de 1 000 € = 20 € : 5 % demandés donnent les mêmes 20 € (plafond), rien de plus.
+    p = plan(10.0, 9.5)
+    T.apply_grade(p, None, 5.0, NOW, trades=[], usd_per_eur=1.15)
+    assert p["sizing"]["risk_amount_eur"] == 20.0 and not p["grade"].get("hors_budget")
+    # Budget déjà pris (3 trades à 1 % ouverts) : JARVIS propose 1 % = 10 € ; 3 % demandés = 20 €, hors budget.
+    opened = [trade(risk=1.0) for _ in range(3)]
+    p = plan(10.0, 9.5)
+    T.apply_grade(p, None, 3.0, NOW, trades=opened, usd_per_eur=1.15)
+    assert p["grade"]["risque_propose"] == 1.0 and p["grade"]["hors_budget"]
+    assert "risque demandé 3 % (20 €), au-delà des 10 € que propose JARVIS" in GR.plan_line(p["grade"])
+    # Arrêt de la journée atteint : tout risque demandé est hors budget.
+    stopped = [trade(status="closed", events=[{"kind": "stop", "price": 95.0, "at": NOW.isoformat()}])
+               for _ in range(3)]
+    p = plan(10.0, 9.5)
+    T.apply_grade(p, None, 0.5, NOW, trades=stopped, usd_per_eur=1.15)
+    assert p["grade"]["hors_budget"] and p["sizing"]["risk_amount_eur"] == 5.0
+    # 0 % demandé : pas de taille du tout (ni règle à part).
+    p = plan(10.0, 9.5)
+    T.apply_grade(p, None, 0.0, NOW, trades=[], usd_per_eur=1.15)
+    assert p["sizing"] is None and "sizing_regle" not in p and not p["grade"].get("hors_budget")
+
+
+# --- Fail-closed et péremption (R1) ----------------------------------------------------------------
+
+@pytest.mark.parametrize("data", [
+    {"marches": {"stock": {"grade": "A"}}, "verifie_le": NOW.isoformat()},  # schéma différent : KeyError
+    [1, 2],                                                                # JSON qui n'est pas un objet
+])
+def test_grade_illisible_fail_closed(monkeypatch, data):
+    monkeypatch.setattr(GR, "current", lambda: data)
+    monkeypatch.setenv("JARVIS_CAPITAL", "10000")
+    p = plan()
+    T.apply_grade(p, None, None, NOW, trades=[], usd_per_eur=1.15)
+    assert p["sizing"] is None and p["grade"]["risque_propose"] == 0.0 and p["grade"]["observation"]
+    assert p["grade"]["grade"] == "non noté" and "grade illisible" in p["grade"]["raison"]
+    assert p["sizing_regle"]["hors_grade"]  # la règle de Simão reste affichée, à part
+
+
+def test_grade_exception_fail_closed(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("schéma")
+
+    monkeypatch.setattr(GR, "risk_now", boom)
     monkeypatch.setenv("JARVIS_CAPITAL", "10000")
     p = plan()
     T.apply_grade(p, None, None, NOW, trades=[])
-    assert p["sizing"]["risk_pct"] == 3.0 and p["sizing"]["risk_amount"] == 300.0
-    assert "🏅 Grade JARVIS **A** · risque proposé **3 %**" in GR.plan_line(p["grade"])
-    p = plan() | {"market": "crypto"}
-    T.apply_grade(p, None, None, NOW, trades=[])
-    assert p["sizing"] is None and "observation" in GR.plan_line(p["grade"])
-    p = plan() | {"market": "crypto"}
-    T.apply_grade(p, None, 2.0, NOW, trades=[])  # risque demandé : gardé
-    assert p["sizing"] == {"risk_pct": 3.0} and p["grade"]["risque_propose"] == 0.0
+    assert p["sizing"] is None and p["grade"]["risque_propose"] == 0.0
+    assert "grade illisible (RuntimeError)" in GR.plan_line(p["grade"])
+    p = plan()
+    T.apply_grade(p, None, 1.0, NOW, trades=[])  # risque explicite : gardé, hors budget
+    assert p["sizing"]["risk_amount_eur"] == 20.0 and p["grade"]["hors_budget"]
+
+
+def test_trade_mal_forme_ne_fait_pas_sauter_le_budget(monkeypatch, caplog):
+    monkeypatch.setattr(GR, "current", lambda: DATA)
+    bad = {"status": "open", "sizing": {"risk_pct": 1}, "entry": 10, "side": "long"}  # sans stop
+    assert GR.open_risk([bad, "pas un trade"]) == 1.0  # compté pour tout son risque, sans exception
+    assert "mal formé" in caplog.text
+    g = GR.risk_now("stock", [bad], NOW)
+    assert g["risque_propose"] == 3.0 and "grade illisible" not in g["raison"]
+
+
+def test_risque_zero_explicite(monkeypatch):
+    assert T.sizing(10.0, 9.5, 1000.0, 0.0) is None and T.sizing(10.0, 9.5, 1000.0, -1.0) is None
+    assert T.sizing(10.0, 9.5, 1000.0, 3.0)["risk_amount"] == 30.0
+
+
+def test_grade_perime(monkeypatch):
+    old = DATA | {"verifie_le": "2026-10-07T13:00:00+00:00"}  # 7 h avant NOW
+    g = GR.risk_now("stock", [], NOW, old)
+    assert g["risque_propose"] == 0.0 and g["observation"] and g["perime"]
+    assert g["raison"] == "grade périmé (dernier passage du labo il y a 7 h)"
+    g = GR.risk_now("stock", [], NOW, {k: v for k, v in DATA.items() if k != "verifie_le"})
+    assert g["risque_propose"] == 0.0 and "grade périmé (aucun passage du labo daté)" == g["raison"]
+    assert GR.risk_now("stock", [], NOW, DATA | {"verifie_le": "2026-10-07T15:00:00+00:00"})["risque_propose"] == 3.0
+    monkeypatch.setattr(GR, "MAX_AGE_H", 4.0)
+    assert GR.risk_now("stock", [], NOW, DATA | {"verifie_le": "2026-10-07T15:00:00+00:00"})["perime"]
+    text = GR.text(full_data(old["marches"]["stock"]) | {"verifie_le": old["verifie_le"]}, now=NOW)
+    assert "⚠️ **Grade périmé** : dernier passage du labo il y a 7 h" in text
+
+
+def test_verifie_le_a_chaque_passage_reussi(db, monkeypatch):
+    synthetic_trades(db, n_days=20, per_day=20, base=-0.3, noise=0.8)
+    GR.step(db, NOW)
+    first = json.loads(GR.live_path().read_text(encoding="utf-8"))
+    assert first["verifie_le"] == NOW.isoformat()
+    later = datetime(2026, 10, 7, 20, 10, tzinfo=timezone.utc)
+    assert GR.step(db, later)["fichier"] is False  # rien de changé…
+    second = json.loads(GR.live_path().read_text(encoding="utf-8"))
+    assert second["verifie_le"] == later.isoformat() and second["ecrit_le"] == first["ecrit_le"]  # … mais vérifié
+    assert second["marches"] == first["marches"]
+
+    def boom(self, market, force=False):
+        raise RuntimeError("base")
+
+    db.set("grade_calc", "signature", None)  # force un recalcul, qui échoue : le fichier n'est pas revérifié
+    monkeypatch.setattr(GR.Grader, "grade_market", boom)
+    with pytest.raises(RuntimeError):
+        GR.step(db, datetime(2026, 10, 8, 2, 0, tzinfo=timezone.utc))
+    assert json.loads(GR.live_path().read_text(encoding="utf-8"))["verifie_le"] == later.isoformat()
+
+
+def test_page_du_labo_fenetre_et_peremption():
+    from app.lab import page as PG
+
+    data = full_data({"grade": "S", "rang": GR.rank_of("S", 1), "non_note": False, "risque_grade": 5.0,
+                      "risque_max": 5.0, "mode_survie": False})
+    data["marches"]["stock"]["mesure"]["fenetre"] = GR.span(["2026-04-01", "2026-10-06"], {"2026-10-06"}) | {
+        "discontinue": True}
+    html = PG._grade_card(data)  # vérifié à NOW, il y a plus de 6 h
+    assert "⚠️ Grade périmé (dernier passage du labo il y a" in html and "5 % permis, 4 % en pratique" in html
+    assert "risque 5 % permis, 4 % en pratique" in html and "permis 5 % permis" not in html
+    assert "fenêtre : rejeu du 01/04/2026 au 01/04/2026, direct depuis le 06/10/2026" in html
+    fresh = data | {"verifie_le": datetime.now(timezone.utc).isoformat()}
+    assert "périmé" not in PG._grade_card(fresh)
+
+
+# --- Budget de risque ouvert (R4) -------------------------------------------------------------------
+
+def test_plafond_s_et_budget_total():
+    data = {"marches": {"stock": DATA["marches"]["stock"] | {"grade": "S", "risque_grade": 5.0, "risque_max": 5.0}},
+            "verifie_le": NOW.isoformat()}
+    g = GR.risk_now("stock", [], NOW, data)
+    assert g["risque_propose"] == 4.0 and "budget de 4 % ouvert au total" in g["raison"] and "déjà" not in g["raison"]
+    assert GR.practical(5.0) == "5 % permis, 4 % en pratique (budget total)" and GR.practical(3.0) == "3 %"
+    text = GR.text(full_data(data["marches"]["stock"]), now=NOW)
+    assert "risque 5 % permis, 4 % en pratique (budget total) (plafond 5 %)" in text and "périmé" not in text
+    assert "permis 5 % permis" not in text  # relecture d'intégration : « permis » n'est plus doublé
+    assert GR.allowed(3.0) == "risque permis 3 %"
+    assert "espérance +0.250 R par trade après commission IBKR à 20 €" in text
+
+
+def test_risque_ouvert_en_euros(monkeypatch):
+    monkeypatch.setenv("JARVIS_CAPITAL", "1000")
+    t = trade() | {"sizing": {"risk_pct": None, "risk_amount_eur": 20.0, "capital": None}}
+    assert GR.open_risk([t]) == 2.0  # 20 € sur 1 000 €
+    t = trade() | {"sizing": {"risk_pct": 0.5, "risk_amount_eur": 20.0, "capital": 4000.0}}
+    assert GR.open_risk([t]) == 0.5  # le capital du moment où le trade a été pris
+    taken_f = trade() | {"sizing": None, "sizing_regle": {"risk_amount_eur": 20.0, "capital": None}}
+    assert GR.open_risk([taken_f]) == 2.0  # pris sous grade F : compte quand même
+    monkeypatch.delenv("JARVIS_CAPITAL")
+    assert GR.open_risk([t | {"sizing": {"risk_amount_eur": 20.0}}]) == 1.0  # ni capital ni % : 1 % (plafond de C)
+    assert GR.open_risk([trade() | {"sizing": None}]) == 1.0  # jamais 0 pour un trade réellement pris
 
 
 # --- Routes, brief, Discord -----------------------------------------------------------------------
@@ -362,3 +669,21 @@ async def test_commande_grade(db):
 
 def test_texte_sans_grade():
     assert "pas encore calculé" in GR.text(None)
+
+
+def test_api_risque_explicite(monkeypatch):
+    seen = []
+
+    async def fake_build(*args, **kwargs):
+        seen.append(kwargs)
+        raise T.PlanError("plan de test")
+
+    monkeypatch.setattr(main.trading, "build_plan", fake_build)
+    client = TestClient(main.app)
+    body = {"symbol": "AAA", "market": "stock", "capital": 10000}
+    for bad in (-1, 101):
+        assert client.post("/api/trading/plan", json=body | {"risk_pct": bad}).status_code == 422
+    assert not seen
+    r = client.post("/api/trading/plan", json=body | {"risk_pct": 0})
+    assert r.status_code == 422 and r.json()["detail"] == "plan de test"
+    assert seen[0]["risk_pct"] == 0.0 and seen[0]["capital"] == 10000.0  # 0 transmis tel quel (plus de « or 3 % »)

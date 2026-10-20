@@ -3,8 +3,11 @@
 Barème v2 validé par Simão le 2026-10-07 (après avis de GPT et Gemini) :
 
 - Lettre = rentabilité : espérance nette en R par trade sur la fenêtre (FENETRE_JOURS derniers jours
-  de bourse du marché, trades déclenchés de la méthode championne, hors échantillon), avec son
-  intervalle de confiance à 95 % en grappes par jour (stats.mean_ci) :
+  de bourse du marché, trades déclenchés de la méthode championne, hors échantillon ; actions : R après
+  commission IBKR à la mise de Simão, strategies.cost_variants), avec son intervalle de confiance à 95 %
+  en grappes par jour, en t de Student (stats.mean_ci). Une fenêtre coupée par un trou de plus de
+  TROU_JOURS jours (rejeu puis direct) est notée sur son dernier segment s'il suffit ; sinon elle garde
+  sa lettre, marquée « fenêtre discontinue », sans risque réel :
     S ≥ +0,40 R, A ≥ +0,25, B ≥ +0,15, C ≥ +0,05 (borne basse de l'IC > 0 dès C),
     D positive mais pas prouvée, E entre −0,10 et 0, F < −0,10.
 - − / neutre / + = stabilité et calibration (2 ou 3 critères : +, 1 : neutre, 0 : −) :
@@ -16,10 +19,12 @@ Barème v2 validé par Simão le 2026-10-07 (après avis de GPT et Gemini) :
 - Moins de MIN_TRADES trades sur MIN_JOURS jours : « non noté », risque 0 %.
 
 Le grade donne le DROIT de risquer ; la taille se calcule à part (¼ de Kelly sur la borne basse de
-l'espérance, variance des R), plafonnée par la lettre : F, E, non noté 0 % (plans en observation,
-forward-test papier seulement), D 0,25 %, C 1 %, B 1,5 %, A 3 %, S 5 % (plafond EmperorBTC choisi par
-Simão ; JARVIS recommandait 2 %, pari noté). En direct s'y ajoutent le risque ouvert total (≤ 4 %)
-et l'arrêt de la journée à −3 R sur les trades pris (risk_now).
+l'espérance, variance des R, corrigé de la corrélation des trades d'un même jour), plafonnée par la
+lettre : F, E, non noté 0 % (plans en observation, forward-test papier seulement), D 0,25 %, C 1 %,
+B 1,5 %, A 3 %, S 5 % (plafond EmperorBTC choisi par Simão ; JARVIS recommandait 2 %, pari noté ; le
+budget total de 4 % le ramène à 4 % en pratique). En direct s'y ajoutent le risque ouvert total (≤ 4 %)
+et l'arrêt de la journée à −3 R sur les trades pris (risk_now) ; un grade que le labo n'a pas revérifié
+depuis MAX_AGE_H heures ne donne plus aucun droit (périmé : 0 %).
 
 Changements du grade officiel (worker, chaque passage, zéro jeton) :
 - baisse : immédiate ;
@@ -46,6 +51,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from app.config import env_float
 from app.lab import stats as STATS
 from app.lab import validator as V
 from app.lab.db import LabDB, db_path, now_iso
@@ -72,6 +78,9 @@ RISQUE_MAX = {"F": 0.0, "E": 0.0, "D": 0.25, "C": 1.0, "B": 1.5, "A": 3.0, "S": 
 KELLY_PART = 0.25
 RISQUE_OUVERT_MAX = 4.0
 ARRET_JOUR_R = -3.0
+TROU_JOURS = 10        # écart calendaire entre deux jours de la fenêtre au-delà duquel elle est coupée
+GRADE_CALC = 2         # version du calcul (2 : R des actions après commission IBKR à 20 €, Kelly corrigé)
+MAX_AGE_H = env_float("JARVIS_GRADE_MAX_AGE_H", 6.0)  # au-delà, le grade est périmé : risque 0 %
 MOTIFS_MAX, VOIX_MAX = 1500, 1000
 SOURCES_FR = {"calcul": "calcul", "council": "council du soir", "simao": "accord de Simão",
               "coupe_circuit": "coupe-circuit", "nouvelle_version": "nouvelle méthode"}
@@ -170,10 +179,18 @@ def evaluate(rows: list[tuple]) -> dict:
     rank = rank_of(lt, 2 if met >= 2 else met)
     low = ci[0] if ci else None
     kelly = KELLY_PART * low / var * 100 if low is not None and low > 0 and var > 0 else 0.0
+    # Les trades d'un même jour ne sont pas indépendants : corrélation intra-jour estimée par l'effet de grappe
+    # (DEFF = se² × n / var, ρ = (DEFF − 1) / (k̄ − 1), k̄ trades par jour du labo), appliquée aux positions que
+    # Simão peut tenir ensemble sous le budget (⌈4 % / plafond de la lettre⌉), pas aux dizaines du labo.
+    k_bar = n / len(day_sums)
+    rho = (min(1.0, max(0.0, (se * se * n / var - 1) / (k_bar - 1)))
+           if se is not None and var > 0 and k_bar > 1 else 0.0)
+    k = math.ceil(RISQUE_OUVERT_MAX / RISQUE_MAX[lt]) if RISQUE_MAX[lt] > 0 else 1
     return out | {
         "rang": rank, "grade": name(rank), "lettre": lt,
         "esperance_r": round(mean, 4), "ic95": ci, "variance_r": round(var, 4), "total_r": round(s, 2),
-        "kelly_pct": round(kelly, 3),
+        "kelly_pct": round(kelly / (1 + (k - 1) * rho), 3), "kelly_brut_pct": round(kelly, 3),
+        "rho_jour": round(rho, 3), "positions_max": k,
         "criteres": criteria,
         "serie_pertes": curve_res["pire_serie_pertes"], "serie_attendue": round(streak, 1) if streak else None,
         "baisse_max_r": curve_res["baisse_max_r"],
@@ -192,6 +209,11 @@ def grade_risk(rank: int | None, kelly_pct: float | None) -> float:
     if lt == "D":
         return RISQUE_MAX["D"]
     return round(min(RISQUE_MAX[lt], kelly_pct or 0.0), 2)
+
+
+def discontinuous(m: dict | None) -> bool:
+    """Fenêtre mixte coupée par un trou que son dernier segment ne suffit pas à noter (window) : risque 0."""
+    return bool(((m or {}).get("fenetre") or {}).get("discontinue"))
 
 
 def drawdown(rs) -> float:
@@ -221,7 +243,43 @@ def _scope(conn, market: str, base_id: int | None) -> tuple[str, list, str | Non
     return sql, params, champ["version"]
 
 
-def window_rows(conn, market: str, base_id: int | None = None) -> tuple[list[tuple], str | None]:
+def cost_r(market: str, r_net: float, result: str | None) -> float:
+    """R d'un trade pour le grade : actions, après commission IBKR à la mise de Simão (RISK_EUR, un bracket par
+    objectif, minimum par ordre : strategies.cost_variants, r_20e), r_net s'il manque le détail ; crypto : r_net
+    (frais OKX déjà comptés)."""
+    if market != "stock" or not result:
+        return r_net
+    from app.lab import strategies as ST  # import tardif, comme strategies le fait pour killmode
+
+    try:
+        r = ST.cost_variants("stock", json.loads(result))["r_20e"]
+    except (ValueError, KeyError, TypeError, ZeroDivisionError):
+        return r_net
+    return r_net if r is None else r
+
+
+def span(days: list[str], live: set[str]) -> dict:
+    """Étendue réelle d'une fenêtre (jours triés) : bornes, jours, jours du direct, rejeu, plus grand trou
+    calendaire entre deux jours consécutifs."""
+    if not days:
+        return {"du": None, "au": None, "jours": 0, "jours_direct": 0, "trou_max_jours": 0}
+    dates = [datetime.fromisoformat(d).date() for d in days]
+    replay = [d for d in days if d not in live]
+    return {"du": days[0], "au": days[-1], "jours": len(days), "jours_direct": sum(d in live for d in days),
+            "trou_max_jours": max([(b - a).days for a, b in zip(dates, dates[1:])], default=0),
+            "rejeu_du": replay[0] if replay else None, "rejeu_au": replay[-1] if replay else None,
+            "direct_du": next((d for d in days if d in live), None)}
+
+
+def last_segment(days: list[str], gap: int = TROU_JOURS) -> list[str]:
+    """Jours (triés) après le dernier écart de plus de `gap` jours calendaires."""
+    dates = [datetime.fromisoformat(d).date() for d in days]
+    cut = max([i for i in range(1, len(dates)) if (dates[i] - dates[i - 1]).days > gap], default=0)
+    return days[cut:]
+
+
+def window_rows(conn, market: str, base_id: int | None = None) -> tuple[list[tuple], str | None, set[str]]:
+    """Lignes de la fenêtre pour evaluate (R du grade, cost_r), version, et jours du direct de la fenêtre."""
     sql, params, version = _scope(conn, market, base_id)
     join = "FROM trades t LEFT JOIN regimes r ON r.market = t.market AND r.day = t.day"
     row = conn.execute(f"SELECT DISTINCT t.day {join} WHERE {sql} ORDER BY t.day DESC LIMIT 1 OFFSET ?",
@@ -232,21 +290,43 @@ def window_rows(conn, market: str, base_id: int | None = None) -> tuple[list[tup
                    t.minutes_to_tp1, t.minutes_to_tp2, t.minutes_to_tp3,
                    json_extract(t.plan, '$.targets[0].minutes_median'),
                    json_extract(t.plan, '$.targets[1].minutes_median'),
-                   json_extract(t.plan, '$.targets[2].minutes_median')
+                   json_extract(t.plan, '$.targets[2].minutes_median'), t.origin, t.result
             {join} WHERE {sql} AND t.day >= ? ORDER BY t.planned_at, t.id""", (*params, cutoff))
-    rows = [(i, day, r, a, b, c, STATS.delay_ok(a, m1, e1), STATS.delay_ok(b, m2, e2), STATS.delay_ok(c, m3, e3))
-            for i, day, r, a, b, c, m1, m2, m3, e1, e2, e3 in cur]
-    return rows, version
+    rows, live = [], set()
+    for i, day, r, a, b, c, m1, m2, m3, e1, e2, e3, origin, result in cur:
+        rows.append((i, day, cost_r(market, r, result), a, b, c, STATS.delay_ok(a, m1, e1),
+                     STATS.delay_ok(b, m2, e2), STATS.delay_ok(c, m3, e3)))
+        if origin == "live":
+            live.add(day)
+    return rows, version, live
+
+
+def window(conn, market: str, base_id: int | None = None) -> tuple[list[tuple], dict]:
+    """Fenêtre du grade et son étendue réelle (`fenetre`). Un trou de plus de TROU_JOURS jours (rejeu puis
+    direct) : notée sur le dernier segment s'il a MIN_TRADES trades sur MIN_JOURS jours (`coupee_au`), sinon
+    gardée entière et marquée `discontinue` (risque 0 : une hausse de risque exige une preuve récente)."""
+    rows, _, live = window_rows(conn, market, base_id)
+    days = sorted({r[1] for r in rows})
+    fen = span(days, live)
+    if fen["trou_max_jours"] > TROU_JOURS:
+        seg = set(last_segment(days))
+        kept = [r for r in rows if r[1] in seg]
+        if len(seg) >= MIN_JOURS and len(kept) >= MIN_TRADES:
+            rows, fen["coupee_au"] = kept, min(seg)
+        else:
+            fen["discontinue"] = True
+    return rows, fen
 
 
 def since(conn, market: str, after_id: int, base_id: int | None = None) -> dict:
-    """Trades journalisés depuis le dernier changement : nombre, jours, baisse depuis le sommet."""
+    """Trades journalisés depuis le dernier changement : nombre, jours, baisse depuis le sommet (mêmes R que le
+    grade)."""
     sql, params, _ = _scope(conn, market, base_id)
     rs, days = [], set()
-    for day, r in conn.execute(f"SELECT t.day, t.r_net FROM trades t LEFT JOIN regimes r ON r.market = t.market "
-                               f"AND r.day = t.day WHERE {sql} AND t.id > ? ORDER BY t.planned_at, t.id",
-                               (*params, after_id)):
-        rs.append(r)
+    for day, r, result in conn.execute(
+            f"SELECT t.day, t.r_net, t.result FROM trades t LEFT JOIN regimes r ON r.market = t.market "
+            f"AND r.day = t.day WHERE {sql} AND t.id > ? ORDER BY t.planned_at, t.id", (*params, after_id)):
+        rs.append(cost_r(market, r, result))
         days.add(day)
     return {"trades": len(rs), "jours": len(days), "baisse_r": round(drawdown(rs), 2)}
 
@@ -354,10 +434,10 @@ class Grader:
             log.info("Labo : grade %s %s → %s (%s)", market, name(old), name(rank), reason)
             return
         arrow = "⬆️" if old is not None and rank > old else "⬇️" if old is not None else "🏅"
-        risk = grade_risk(rank, (metrics or {}).get("kelly_pct"))
+        risk = 0.0 if discontinuous(metrics) else grade_risk(rank, (metrics or {}).get("kelly_pct"))
         text = (f"{arrow} Grade JARVIS {MARKET_FR[market]} : {name(old) + ' → ' if old is not None else ''}"
                 f"**{name(rank)}** ({SOURCES_FR.get(source, source)} : {reason}). Risque proposé par trade : "
-                f"{risk:g} %{' (plans en observation)' if risk == 0 else ''}.")
+                f"{practical(risk)}{' (plans en observation)' if risk == 0 else ''}.")
         self.event(st, text, {"marche": market, "de": old, "vers": rank, "source": source})
 
     def propose(self, market: str, st: dict, target: int, source: str, reason: str,
@@ -393,15 +473,19 @@ class Grader:
                              f"méthode {champ_version} en place : grade remis à zéro (hors échantillon)")
             st = {"rang": None, "version": champ_version, "depuis_id": max_trade_id(conn), "base_id": max_trade_id(conn),
                   "change_le": None, "hausse": None, "morte": False, "seq": st.get("seq", 0)}
-        rows, _ = window_rows(conn, market, st.get("base_id"))
-        m = evaluate(rows)
+        rows, fen = window(conn, market, st.get("base_id"))
+        m = evaluate(rows) | {"fenetre": fen}
         st["mesure"] = m
         measured = m.get("rang")
         cur = st["rang"]
+        disc = discontinuous(m)
         if measured is not None:
             if cur is None:
                 if measured <= D_PLUS:
                     self.set_rank(market, st, measured, "calcul", "premier grade", measured, m)
+                elif disc:  # pas de hausse proposée sans preuve récente
+                    self.set_rank(market, st, D_PLUS, "calcul", f"premier grade, mesuré {name(measured)} sur une "
+                                                                 "fenêtre discontinue", measured, m)
                 else:
                     self.set_rank(market, st, D_PLUS, "calcul", f"premier grade, mesuré {name(measured)}", measured, m)
                     self.propose(market, st, measured, "calcul", f"mesuré {name(measured)} dès le premier calcul")
@@ -414,7 +498,7 @@ class Grader:
                 elif measured < cur:
                     self.set_rank(market, st, measured, "calcul",
                                   f"espérance {m['esperance_r']:+.3f} R sur {m['trades']} trades", measured, m)
-                elif measured > cur and new["trades"] >= HAUSSE_TRADES and new["jours"] >= HAUSSE_JOURS:
+                elif measured > cur and not disc and new["trades"] >= HAUSSE_TRADES and new["jours"] >= HAUSSE_JOURS:
                     self.raise_to(market, st, measured, "calcul",
                                   f"espérance {m['esperance_r']:+.3f} R sur {m['trades']} trades, dont "
                                   f"{new['trades']} nouveaux sur {new['jours']} jours", measured, m)
@@ -502,9 +586,10 @@ class Grader:
 
 def signature(db: LabDB) -> list:
     from app.lab import method as M
+    from app.lab import empreinte as E  # I3 : trades réécrits sur place, code des stats
 
     row = db.conn.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM trades").fetchone()
-    return [row[0], row[1], M.champion(db.conn)["version"]]
+    return [row[0], row[1], M.champion(db.conn)["version"], GRADE_CALC, *E.sig(db.conn, "trades")]
 
 
 def step(db: LabDB, now: datetime | None = None) -> dict:
@@ -520,7 +605,7 @@ def step(db: LabDB, now: datetime | None = None) -> dict:
                 st = g.grade_market(market)
             out[market] = name(st["rang"])
         db.set("grade_calc", "signature", sig)
-    out["fichier"] = write_live(db)
+    out["fichier"] = write_live(db, now)
     return out
 
 
@@ -539,8 +624,8 @@ def payload(conn) -> dict:
         lt = letter_of(st.get("rang"))
         markets[market] = {
             "grade": name(st.get("rang")), "rang": st.get("rang"), "version": st.get("version"),
-            "non_note": non_note, "mesure": m, "change_le": st.get("change_le"),
-            "risque_grade": 0.0 if non_note else grade_risk(st.get("rang"), m.get("kelly_pct")),
+            "non_note": non_note, "mesure": m, "change_le": st.get("change_le"), "discontinue": discontinuous(m),
+            "risque_grade": 0.0 if non_note or discontinuous(m) else grade_risk(st.get("rang"), m.get("kelly_pct")),
             "risque_max": RISQUE_MAX[lt] if lt else 0.0,
             "mode_survie": non_note is False and (lt in ("E", "F") or bool(st.get("morte"))),
             "morte": bool(st.get("morte")), "hausse": st.get("hausse"), "nouveaux": st.get("nouveaux")}
@@ -566,17 +651,23 @@ def live_path(db_file: str | None = None) -> Path:
     return Path(override) if override else Path(db_file or db_path()).parent / GRADE_FILE
 
 
-def write_live(db: LabDB) -> bool:
+def write_live(db: LabDB, now: datetime | None = None) -> bool:
+    """lab_grade.json ; `verifie_le` à chaque passage réussi du grade, même sans changement (`ecrit_le` gardé) :
+    le direct sait ainsi que le labo vérifie encore son grade (sinon : périmé, risque 0 %). Vrai si le grade a
+    changé."""
     if db.path == ":memory:":
         return False
     data = payload(db.conn)
     path = live_path(db.path)
+    checked = (now or datetime.now(timezone.utc)).isoformat(timespec="seconds")
     try:
-        if json.loads(path.read_text(encoding="utf-8")).get("marches") == data["marches"]:
+        old = json.loads(path.read_text(encoding="utf-8"))
+        if old.get("marches") == data["marches"]:
+            _write_atomic(path, old | {"verifie_le": checked})
             return False
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError):
         pass
-    _write_atomic(path, data | {"ecrit_le": now_iso()})
+    _write_atomic(path, data | {"ecrit_le": now_iso(), "verifie_le": checked})
     return True
 
 
@@ -608,34 +699,56 @@ def market_grade(market: str, data: dict | None = None) -> dict | None:
     return ((data or {}).get("marches") or {}).get(market)
 
 
+def taken_pct(t: dict, capital: float | None = None) -> float:
+    """Risque pris sur un trade suivi (% du capital, en euros) : ses euros de risque (`risk_amount_eur` de sa taille,
+    ou de la règle de 20 € quand JARVIS n'en proposait pas) rapportés au capital s'il est connu, sinon son % ; à
+    défaut le plafond de C (1 %) : jamais 0 pour un trade réellement pris."""
+    for s in (t.get("sizing"), t.get("sizing_regle")):
+        if not isinstance(s, dict):
+            continue
+        cap = s.get("capital") or capital
+        if s.get("risk_amount_eur") and cap:
+            return s["risk_amount_eur"] / cap * 100
+        if s.get("risk_pct"):
+            return s["risk_pct"]
+    return RISQUE_MAX["C"]
+
+
 def open_risk(trades: list[dict]) -> float:
-    """Risque encore en jeu sur les trades ouverts (% du capital) : risque pris × part de la position
-    restante × part du stop encore sous l'entrée (0 une fois le stop remonté à l'entrée)."""
+    """Risque encore en jeu sur les trades ouverts (% du capital) : risque pris (taken_pct) × part de la position
+    restante × part du stop encore sous l'entrée (0 une fois le stop remonté à l'entrée). Un trade mal formé
+    compte pour tout son risque (jamais d'exception ici : elle ferait sauter le budget)."""
     total = 0.0
+    capital = env_float("JARVIS_CAPITAL", 0.0) or None
     for t in trades:
-        if t.get("status") != "open":
+        if not isinstance(t, dict) or t.get("status") != "open":
             continue
-        pct = (t.get("sizing") or {}).get("risk_pct")
-        if pct is None:
-            pct = (t.get("grade") or {}).get("risque_propose") or 0.0
-        risk = abs(t["entry"] - t["stop"])
-        if not pct or not risk:
-            continue
-        sign = 1 if t["side"] == "long" else -1
-        left = max(0.0, sign * (t["entry"] - t.get("stop_current", t["stop"]))) / risk
-        legs = len(t.get("targets") or []) or 1
-        total += pct * left * (legs - min(t.get("targets_hit", 0), legs)) / legs
+        try:
+            pct = taken_pct(t, capital)
+        except (TypeError, ValueError, ZeroDivisionError):
+            pct = RISQUE_MAX["C"]
+        try:
+            risk = abs(t["entry"] - t["stop"])
+            sign = 1 if t["side"] == "long" else -1
+            left = max(0.0, sign * (t["entry"] - t.get("stop_current", t["stop"]))) / risk
+            legs = len(t.get("targets") or []) or 1
+            total += pct * left * (legs - min(t.get("targets_hit", 0), legs)) / legs
+        except (KeyError, TypeError, ValueError, ZeroDivisionError) as exc:
+            log.warning("Grade : trade suivi %s mal formé (%s: %s), compté pour %g %% de risque ouvert",
+                        t.get("id"), type(exc).__name__, exc, pct)
+            total += pct
     return round(total, 3)
 
 
 def day_r(trades: list[dict], now: datetime) -> float:
-    """R réalisé aujourd'hui (date de Paris de la clôture) sur les trades pris."""
+    """R réalisé aujourd'hui (date de Paris de la clôture) sur les trades pris, net des frais estimés
+    (service.realized_r_net : stop exécuté au prix du gap, commissions IBKR à la taille du trade)."""
     from app.trading import service as T
 
     today = now.astimezone(PARIS).date()
     total = 0.0
     for t in trades:
-        r = T.realized_r(t)
+        r = T.realized_r_net(t)
         if r is None:
             continue
         ends = [e["at"] for e in t.get("events", []) if e["kind"] in ("stop", "close", "tp3", "tp2", "tp1")]
@@ -644,9 +757,51 @@ def day_r(trades: list[dict], now: datetime) -> float:
     return round(total, 2)
 
 
+def age_h(data, now: datetime) -> float | None:
+    """Heures depuis le dernier passage réussi du grade au labo (`verifie_le`) ; None s'il manque ou est illisible."""
+    try:
+        at = datetime.fromisoformat(data["verifie_le"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    return max(0.0, (now - at).total_seconds() / 3600)
+
+
+def _day(d: str | None) -> str:
+    return f"{d[8:10]}/{d[5:7]}/{d[:4]}" if d else "?"
+
+
+def window_text(f: dict | None) -> str | None:
+    """« fenêtre : rejeu du … au …, direct depuis le … » ; None sans fenêtre publiée."""
+    if not f or not f.get("jours"):
+        return None
+    parts = []
+    if f.get("rejeu_du"):
+        parts.append(f"rejeu du {_day(f['rejeu_du'])} au {_day(f['rejeu_au'])}")
+    if f.get("direct_du"):
+        parts.append(f"direct depuis le {_day(f['direct_du'])}")
+    out = f"fenêtre : {', '.join(parts)} ({f['jours']} jours, dont {f['jours_direct']} en direct"
+    out += f", plus grand trou {f['trou_max_jours']} jours)" if f["trou_max_jours"] > TROU_JOURS else ")"
+    if f.get("coupee_au"):
+        out += f" · grade calculé sur les jours depuis le {_day(f['coupee_au'])} seulement (après le trou)"
+    elif f.get("discontinue"):
+        out += (f" · ⚠️ fenêtre discontinue : risque 0 % tant que les jours après le trou n'ont pas {MIN_TRADES} "
+                f"trades sur {MIN_JOURS} jours")
+    return out
+
+
+def unreadable(exc: Exception) -> dict:
+    """Grade illisible (exception) : 0 %, jamais le risque par défaut (fail-closed)."""
+    return {"grade": "non noté", "risque_grade": 0.0, "risque_propose": 0.0,
+            "raison": f"grade illisible ({type(exc).__name__})", "observation": True}
+
+
 def risk_now(market: str, trades: list[dict], now: datetime | None = None, data: dict | None = None) -> dict:
-    """Risque proposé pour un nouveau plan : grade, puis budget du portefeuille et arrêt de la journée."""
+    """Risque proposé pour un nouveau plan : grade (s'il est frais), puis budget du portefeuille et arrêt de la
+    journée."""
     now = now or datetime.now(timezone.utc)
+    data = current() if data is None else data
     g = market_grade(market, data)
     if not g:
         return {"grade": "non noté", "risque_grade": 0.0, "risque_propose": 0.0, "raison": "grade pas encore calculé",
@@ -654,8 +809,16 @@ def risk_now(market: str, trades: list[dict], now: datetime | None = None, data:
     base = g["risque_grade"]
     out = {"grade": g["grade"], "risque_grade": base, "risque_max": g["risque_max"], "mode_survie": g["mode_survie"],
            "non_note": g["non_note"]}
+    age = age_h(data, now)
+    if age is None or age > MAX_AGE_H:
+        return out | {"risque_propose": 0.0, "observation": True, "perime": True,
+                      "raison": "grade périmé (" + ("aucun passage du labo daté" if age is None else
+                                                    f"dernier passage du labo il y a {age:.0f} h") + ")"}
     if base <= 0:
+        f = (g.get("mesure") or {}).get("fenetre") or {}
         why = ("échantillon trop petit" if g["non_note"] else
+               f"fenêtre discontinue (rejeu jusqu'au {_day(f.get('rejeu_au'))}, direct depuis le "
+               f"{_day(f.get('direct_du'))}) : pas de risque réel sans preuve récente" if g.get("discontinue") else
                f"grade {g['grade']} : pas de capital réel tant que la méthode n'est pas au moins D")
         return out | {"risque_propose": 0.0, "raison": why, "observation": True}
     opened = open_risk(trades)
@@ -666,50 +829,91 @@ def risk_now(market: str, trades: list[dict], now: datetime | None = None, data:
                       "observation": True}
     room = max(0.0, RISQUE_OUVERT_MAX - opened)
     proposed = round(min(base, room), 2)
-    why = f"grade {g['grade']}" + (f", plafonné par le risque déjà ouvert ({opened:g} %)" if proposed < base else "")
+    why = f"grade {g['grade']}"
+    if proposed < base:
+        why += (f", plafonné par le budget de {RISQUE_OUVERT_MAX:g} % ouvert au total"
+                + (f" ({opened:g} % déjà ouverts)" if opened else ""))
     return out | {"risque_propose": proposed, "raison": why, "observation": proposed <= 0}
 
 
+def _eur(x: float) -> str:
+    return f"{round(x, 2):g}".replace(".", ",") + " €"
+
+
 def plan_line(g: dict) -> str:
-    """Une ligne pour le plan sur Discord."""
+    """Une ligne pour le plan sur Discord (et l'avertissement d'un risque demandé au-delà du budget)."""
     head = f"🏅 Grade JARVIS **{g['grade']}** · risque proposé **{g['risque_propose']:g} %**"
-    if g.get("observation"):
-        return head + f" : plan en observation ({g['raison']})"
-    return head + f" ({g['raison']})"
+    line = head + (f" : plan en observation ({g['raison']})" if g.get("observation") else f" ({g['raison']})")
+    if g.get("hors_budget"):
+        line += (f"\n⚠️ **Hors budget** : risque demandé {g['risque_demande']:g} %"
+                 + (f" ({_eur(g['risque_demande_eur'])})" if g.get("risque_demande_eur") else "")
+                 + (f", au-delà des {_eur(g['propose_eur'])} que propose JARVIS" if g.get("propose_eur") else
+                    f", alors que JARVIS ne propose aucun risque ({g['risque_propose']:g} %)")
+                 + " : ton choix, gardé tel quel")
+    return line
 
 
 def _pct(x) -> str:
     return "n/d" if x is None else f"{x:.0%}"
 
 
-def text(data: dict | None, hist: list[dict] | None = None) -> str:
+def practical(risk: float) -> str:
+    """« 5 % permis, 4 % en pratique (budget total) » quand le risque du grade dépasse le budget ouvert total."""
+    if risk > RISQUE_OUVERT_MAX:
+        return f"{risk:g} % permis, {RISQUE_OUVERT_MAX:g} % en pratique (budget total)"
+    return f"{risk:g} %"
+
+
+def allowed(risk: float) -> str:
+    """« risque permis 3 % », ou « risque 5 % permis, 4 % en pratique (budget total) » (sans « permis » en double)."""
+    return f"risque {practical(risk)}" if risk > RISQUE_OUVERT_MAX else f"risque permis {practical(risk)}"
+
+
+def text(data: dict | None, hist: list[dict] | None = None, now: datetime | None = None) -> str:
     """`!grade` : grade de chaque marché, de quoi il est fait, et ce qu'il change."""
     marches = (data or {}).get("marches") or {}
     if not marches:
         return "🏅 Grade JARVIS pas encore calculé (le worker du labo le calcule à son prochain passage)."
+    from app.trading import killmode as K  # import tardif : la mise de Simão (JARVIS_RISK_EUR)
+
     lines = ["🏅 **Grade JARVIS** (F- à S+ : la preuve que la méthode gagne, mesurée sans jeton)"]
+    age = age_h(data, now or datetime.now(timezone.utc))
+    if age is None or age > MAX_AGE_H:
+        lines.append("⚠️ **Grade périmé** : " + ("aucun passage du labo daté" if age is None else
+                                                 f"dernier passage du labo il y a {age:.0f} h")
+                     + f" (au-delà de {MAX_AGE_H:g} h, JARVIS ne propose plus aucun risque : 0 %)")
     for market in MARKETS:
         g = marches.get(market)
         if not g:
             continue
         m = g["mesure"] or {}
         lines.append(f"\n**{MARKET_FR[market].capitalize()} : {g['grade']}** · méthode {g['version']} · "
-                     f"risque permis {g['risque_grade']:g} % (plafond {g['risque_max']:g} %)")
+                     f"{allowed(g['risque_grade'])} (plafond {g['risque_max']:g} %)")
+        window = window_text(m.get("fenetre"))
         if g["non_note"]:
             lines.append(f"-# {m.get('raison', 'échantillon trop petit')} : {m.get('trades', 0)} trades sur "
                          f"{m.get('jours', 0)} jours")
+            if window:
+                lines.append(f"-# {window}")
         else:
             ci = m.get("ic95") or [None, None]
             crit = m.get("criteres") or {}
             ok = {True: "✅", False: "❌"}
-            lines.append(f"Mesuré **{m['grade']}** : {m['esperance_r']:+.3f} R par trade (IC95 {ci[0]:+.3f} ; "
-                         f"{ci[1]:+.3f}) sur {m['trades']} trades et {m['jours']} jours")
+            cost = f" après commission IBKR à {K.RISK_EUR:g} €" if market == "stock" else " (frais OKX compris)"
+            lines.append(f"Mesuré **{m['grade']}** : espérance {m['esperance_r']:+.3f} R par trade{cost} (IC95 "
+                         f"{ci[0]:+.3f} ; {ci[1]:+.3f}) sur {m['trades']} trades et {m['jours']} jours")
+            if window:
+                lines.append(f"-# {window}")
             lines.append(f"{ok[crit.get('series_normales', False)]} séries de pertes ({m['serie_pertes']} d'affilée, "
                          f"~{m['serie_attendue']} attendues) · {ok[crit.get('regulier', False)]} régularité "
                          f"({' / '.join(f'{h:+.2f}' for h in m['moities_r'] if h is not None)} R) · "
                          f"{ok[crit.get('delais_calibres', False)]} délais tenus {_pct(m['delais_tenus'])}")
             lines.append(f"-# Réussite {_pct(m['reussite'])} · TP1 {_pct(m['tp1'])} · TP2 {_pct(m['tp2'])} · "
                          f"TP3 {_pct(m['tp3'])} · baisse max {m['baisse_max_r']:g} R")
+            if m.get("rho_jour"):
+                lines.append(f"-# ¼ de Kelly {m['kelly_brut_pct']:g} % ramené à {m['kelly_pct']:g} % : trades d'un même "
+                             f"jour corrélés (ρ {m['rho_jour']:g}) et jusqu'à {m['positions_max']} positions ouvertes "
+                             "ensemble sous le budget")
         if g.get("morte"):
             lines.append("☠️ Méthode déclarée morte (IC95 entièrement sous zéro) : il faut un challenger.")
         elif g.get("mode_survie"):
@@ -722,6 +926,47 @@ def text(data: dict | None, hist: list[dict] | None = None) -> str:
         for h in hist[:5]:
             lines.append(f"-# {h['le'][:16].replace('T', ' ')} · {MARKET_FR.get(h['marche'], h['marche'])} · "
                          f"{h['grade']} · {h['source']} : {h['raison']}")
+    return "\n".join(lines)
+
+
+def reels(trades: list[dict]) -> dict:
+    """Troisième population (avis de GPT, 10 oct.) : trades réellement pris et suivis par JARVIS (`!prends`),
+    terminés, hors Killmode (mesuré par son propre journal), en R réalisé avant frais et net des frais estimés
+    (service.realized_r_net ; gagnants comptés nets). Indicatif : aucun effet."""
+    from app.trading import service as T
+
+    out = {}
+    for market in MARKETS:
+        mine = [t for t in trades if t.get("market", "stock") == market and not t.get("killmode")]
+        done = [(T.realized_r(t), T.realized_r_net(t)) for t in mine if T.realized_r(t) is not None]
+        rs, nets = [r for r, _ in done], [n for _, n in done]
+        out[market] = {"termines": len(rs), "esperance_r": round(sum(rs) / len(rs), 3) if rs else None,
+                       "total_r": round(sum(rs), 2), "gagnants": sum(n > 0 for n in nets),
+                       "esperance_net_r": round(sum(nets) / len(nets), 3) if nets else None,
+                       "total_net_r": round(sum(nets), 2)}
+    return out
+
+
+def populations_text(indicatif: list[str], real: dict | None) -> str:
+    """Lignes ajoutées à `!grade` : GO confirmés (labo) et trades réels, à côté du grade officiel de v1, chacun
+    avec la politique qu'il mesure (entrée, break-even, sortie au temps, taille)."""
+    from app.trading import service as T
+
+    lines = []
+    if indicatif:
+        lines.append("\n**GO confirmés, stop fixe, vendus à la clôture** (≠ ton suivi : stop à l'entrée après TP2, "
+                     "pas de sortie au temps) · entrée par l'ordre stop de la confirmation, en R du labo (ses coûts, "
+                     "pas ta taille) ; indicatif : ne change ni le grade ni le risque")
+        lines += indicatif
+    real = [(m, g) for m, g in (real or {}).items() if g["termines"]]
+    if real:
+        lines.append("\n**Tes trades réels** (R nets de frais estimés, bruts entre parenthèses)")
+        lines.append(f"-# Politique mesurée : {T.suivi_politique()}.")
+    for market, g in real:
+        lines.append(f"-# {MARKET_FR[market].capitalize()} : {g['termines']} terminés, {g['gagnants']} gagnants, "
+                     f"{g['esperance_net_r']:+.2f} R en moyenne ({g['esperance_r']:+.2f} brut), "
+                     f"{g['total_net_r']:+.2f} R au total ({g['total_r']:+.2f} brut)"
+                     + (" · trop peu pour conclure" if g["termines"] < 30 else ""))
     return "\n".join(lines)
 
 

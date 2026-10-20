@@ -15,11 +15,13 @@ def seal_hors_des_dates_de_test(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def taux_eur_usd_fixe(monkeypatch):
-    """Les plans d'actions convertissent le risque en euros au taux BCE : pas de réseau en test."""
-    from app.trading import ibkr
+def change_eur_usd_sans_reseau(monkeypatch):
+    """build_plan lit le change EUR→USD du jour (taille en euros) : fixé à 1,15 (défaut de Killmode), sans réseau.
+    Les tests du change lui-même gardent la vraie fonction (importée avant ce réglage)."""
+    from app.trading import killmode as K
+    from app.trading import service as T
 
     async def rate():
-        return 1.10
+        return K.EURUSD_DEFAULT
 
-    monkeypatch.setattr(ibkr, "eur_usd", rate)
+    monkeypatch.setattr(T, "usd_per_eur", rate)

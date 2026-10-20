@@ -236,7 +236,8 @@ dialog .actions { display: flex; gap: 8px; justify-content: flex-end; }
         <input type="radio" name="side" id="s-s" value="short"><label for="s-s">Short</label></div></div>
       <label>Entrée<input name="entry" type="number" step="any" inputmode="decimal" placeholder="cours actuel"></label>
       <label>Stop<input name="stop" type="number" step="any" inputmode="decimal" placeholder="auto (invalidation)"></label>
-      <label>Capital<input name="capital" type="number" step="any" inputmode="decimal" placeholder="facultatif"></label>
+      <label>Objectifs<input name="targets" inputmode="decimal" placeholder="auto (ex. 286.8 290.5 299.5)"></label>
+      <label>Capital (€)<input name="capital" type="number" step="any" inputmode="decimal" placeholder="facultatif"></label>
       <button type="submit">Calculer le plan</button>
     </form>
     <div id="preview"></div>
@@ -467,6 +468,18 @@ function updateCard(t) {
   });
 }
 
+/* Retard : part de TOUS les cas passés qui avaient touché l'objectif à cette heure (ceux qui avaient touché le TP
+   précédent, une fois ce TP pris), et chance restante parmi les cas encore en vie. */
+function lateText(t, i) {
+  const x = t.targets[i], p0 = (v) => `${Math.round(v * 100)} %`;
+  const given = i && i === (t.targets_hit || 0) ? x.reached_by_p75_given_prev : null;
+  const share = given ?? x.reached_by_p75;
+  if (share == null) return `3 sur 4 des cas passés qui l'ont touché l'avaient fait à ${when(x.eta_latest)}`;
+  const who = given != null ? `des cas passés qui avaient touché ${esc(t.targets[i - 1].name)}` : "des cas passés";
+  return `à ${when(x.eta_latest)}, ${p0(share)} ${who} l'avaient atteint`
+    + (x.still_after_p75 != null ? ` ; parmi tous les cas encore en vie à cette heure, ${p0(x.still_after_p75)} l'ont touché ensuite` : "");
+}
+
 function tick() {
   const now = Date.now();
   $("#clock").textContent = new Date().toLocaleTimeString("fr-FR", TZ);
@@ -484,7 +497,7 @@ function tick() {
       eta.innerHTML = now < med
         ? `⏱ ${countdown(med - now)}<div class="meta">vers ${when(x.eta_median)} · au plus tard ${when(x.eta_latest)}</div>`
         : now < late ? `<span class="warn">⏳ ${when(x.eta_latest)} max</span><div class="meta">médiane dépassée, encore dans la fourchette</div>`
-        : `<span class="warn">⌛ en retard</span><div class="meta">3 cas sur 4 l'avaient atteint à ${when(x.eta_latest)}</div>`;
+        : `<span class="warn">⌛ en retard</span><div class="meta">${lateText(t, i)}</div>`;
     });
   }
   updateKpis();
@@ -522,6 +535,8 @@ function renderOpen() {
 }
 
 function resultR(t) {
+  // R net de frais estimés du serveur (un tiers par objectif, comme !desaccords) ; sinon la dernière sortie seule.
+  if (t.realized_r_net != null) return t.realized_r_net;
   const last = (t.events || []).at(-1);
   if (!last) return null;
   return Math.round(sideSign(t) * (last.price - t.entry) / Math.abs(t.entry - t.stop) * 100) / 100;
@@ -531,7 +546,7 @@ function outcome(t) {
   const last = (t.events || []).at(-1);
   if (!last) return "—";
   const labels = { stop: "🛑 Stop", close: "✋ À la main", tp1: "🎯 TP1", tp2: "🎯 TP2", tp3: "🏁 TP3" };
-  return `${labels[last.kind] || esc(last.kind)} <span class="num">${fmt(last.price)}</span><div class="muted small">${when(last.at)}</div>`;
+  return `${labels[last.kind] || esc(last.kind)} <span class="num">${fmt(last.price)}</span>${last.corrige ? ` <span class="muted small">(ton prix, suivi ${fmt(last.prix_suivi)})</span>` : ""}<div class="muted small">${when(last.at)}</div>`;
 }
 
 let journal = { count: 0, total: 0, win: 0 };
@@ -555,7 +570,7 @@ function renderClosed() {
       <div><span>Moyenne</span><b class="${cls(journal.total)}">${rr(journal.count ? journal.total / journal.count : 0)}</b></div>
     </div>
     ${bars}
-    <div class="scroll"><table><tr><th>Actif</th><th>Entrée</th><th>Sortie</th><th style="text-align:right">Résultat</th></tr>
+    <div class="scroll"><table><tr><th>Actif</th><th>Entrée</th><th>Sortie</th><th style="text-align:right" title="R nets de frais estimés, un tiers par objectif">Résultat</th></tr>
     ${closed.map((t) => { const r = resultR(t); return `<tr>
       <td><span class="pill ${t.side}">${t.side}</span> <b>${esc(t.symbol)}</b><div class="muted small">${when(t.created_at)}</div></td>
       <td class="num">${fmt(t.entry)}</td><td>${outcome(t)}</td>
@@ -652,7 +667,7 @@ function scoreHtml(p) {
 
 function ibkrHtml(b) {
   if (!b) return "";
-  const fx = b.eurusd ? `${b.risk_usd} $ au taux BCE ${b.eurusd.toFixed(4)}` : `${b.risk_usd} $, taux EUR/USD indisponible`;
+  const fx = b.eurusd ? `${b.risk_usd} $ au change ${b.eurusd.toFixed(4)}` : `${b.risk_usd} $, taux EUR/USD indisponible`;
   if (!b.quantity) return `<div class="small" style="margin-top:4px">🧾 IBKR · risque ${b.risk_eur} € (${fx}) : ${esc(b.raison)}</div>`;
   const label = { fixe: "Fixe", degressif: "Dégressif" }, f = b.fees, mine = b.plan, other = mine === "fixe" ? "degressif" : "fixe";
   const tip = f[other].usd < f[mine].usd ? ` · en ${label[other]} : ${f[other].usd.toFixed(2)} $ (${f[other].r.toFixed(2)} R)` : "";
@@ -661,18 +676,30 @@ function ibkrHtml(b) {
     <div class="muted">Commissions estimées (${label[mine]}, ${b.brackets.length} brackets) : ${f[mine].usd.toFixed(2)} $ = ${f[mine].r.toFixed(2)} R${tip} · 1 seul bracket : ${f[mine].un_bracket_usd.toFixed(2)} $</div></div>`;
 }
 
+function sizeHtml(p) {
+  // Règle unique en euros (taille de JARVIS), ou ta règle de 20 € à part quand le grade ne propose rien.
+  const qty = (s) => p.market !== "stock" ? `taille ${fmt(s.quantity)} pour ${fmt(s.notional)} $`
+    : s.quantity < 1 ? `pas d'ordre, 1 action = ${fmt(s.unit_risk_eur)} € de risque, au-delà de ${fmt(s.risk_amount_eur)} €`
+    : `${s.quantity} action${s.quantity > 1 ? "s" : ""} pour ${fmt(s.notional)} $`;
+  const s = p.sizing, rule = p.sizing_regle;
+  if (s && s.risk_amount_eur != null) return ` · 💰 risque ${fmt(s.risk_amount_eur)} € (${fmt(s.risk_amount)} $) : ${qty(s)}`;
+  if (s) return ` · 💰 risque ${s.risk_pct} % = ${fmt(s.risk_amount)} · taille ${fmt(s.quantity)} (${fmt(s.notional)}) · levier ${s.leverage}×`;
+  if (rule) return ` · 💰 JARVIS ne propose pas de taille (grade ${esc((p.grade || {}).grade || "non noté")} : 0 %). Ta règle de ${fmt(rule.risk_amount_eur)} € : ${qty(rule)} (exception, hors avis de JARVIS)`;
+  return "";
+}
+
 function planHtml(p) {
   const mark = { true: "✅", false: "❌", null: "➖" }, c = p.checklist;
-  const s = p.sizing, g = p.grade;
+  const g = p.grade;
   return `<div class="preview">
     <div class="row between">
       <div class="row"><span class="pill ${p.side}">${p.side}</span><span class="sym">${esc(p.symbol)}</span><span class="pill ${verdictClass(c.verdict)}">${esc(c.verdict)}</span></div>
       <div class="num">Entrée <b>${fmt(p.entry)}</b> · SL <b class="down">${fmt(p.stop)}</b> <span class="muted">(${pct(p.stop_pct)})</span></div>
     </div>
     ${scoreHtml(p)}
-    <div class="small muted" style="margin-top:4px">Stop ${esc(p.stop_source)}${s ? ` · 💰 risque ${s.risk_pct} % = ${fmt(s.risk_amount)} · taille ${fmt(s.quantity)} (${fmt(s.notional)}) · levier ${s.leverage}×` : ""}</div>
+    <div class="small muted" style="margin-top:4px">Stop ${esc(p.stop_source)}${sizeHtml(p)}</div>
     ${ibkrHtml(p.ibkr)}
-    ${g ? `<div class="small" style="margin-top:4px">🏅 Grade JARVIS <b>${esc(g.grade)}</b> · risque proposé <b>${g.risque_propose} %</b>${g.observation ? " · plan en observation" : ""} <span class="muted">(${esc(g.raison)})</span></div>` : ""}
+    ${g ? `<div class="small" style="margin-top:4px">🏅 Grade JARVIS <b>${esc(g.grade)}</b> · risque proposé <b>${g.risque_propose} %</b>${g.observation ? " · plan en observation" : ""} <span class="muted">(${esc(g.raison)})</span>${g.hors_budget ? ` · ⚠️ <b>hors budget</b> : risque demandé ${g.risque_demande} %, ton choix` : ""}</div>` : ""}
     <div class="tps">${p.targets.map((x) => `<div class="tp">
       <div class="name">${x.name}</div>
       <div class="lvl-line"><b class="num">${fmt(x.price)}</b> <span class="muted small">${pct(x.pct)} · ${x.r_multiple} R</span></div>
@@ -693,6 +720,8 @@ $("#plan-form").addEventListener("submit", async (ev) => {
   const data = Object.fromEntries(new FormData(ev.target));
   const body = { symbol: data.symbol.trim().toUpperCase(), market: data.market, side: data.side };
   for (const k of ["entry", "stop", "capital"]) if (data[k]) body[k] = Number(data[k]);
+  const targets = (data.targets || "").replace(/,/g, ".").split(/[\s;]+/).filter(Boolean).map(Number);
+  if (targets.length) body.targets = targets;
   const button = $("button[type=submit]", ev.target);
   button.disabled = true; button.textContent = "Calcul…";
   $("#preview").innerHTML = `<div class="preview"><div class="skeleton" style="height:160px"></div><div class="small muted" style="margin-top:8px">Historique, délais rejoués et checklist en cours…</div></div>`;

@@ -4,6 +4,7 @@ Grade de JARVIS (F- à S+, risque permis), avancement du rejeu, chiffres clés, 
 leur état, dernières règles testées, dernier message du matin. Les décisions se prennent dans le
 cockpit principal (propositions en attente), sur Discord (boutons, `!oui N` / `!non N`).
 """
+from datetime import datetime, timezone
 from html import escape
 
 from app.lab import method as M
@@ -64,14 +65,21 @@ def _grade_card(grade: dict | None) -> str:
         detail = (f'{_r(m.get("esperance_r"))} par trade sur {m.get("trades")} trades · réussite '
                   f'{round(100 * (m.get("reussite") or 0))} % · TP1 {round(100 * (m.get("tp1") or 0))} %'
                   if not g.get("non_note") else _e(m.get("raison")))
+        window = GR.window_text(m.get("fenetre"))
+        detail += f'<br>{_e(window)}' if window else ""
         flags = (" · ☠️ méthode morte" if g.get("morte") else " · 🆘 mode survie" if g.get("mode_survie") else "")
         wait = (f'<div class="small">⏳ hausse vers {_e(GR.name(g["hausse"]["vers"]))} en attente de ton accord</div>'
                 if g.get("hausse") else "")
         cells.append(f'<div><b>{_e(GR.MARKET_FR[market].capitalize())} : <span class="num">{_e(g["grade"])}</span></b>'
-                     f' <span class="small muted">mesuré {_e(m.get("grade"))}</span><div class="small">risque permis '
-                     f'{g["risque_grade"]:g} % (plafond {g["risque_max"]:g} %){flags}</div>'
+                     f' <span class="small muted">mesuré {_e(m.get("grade"))}</span><div class="small">'
+                     f'{_e(GR.allowed(g["risque_grade"]))} (plafond {g["risque_max"]:g} %){flags}</div>'
                      f'<div class="small muted">{detail}</div>{wait}</div>')
-    return f'<div class="card"><h2>🏅 Grade de JARVIS</h2><div class="grid">{"".join(cells)}</div></div>'
+    age = GR.age_h(grade, datetime.now(timezone.utc))
+    stale = ""
+    if age is None or age > GR.MAX_AGE_H:
+        when = "aucun passage du labo daté" if age is None else f"dernier passage du labo il y a {age:.0f} h"
+        stale = f'<div class="small">⚠️ Grade périmé ({when}) : JARVIS ne propose aucun risque (0 %)</div>'
+    return f'<div class="card"><h2>🏅 Grade de JARVIS</h2>{stale}<div class="grid">{"".join(cells)}</div></div>'
 
 
 def render(st: dict, proposals: list[dict], rules: list[dict], morning: dict | None, dm: bool,
@@ -122,13 +130,19 @@ def render(st: dict, proposals: list[dict], rules: list[dict], morning: dict | N
     ch = meth.get("challenger")
     if ch:
         cmp = ch["comparaison"]
-        n = cmp["challenger"]["declenches"]
+        n, last = cmp["jours"], ch["regards"][-1]
+        nxt = f'prochain regard à {ch["prochain_regard"]} jours' if ch.get("prochain_regard") else "regards faits"
         rows = "".join(f'<li>{_e(r["nom"])} : <span class="muted">{_e(r["regle"])}</span></li>' for r in ch["regles"])
         block += (f'<div><b>Challenger : {_e(ch["version"])}</b> <span class="small muted">depuis {_e(ch["depuis"])}</span>'
-                  f'<div class="bar"><span style="width:{min(100, 100 * n / max(1, ch["objectif"]))}%"></span></div>'
-                  f'<div class="small">{n}/{ch["objectif"]} trades en direct · {_r(cmp["challenger"]["esperance_r"])} '
-                  f'contre {_r(cmp["champion"]["esperance_r"])} pour {_e(champ.get("version"))} · potentiel +10 '
-                  f'{cmp["challenger"]["capture"]} contre {cmp["champion"]["capture"]}</div><ul class="small">{rows}</ul></div>')
+                  f'<div class="bar"><span style="width:{min(100, 100 * n / max(1, last))}%"></span></div>'
+                  f'<div class="small">{n} jours de trades en direct ({nxt}) · écart {_r(cmp["delta_r"])} par trade, '
+                  f'z {_e(M.num_fr(cmp["z"]))} (seuil {_e(M.num_fr(ch["seuil_z"]))}) · {_r(cmp["challenger"]["esperance_r"])} '
+                  f'sur {cmp["challenger"]["declenches"]} trades contre {_r(cmp["champion"]["esperance_r"])} pour '
+                  f'{_e(champ.get("version"))} · potentiel +10 {cmp["challenger"]["capture"]} contre '
+                  f'{cmp["champion"]["capture"]}</div>'
+                  + ('<div class="small"><b>Promotion proposée à Simão</b>, en attente de sa réponse</div>'
+                     if ch.get("promotion") else "")
+                  + f'<ul class="small">{rows}</ul></div>')
     else:
         block += '<div class="small muted">Pas de challenger en essai.</div>'
     parts.append(f'<div class="card"><h2>Méthode</h2><div class="grid">{block}</div></div>')

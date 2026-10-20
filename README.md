@@ -90,18 +90,23 @@ Le même tableau est réécrit chaque minute dans un message Discord (à épingl
 
 Corps des requêtes : `{"symbol": "NVDA", "market": "stock", "side": "long"}` (`market` : `crypto` ou
 `stock`). Facultatifs : `entry` (vide = dernier cours), `stop` (vide = niveau d'invalidation),
-`targets` (vide = prochaines résistances), `capital` et `risk_pct` pour la taille de position.
+`targets` (vide = prochaines résistances), `capital` (en euros) et `risk_pct` (0 à 100, 0 = pas de taille)
+pour la taille de position.
 
 **Délais estimés.** Pour chaque TP, JARVIS rejoue le même plan (mêmes écarts en %) depuis chaque
 bougie de l'historique de l'actif et mesure le temps qu'il a fallu pour toucher le TP avant le
 stop : médiane, fourchette 25-75 %, heure estimée (Paris), part des cas où le TP a été atteint
 avant le stop et espérance en R. Crypto : bougies d'1 h sur 30 jours (Kraken), horizon 24 h.
 Actions : bougies de 15 min sur environ 190 séances (Twelve Data), horizon 2 séances, en ne
-comptant que les heures de cotation.
+comptant que les heures de cotation. Les départs voisins se chevauchent : la part « touché avant le
+stop » porte un IC 95 % de Wilson calculé sur au moins départs ÷ horizon fenêtres indépendantes,
+et le « 3 sur 4 » de l'heure au plus tard ne vaut que pour les cas qui ont touché le TP (la part de
+tous les cas est affichée à côté).
 
 **Suivi.** Chaque minute pour la crypto, et toutes les 2 minutes pendant la séance pour les actions (limite gratuite de Twelve Data), les bougies d'1 minute disent si un TP ou le stop a été touché ;
 Discord reçoit l'alerte avec le prochain TP et son délai, sur le salon et en message privé (bot configuré). Le stop reste en place après le TP1 et
-remonte à l'entrée après le TP2. Un TP en retard sur ce que 3 cas passés sur 4 avaient fait, ou un
+remonte à l'entrée après le TP2. Un TP en retard (l'alerte dit quelle part de tous les cas passés
+l'avait atteint à cette heure, et la chance restante parmi ceux encore en vie), ou un
 signe de retournement (divergence, anomalie de volume, bougie de retournement), déclenche une
 alerte de sortie anticipée. Les trades sont gardés dans `data/trades.json` (`JARVIS_TRADES_PATH`).
 
@@ -117,7 +122,10 @@ Chaque plan reçoit une note sur 10, avec ses raisons ligne par ligne (`app/trad
 
 Sans catalyseur évaluable (crypto), la note se calcule sur les deux autres. **GO** si la note
 atteint 7 et qu'aucun veto ne tombe : résultats dans les 48 h, ou R/R sous 2. Le R/R n'est pas
-suivi à la lettre : jusqu'à 0,2 en dessous, il passe si la note dépasse 7,5.
+suivi à la lettre : jusqu'à 0,2 en dessous, il passe si la note dépasse 7,5. Finnhub sans réponse
+pour une action : catalyseur neutre (5/10) et veto « date des résultats non vérifiée ». Le GO est une
+règle de sélection figée, pas une prédiction : quand le labo mesure que la note ne prédit pas le
+résultat (pente ≤ 0 en R par point), le plan et le scanner le disent à côté du GO.
 
 Tous les seuils vivent dans `app/trading/settings.py` (`GET /api/trading/settings`, `!regle`).
 Ils évoluent par propositions : JARVIS propose, tu approuves ou refuses (voir plus bas).
@@ -125,8 +133,14 @@ Ils évoluent par propositions : JARVIS propose, tu approuves ou refuses (voir p
 **JARVIS n'est pas d'accord parce que c'est toi.** Si tu prends un plan noté NO GO (`!prends` ou le
 cockpit), il le dit franchement avec ses raisons, suit le trade quand même et le marque « contre l'avis
 de JARVIS ». `!desaccords` (ou `GET /api/trading/disagreements`) compare ces trades aux plans GO, avec
-un tiers de la position par objectif : au bout de 10 trades terminés de chaque côté, il dit qui avait
-raison, toi ou sa note. Le même principe s'applique aux Claude qui travaillent sur JARVIS
+un tiers de la position par objectif, en R nets de frais estimés (IBKR à la taille du plan) et un
+intervalle de confiance en grappes par jour. Deux questions séparées : la note sépare-t-elle les bons
+trades, et les NO GO pris rapportent-ils ? Verdict seulement avec au moins 30 trades sur 20 jours de
+chaque côté et un intervalle qui exclut 0 ; « JARVIS a raison » seulement si la note est prédictive au
+labo (pente > 0). Les sorties sont au prix suivi (stop franchi en gap : à l'ouverture ; objectif : franchi
+d'un pas) ou au tien avec `!sortie`. Ce R net sert aussi à l'arrêt de la journée à −3 R, aux trades réels
+de `!grade` et au journal du cockpit. Un GO confirmé pris avec `!prends NVDA 132.5 go` garde le stop et les
+objectifs du scanner et compte avec JARVIS. Le même principe s'applique aux Claude qui travaillent sur JARVIS
 ([CLAUDE.md](CLAUDE.md)).
 
 ## Scanner avant l'ouverture US
@@ -144,13 +158,23 @@ Chaque valeur du scanner (GO comme NO GO) est passée en silence sur le compte f
 trois ordres « bracket » (un tiers de la taille vers chaque TP, même stop), annulés si l'entrée
 n'est pas touchée dans la séance, soldés après 2 séances. Aucun message trade par trade : seul un
 bilan agrégé part le vendredi à 16 h 30 (New York), avec le résultat moyen en R par verdict,
-par note, par RSI, par volume, par gap et par catalyseur, l'écart entre délais prévus et réels,
-`GET /api/trading/paper/stats` ou `!bilan` à tout moment.
+par note, par RSI, par volume, par gap, par catalyseur et par volume moyen en $ (mesuré seulement :
+il chiffre la règle « pas de filtre de liquidité »), l'écart entre délais prévus et réels (en minutes
+de cotation ; les TP coupés par l'horizon n'y entrent pas), `GET /api/trading/paper/stats` ou `!bilan`
+à tout moment. Il mesure les plans bruts du scanner (entrée limite au prix de pré-ouverture, stop fixe,
+2 séances, avant frais), pas les GO confirmés que tu trades (`!confirmations`) ; les plans manuels
+sont comptés à part. Il ne voit que les valeurs qui passent les filtres : ce que coûte chaque filtre
+(prix, en jeu, ATR, MM, RSI) est mesuré au labo sur les trades v1 d'actions (`GET /api/lab/filtres`,
+section `filtres_scanner` du brief du soir).
 
-Quand un groupe a 15 exemples et un écart net, JARVIS en tire une **proposition de réglage**
-numérotée (ex. « `rsi_max` 75 → 65 : RSI ≥ 65 à -0,40 R sur 18 plans »). Elle arrive en message
-privé Discord avec des boutons Approuver / Refuser, et dans le cockpit. Rien ne change sans ton
-accord ; une proposition refusée n'est pas reproposée avec la même valeur.
+JARVIS en tire une **proposition de réglage** numérotée seulement sur preuve : au moins 30 plans sur
+10 séances, intervalle de confiance en grappes par jour (t de Student, corrigé pour les 6 règles)
+entièrement du bon côté, sur tous les plans ou sur les GO seuls. Un filtre resserré doit aussi perdre
+sur les plans qu'il retirerait vraiment, et la proposition tombe si les GO confirmés de la même tranche
+disent le contraire (ex. « `rsi_max` 75 → 65 : RSI ≥ 65 : -0,52 R en moyenne (IC -0,90 ; -0,14) sur
+40 plans, 20 jours »). `go_min` ne monte que de 0,5 sur la tranche juste au-dessus du seuil, jamais
+au-delà de 8,5. Elle arrive en message privé Discord avec des boutons Approuver / Refuser, et dans le
+cockpit. Rien ne change sans ton accord ; une proposition refusée n'est pas reproposée avec la même valeur.
 
 ## Labo de performance
 
@@ -222,11 +246,19 @@ Tout tourne dans le worker, sans jeton d'IA ; rien ici ne change la méthode en 
   (`keep` au lieu d'`exclude`, conditions `and` / `or` / `not`, opérateurs `> >= < <= == != in not_in
   between is_null not_null`, `"value": "auto"` pour un seuil choisi sur la période d'ajustement). Les
   champs sont ceux connus à l'heure du plan (`plan.…`, `context.…`, `composite`, `regime`…) ; les
-  résultats du trade sont refusés. Validation « walk-forward » sur 3 fenêtres chronologiques
-  (ajustement sur le passé, test sur les mois qui suivent, 1 jour d'embargo). Critères, tous
-  obligatoires : au moins 100 trades touchés en test, +0,05 R par trade en moyenne, meilleure dans 2
-  fenêtres sur 3, capture du potentiel +10 préservée, et p < 0,05 / n où n est le numéro de l'essai
-  (le seuil monte avec le nombre d'idées testées). Une règle déjà testée renvoie son verdict gardé.
+  résultats du trade sont refusés. **Hors échantillon** : une règle est imaginée en lisant les trades
+  du labo ; à la soumission, elle note le dernier jour journalisé par origine et marché
+  (`rules.seen_until`), et seuls comptent les jours journalisés après la soumission (rejeu pas encore
+  calculé et direct ; un jour recalculé ne compte jamais). Tant qu'il n'y en a pas 60, elle reste en
+  attente sans consommer d'essai ; le même test sur les jours déjà vus est affiché comme
+  « exploratoire », sans effet sur le verdict. Validation « walk-forward » sur 3 fenêtres
+  chronologiques de ces jours neufs, coupées marché par marché (l'ajustement ne sert qu'au seuil
+  « auto », 1 jour d'embargo ; chaque fenêtre dit son plus grand trou de calendrier et ses jours en
+  direct). Critères, tous obligatoires : au moins 100 trades touchés en test, +0,05 R par trade en
+  moyenne, meilleure dans 2 fenêtres sur 3, capture du potentiel +10 préservée, et p < 6·α/(π²·n²)
+  (≈ 0,03 au 1er essai, 3·10⁻⁴ au 10e) où n est le numéro de l'essai et α = 0,05 : le seuil monte avec
+  le nombre d'idées testées et la somme sur tous les essais reste ≤ α. Une règle déjà testée renvoie
+  son verdict gardé.
   v1 : filtres seulement ; les règles qui demanderaient de régénérer les plans viendront plus tard.
   Les seuils sont dans la table `lab_config` (défauts dans le code) et ne changent que sur ton accord.
 - **Fiches catalyseurs** (`app/lab/catalysts.py`) : chaque mouvement d'environ ±8 % de l'univers du
@@ -264,22 +296,32 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
   `GET /api/lab/matin`) ; à passer à `on` après ~5 séances.
 - **Carnet des leçons** (`app/lab/lessons.py`) : en plus des règles, la routine du soir écrit ce
   qu'elle a compris (`POST /api/lab/lessons`, au plus ~3 par soir, carnet de 50 leçons actives au plus).
-  Une leçon ne filtre rien : le worker la re-mesure chaque nuit sur les trades du labo (espérance et
-  TP1 des trades concernés contre l'ensemble, z en grappes par jour, même sens sur les deux moitiés de
-  l'historique) et la passe **confirmée** ou **démentie** tout seul. Les démenties restent au carnet
-  (ne pas les retenter). Les confirmées (`data/lab_lessons.json`) ajustent la note des plans en direct
-  de ±0,5 chacune (±1 au plus), avec une ligne « Leçons du labo » dans le plan ; le labo, lui, note
-  ses plans sans elles. La routine relit le carnet (dans `GET /api/lab/brief`) avant d'analyser ;
-  Simão le lit avec `!lecons`.
+  Une leçon ne filtre rien : le worker la re-mesure sur les trades du labo qu'elle n'a pas pu voir
+  (espérance et TP1 des trades concernés contre l'ensemble, z en grappes par jour, même sens sur les
+  deux moitiés) et ne la juge qu'à des paliers de 30, 60, 120… trades concernés, sur au moins 20 jours :
+  le seuil de z (loi de Student) dépense l'alpha de chaque leçon sur ses paliers, pour qu'une leçon sans
+  effet ne soit presque jamais confirmée malgré les regards répétés. **Confirmée**, elle le reste tant
+  que l'effet tient ; **démentie**, c'est définitif (encore mesurée, jamais reconfirmée). Les confirmées
+  (`data/lab_lessons.json`) s'affichent dans les plans en direct (ligne « Leçons du labo », avec la note
+  qu'elles donneraient) **sans toucher au verdict** : GO / NO GO reste calculé sur la note brute. Une
+  leçon « favorable » dont les trades perdent encore est dite « relative ». La routine relit le carnet
+  (dans `GET /api/lab/brief`) avant d'analyser ; Simão le lit avec `!lecons`.
 - **Approuvée** : la règle crée la version suivante (v2 = v1 + ses filtres), d'abord **challenger**.
   Les trades restent journalisés une seule fois (version de génération v1) ; champion et challenger
-  en sont des sous-ensembles calculés avec le même SQL que le validateur. Quand le challenger a au moins
-  100 trades déclenchés **en direct** depuis sa création et un R net moyen par trade meilleur que le
-  champion sur la même période, sans perdre de capture du potentiel +10 (même tolérance que le
-  validateur), il devient la méthode en place et tu reçois « Méthode v2 en place : … ». Après 300
-  trades sans faire mieux, il est retiré (message aussi). Seuils `challenger_min_trades` et
-  `challenger_max_trades` dans `lab_config`. Des règles approuvées pendant un essai attendent sa fin
-  (sauf le même matin : elles rejoignent le challenger tant qu'il n'a aucun trade).
+  en sont des sous-ensembles calculés avec le même SQL que le validateur. La comparaison porte sur les
+  trades déclenchés **en direct** depuis sa création, sur les seuls marchés de ses nouvelles règles, en R
+  à ta mise de 20 € pour les actions (frais IBKR réels), avec un écart et un z en grappes par jour. Elle
+  n'est jugée qu'à 3 regards fixes, à 20, 40 et 60 jours de trades : le challenger est promouvable si
+  l'écart atteint +0,02 R par trade, z ≥ 2,13 (5 % répartis sur les 3 regards), aucun marché touché ne
+  recule, la capture du potentiel +10 tient (même tolérance que le validateur) et il garde au moins 100
+  trades. Il ne bascule pas seul : tu reçois une proposition « mettre en place la méthode v2 » (boutons,
+  `!oui N` / `!non N`), avec l'espérance des trades gardés (« filtre moins perdant, méthode toujours
+  perdante » si elle reste ≤ 0). Approuvée : « Méthode v2 en place : … » ; refusée : v2 est retirée ;
+  sans réponse, il reste mesuré et le regard suivant remplace la proposition. Pas assez net au dernier
+  regard (ou 100 jours sans l'atteindre), il est retiré (message aussi). Seuils `challenger_looks_days`,
+  `challenger_min_z`, `challenger_min_gain`, `challenger_min_trades`, `challenger_max_days` dans
+  `lab_config`. Des règles approuvées pendant un essai attendent sa fin (sauf le même matin : elles
+  rejoignent le challenger tant qu'il n'a aucun trade).
 - **Refusée** : rangée dans la mémoire des échecs (« refusée par Simão »), jamais reproposée.
 - **En direct** : le worker écrit la méthode en place dans `data/lab_champion.json`. Le scanner
   pré-ouverture applique ses filtres avec le même code que le labo (`method.evaluate_rows`) : un plan
@@ -293,16 +335,26 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
 - **Grade de JARVIS** (`app/lab/grade.py`, barème validé par Simão le 2026-10-07) : de F- à S+, la
   preuve mesurée par le worker (sans jeton) que la méthode en place gagne, par marché.
   - Lettre = espérance nette en R sur les 60 derniers jours de bourse de la méthode en place (hors
-    échantillon) : S ≥ +0,40 R, A ≥ +0,25, B ≥ +0,15, C ≥ +0,05 (borne basse de l'IC95 > 0 dès C),
-    D positive mais pas prouvée, E entre −0,10 et 0, F < −0,10. Moins de 100 trades sur 10 jours :
-    « non noté ».
+    échantillon ; actions : R après commission IBKR à 20 €, `r_20e`) : S ≥ +0,40 R, A ≥ +0,25,
+    B ≥ +0,15, C ≥ +0,05 (borne basse de l'IC95 en t de Student > 0 dès C), D positive mais pas
+    prouvée, E entre −0,10 et 0, F < −0,10. Moins de 100 trades sur 10 jours : « non noté ». La
+    fenêtre réelle est publiée (rejeu du … au …, direct depuis le …) ; coupée par un trou de plus de
+    10 jours, elle est notée sur son dernier segment s'il suffit, sinon marquée « discontinue » (0 %).
   - − / + : stabilité (pire série de pertes ≤ 1,25 × celle attendue, écart ≤ 0,15 R entre les deux
     moitiés de la fenêtre) et délais calibrés (40 à 65 % tenus). Réussite et % de TP sont affichés,
     sans effet sur le grade (un taux de réussite se gonfle en rapprochant le TP1).
   - Risque proposé par plan (`!plan`, cockpit) : F, E, non noté 0 % (plan en observation), D 0,25 %,
-    puis ¼ de Kelly (borne basse de l'espérance / variance des R) plafonné à C 1 %, B 1,5 %, A 3 %,
-    S 5 %. Plus un budget : risque ouvert sur les trades pris ≤ 4 %, arrêt de la journée à −3 R. Un
-    risque demandé explicitement (`risk_pct`) est gardé.
+    puis ¼ de Kelly (borne basse de l'espérance / variance des R, corrigé de la corrélation des
+    trades d'un même jour) plafonné à C 1 %, B 1,5 %, A 3 %, S 5 % (4 % en pratique). Plus un
+    budget : risque ouvert sur les trades pris ≤ 4 % (un trade pris compte ses euros sur le capital,
+    1 % sans capital connu), arrêt de la journée à −3 R (nets de frais estimés). Grade illisible ou que le labo n'a pas
+    revérifié depuis 6 h (`JARVIS_GRADE_MAX_AGE_H`) : 0 %.
+  - Taille, une seule règle : risque = min(`JARVIS_CAPITAL` (€) × % proposé, `JARVIS_RISK_EUR` = 20 €),
+    20 € sans capital connu, converti au change BCE du jour, en actions entières (« 💰 Risque 20 €
+    (23,0 $) : 46 actions »). Grade à 0 % : JARVIS ne propose pas de taille ; ta règle de 20 € est
+    affichée à part, « hors avis de JARVIS » (plans, GO confirmés, potentiel +10, Killmode). Un
+    risque demandé explicitement (`risk_pct`) remplace le % du grade et est signalé hors budget
+    s'il engage plus que ce que propose JARVIS.
   - Changements : baisse immédiate ; hausse après au moins 150 nouveaux trades sur 5 nouveaux jours,
     et une hausse de **lettre** attend ton accord (proposition Approuver / Refuser en privé, `!oui N`) ;
     à partir de C, une baisse de 20 R depuis le sommet ramène tout de suite en D (coupe-circuit) ; une
@@ -325,12 +377,33 @@ résistances seules, plus sortie sur alerte de retournement, ou sur alerte confi
 Liste, seuils et sorties sont déclarés d'avance : [docs/labo-strategies.md](docs/labo-strategies.md).
 
 - Chaque trade est mesuré avec sept sorties (gestion v1, sans break-even, 2 R, stop suiveur, trois
-  EmperorBTC), trois tests de robustesse (glissement ×2 et ×3, entrée retardée, ordres limités à peine
+  EmperorBTC), plus trois en actions (déclaration n° 6, règles de Gemini : clôture sous le VWAP après
+  10 h 30, time stop à 14 h 30, avalement baissier de SPY),
+  trois tests de robustesse (glissement ×2 et ×3, entrée retardée, ordres limités à peine
   touchés) et un **témoin aléatoire** (même stop, mêmes objectifs, entrée au hasard, moyenne de 5
   tirages) : une stratégie qui ne bat pas son témoin n'a pas d'avantage d'entrée.
 - Classement à l'espérance nette en R (intervalle en grappes par jour), jamais au taux de réussite ; en
   actions, après la commission IBKR Fixe estimée (0,005 $ par action), avec les frais par tranche.
+  « Candidate » exige aussi de tenir sous les tests de robustesse et sur chaque moitié des jours (n° 6).
+- Killmode décomposé (n° 6, sans essai) : tranches de gap, d'ATR, de volume des 15 premières minutes et de
+  stop touché avant l'entrée, trois comparaisons avec `orb15`, part des gappers présents dans l'univers.
+  Killmode et la n° 4 sont jugées sur les jours qui suivent ceux déjà lus quand elles ont été choisies.
+- Confirmation des GO (n° 7) : chaque GO de v1 rejoué deux fois, acheté à l'ouverture ou après la
+  confirmation du direct (repli vers l'entrée, reprise du VWAP, ordre stop valable jusqu'à 11 h 30), sortie
+  à stop fixe ; avec le stop d'origine et avec le plancher du direct (plan refait par le code du direct,
+  sur les jours rejoués depuis la n° 7). Écart « confirmé ou rien » − brut GO par GO, et brut par statut.
 - Diagnostic de v1 : espérance par gap d'ouverture, mode d'entrée, raison de sortie, brut contre net.
+- Archive des actus des gappers (préparation de la n° 8, `app/lab/archive.py`) : Finnhub gratuit ne garde
+  qu'un an d'actus. Pour chaque séance non scellée encore dans cette profondeur, la plus ancienne d'abord, les
+  actions de toute la base ouvertes en gap ≥ 3,5 % avec un ATR ≥ 4 %, leurs actus publiées avant 9 h 45 New York
+  (7 jours, comme le direct), le calendrier des résultats de J − 10 à J + 30 et le profil de la société. Rien
+  n'est lu avant que la déclaration n° 8 écrive le critère ; `!labo` n'en montre que l'avancement.
+- Déclaration n° 8 : **Killmode complet** (`app/lab/kill_complet.py`), la règle de prix du labo et le pilier
+  catalyseur du direct (même code, Finnhub remplacé par l'archive) à 9 h 45 New York, jugé à la mise de Simão
+  (20 €, brackets IBKR) et contre les témoins propres, apparié par jour ; trois filtres du GO confirmé après le
+  trade FRSH (VWAP qui monte, plus haut de séance repris, plus fort que SPY) ; stress de 3 cents exigé pour
+  « candidate » en actions ; glissement jamais sous un demi-pas (trades v1 recalculés une fois, `app/lab/cout.py`) ;
+  jugements en t sur les jours (148 essais).
 - **Bloc scellé** : le rejeu du 6 avril au 5 octobre 2026 est calculé mais rangé à part, invisible des
   statistiques, du brief, du grade et du validateur (`app/lab/seal.py`). Il sert une seule fois.
 - Les jours traités avant le labo v2 sont rattrapés hors séance (bougies relues à la source, rien stocké).
@@ -363,6 +436,8 @@ trade terminé, comparé à une sortie au moment du conseil (ligne « Bilan des 
 | `!plan NVDA` | plan complet en temps réel (ajoute `short`, `crypto` ou `action` si besoin) |
 | `!avis NVDA` | avis de JARVIS : entrer long, entrer short ou attendre, pourquoi, ce qui invaliderait, et ce que le labo a mesuré |
 | `!prends NVDA` | calcule le plan et suit le trade (TP/SL annoncés, cockpit) ; `!prends NVDA 132.5 stop 128` = ton entrée et ton stop réels |
+| `!prends NVDA 132.5 go` | suit le GO confirmé du jour avec son stop et ses objectifs (pas recalculés) ; sans GO confirmé ce jour, rien n'est suivi |
+| `!sortie NVDA 131.2` | ta sortie réelle : clôture le trade suivi à ce prix, ou corrige le prix de sa dernière sortie s'il est déjà terminé |
 | `!positions` | trades suivis : sortir, alléger ou garder, avec les faits (aussi envoyé seul 30 min avant la clôture US) |
 | `!position NVDA 132.5` | même conseil pour une position prise hors de JARVIS (`short`, `stop 128` en plus) |
 | `!scan` | scanner tout de suite |
@@ -375,6 +450,7 @@ trade terminé, comparé à une sortie au moment du conseil (ligne « Bilan des 
 | `!lecons` | carnet des leçons du labo : confirmées, à confirmer, démenties, avec leur preuve chiffrée |
 | `!grade` | grade de JARVIS (F- à S+) par marché, de quoi il est fait, risque permis, derniers changements |
 | `!strategies` | labo v2 : stratégies à déclencheur contre v1, sorties, témoin aléatoire, diagnostic de v1 |
+| `!kill …` | **JARVIS Killmode**, éteint par défaut : `!kill on` / `!kill off`, `!kill NVDA` (analyse complète : volatilité, catalyseur, graphique, données, fiche société), `!kill scan` (plus forts gaps, setups complets seulement), `!kill bilan` (setups proposés soldés après la clôture + stratégie `killmode` du labo). Hors de toute routine, aucun ordre passé. Détail : `app/trading/killmode.py`, déclaration n° 5 de [docs/labo-strategies.md](docs/labo-strategies.md) |
 | `!aide` | liste des commandes |
 
 Le bot ne répond qu'aux comptes de `JARVIS_DISCORD_OWNER_ID`. Mise en place : [DEPLOY.md](DEPLOY.md).

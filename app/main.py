@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app import alerts, config, needs, scheduler
 from app.lab import brief as lab_brief
@@ -30,6 +30,9 @@ from app.lab import morning as lab_morning
 from app.lab import page as lab_page
 from app.lab import stats as lab_stats
 from app.lab import potentiel as lab_potentiel
+from app.lab import autopsie as lab_autopsie
+from app.lab import rates as lab_rates
+from app.lab import filtres as lab_filtres
 from app.lab import strat_stats as lab_strategies
 from app.lab import status as lab_status
 from app.lab import summary as lab_summary
@@ -41,6 +44,7 @@ from app.trading import service as trading
 from app.core import fallback
 from app.core.http import SourceError
 from app.trading.settings import settings
+from app.trading import research
 
 
 def configure_logging() -> None:
@@ -273,8 +277,8 @@ class TradeRequest(BaseModel):
     entry: float | None = None      # vide = dernier cours
     stop: float | None = None       # vide = niveau d'invalidation (dernier creux de swing, 1 à 3 ATR)
     targets: list[float] | None = None  # vide = prochaines résistances (supports pour un short)
-    capital: float | None = None    # vide = JARVIS_CAPITAL ; sert à la taille de position
-    risk_pct: float | None = None   # vide = risque proposé par le grade de JARVIS
+    capital: float | None = None    # en euros ; vide = JARVIS_CAPITAL ; sert à la taille de position
+    risk_pct: float | None = Field(None, ge=0, le=100)  # vide = risque proposé par le grade ; 0 = pas de taille
     note: str | None = None
 
 
@@ -318,8 +322,9 @@ async def trading_list(status: str | None = Query(None, description="open ou clo
 
 @app.get("/api/trading/disagreements")
 async def trading_disagreements():
-    """Trades pris avec et contre l'avis de JARVIS (plans NO GO) : qui avait raison."""
-    return trading.disagreements(scheduler.book)
+    """Trades pris avec et contre l'avis de JARVIS (plans NO GO) : qui avait raison (R nets de frais estimés, IC en
+    grappes par jour, pente de la note au labo)."""
+    return trading.disagreements(scheduler.book, await asyncio.to_thread(trading.note_slopes))
 
 
 @app.get("/api/trading/opinion")
@@ -711,7 +716,9 @@ def lab_grade_get(limit: int = Query(20, ge=1, le=200)):
     historique des changements."""
     conn = _lab_conn()
     try:
-        return lab_grade.payload(conn) | {"historique": lab_grade.history(conn, limit=limit)}
+        return lab_grade.payload(conn) | {"historique": lab_grade.history(conn, limit=limit),
+                                          "indicatif_go_confirmes": (lab_autopsie.cached(conn) or {}).get("grade_indicatif"),
+                                          "trades_reels": lab_grade.reels(scheduler.book.trades)}
     finally:
         conn.close()
 
@@ -723,6 +730,41 @@ def lab_strategies_get():
     conn = _lab_conn()
     try:
         return lab_strategies.cached(conn) or lab_strategies.report(conn)
+    finally:
+        conn.close()
+
+
+@app.get("/api/lab/autopsie", dependencies=[Depends(lab_key)])
+def lab_autopsie_get():
+    """Autopsie des trades : élan contre le hasard, stops, gagnants qui frôlent le stop, par setup et par
+    stratégie, et grade indicatif des GO confirmés. Mesure seulement. Cache du worker, sinon calcul direct."""
+    conn = _lab_conn()
+    try:
+        return lab_autopsie.cached(conn) or lab_autopsie.report(conn)
+    finally:
+        conn.close()
+
+
+@app.get("/api/lab/rates", dependencies=[Depends(lab_key)])
+def lab_rates_get():
+    """Chasse aux ratés du potentiel +10 : actions à ≥ +10 % depuis l'ouverture sur les 20 dernières séances, raison du
+    raté (pas de plan, plan non déclenché, stop avant TP1), gap et catalyseur, ratés sans plan par tranche de gap contre
+    le taux de base de l'univers. Lecture seulement. Cache du worker, sinon calcul direct."""
+    conn = _lab_conn()
+    try:
+        return lab_rates.cached(conn) or lab_rates.report(conn)
+    finally:
+        conn.close()
+
+
+@app.get("/api/lab/filtres", dependencies=[Depends(lab_key)])
+def lab_filtres_get():
+    """Ce que coûte chaque filtre du scanner de 15 h 10 sur les trades v1 d'actions : passe tout, rate
+    seulement un critère, rate 2 ou plus, et tranches de prix (R net, IC, GO seuls). Mesure seulement.
+    Cache du worker, sinon calcul direct."""
+    conn = _lab_conn()
+    try:
+        return lab_filtres.cached(conn) or lab_filtres.report(conn)
     finally:
         conn.close()
 
@@ -753,7 +795,7 @@ async def lab_grade_avis(request: Request):
 
 @app.get("/api/lab/brief", dependencies=[Depends(lab_key)])
 def lab_brief_get():
-    """Tout ce qu'il faut à la routine du soir en un appel (< ~20 Ko)."""
+    """Tout ce qu'il faut à la routine du soir en un appel (< ~45 Ko)."""
     conn = _lab_conn()
     try:
         return lab_brief.build(conn, datetime.now(timezone.utc), lab_db.db_path(),
@@ -769,6 +811,36 @@ def lab_morning_get(limit: int = Query(7, ge=1, le=60)):
     days = sorted(st.data["jours"].values(), key=lambda d: d["jour"], reverse=True)[:limit]
     return {"message_prive": "activé" if lab_morning.dm_on() else "rodage", "jours": days,
             "propositions": [p for p in reversed(PR.proposals.items) if p.get("kind") == "labo"][:30]}
+
+
+# Lot D : recherche avant l'ouverture par une routine Claude (lecture du scanner, verdicts mesurés).
+research_book = research.ResearchBook()
+
+
+@app.get("/api/lab/scan", dependencies=[Depends(lab_key)])
+def lab_scan_get():
+    """Dernier passage du scanner avant l'ouverture (« du_jour » : fait aujourd'hui, heure de New York) et
+    les verdicts de recherche déjà déposés ce jour-là."""
+    view = research.scan_view(research.last_scan())
+    return view | {"verdicts": research_book.day(view["jour"])}
+
+
+@app.post("/api/lab/recherche", dependencies=[Depends(lab_key)])
+async def lab_research_submit(request: Request):
+    """Verdicts de la routine sur les valeurs du scanner du jour : [{"symbol", "verdict": soutient|neutre|contre,
+    "raison", "resume"?, "sources"?}]. Rien n'est filtré : les verdicts sont comparés au forward-test."""
+    items = await _lab_rule_body(request, expect=list)
+    try:
+        return research.record(research_book, items, research.last_scan())
+    except research.ResearchError as exc:
+        raise HTTPException(422, str(exc))
+
+
+@app.get("/api/lab/recherche", dependencies=[Depends(lab_key)])
+def lab_research_bilan():
+    """La recherche aide-t-elle ? Espérance en R du forward-test des valeurs « soutient » contre « contre »."""
+    b = research.bilan(research_book, scheduler.paper_book.entries)
+    return b | {"text": research.bilan_text(b)}
 
 
 COCKPIT_HTML = Path(__file__).parent / "web" / "cockpit.html"
@@ -793,7 +865,7 @@ def cockpit_lab(request: Request):
             rules = []
         finally:
             conn.close()
-    proposals = [p for p in reversed(PR.proposals.items) if p.get("kind") in ("labo", "grade")]
+    proposals = [p for p in reversed(PR.proposals.items) if p.get("kind") in ("labo", "grade", "promotion")]
     return HTMLResponse(lab_page.render(st, proposals, rules, lab_morning.shared_state().latest(), lab_morning.dm_on(),
                                         lab_grade.current()))
 

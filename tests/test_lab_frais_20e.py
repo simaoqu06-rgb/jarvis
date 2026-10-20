@@ -1,0 +1,84 @@
+"""`!frais` (20/10/2026, demande de Simão) : sa mise de 20 € selon le barème IBKR et le nombre de brackets, en écart
+apparié sur les mêmes trades du labo. Mesure descriptive : aucun essai, aucune « candidate »."""
+from datetime import date, timedelta
+
+import pytest
+
+from app.lab import brief as BRIEF
+from app.lab import strat_stats as SS
+from app.lab.db import LabDB
+from app.notify import bot
+
+
+def _day(k):
+    return (date(2025, 1, 6) + timedelta(days=k)).isoformat()   # lundi 6 janvier 2025
+
+
+def _insert(db, rows):
+    cols = sorted({c for r in rows for c in r})
+    db.conn.executemany(f"INSERT INTO strat_trades (origin, {', '.join(cols)}) VALUES ('replay', "
+                        f"{', '.join('?' * len(cols))})", [[r.get(c) for c in cols] for r in rows])
+
+
+def _row(market, k, j, three=True):
+    r = -0.1
+    row = {"market": market, "symbol": f"S{j}", "day": _day(k), "strategy": "pullback", "slot": j, "triggered": 1,
+           "r_net": r, "r_sans_be": r, "r_glisse_x2": r, "r_glisse_x3": r, "r_retard": r, "r_manque": r,
+           "temoin_r": -0.2, "temoin_triggered": 1, "entry": 10.0, "stop": 9.0}
+    if market == "stock":   # variantes à 20 € : actions seulement, un ou deux brackets sur les plans à trois objectifs
+        base, noise = -0.3 + 0.02 * j, 0.01 * (k % 3 - 1)    # bruit par jour, de moyenne nulle sur les 30 jours
+        row |= {"r_3c": r, "r_20e": base, "r_20e_deg": base + 0.05 + noise,
+                "r_20e_1s": base + 0.2 + noise if three else None, "r_20e_2s": base + 0.1 + noise if three else None}
+    return row
+
+
+@pytest.fixture
+def rep():
+    db = LabDB(":memory:")
+    _insert(db, [_row(m, k, j, three=j < 2) for m in ("stock", "crypto") for k in range(30) for j in range(3)])
+    return SS.report(db.conn)
+
+
+def test_ecart_apparie_sur_les_memes_trades(rep):
+    item = rep["strategies"]["stock"]["pullback"]
+    costs = item["couts_20e"]
+    assert item["mise_20e"]["n"] == 90 and costs["degressif"]["ecart"]["n"] == 90
+    assert costs["degressif"]["ecart"]["esperance_r"] == pytest.approx(0.05, abs=1e-4)
+    # Un ou deux brackets : seulement les 60 trades à trois objectifs, comparés à r_20e sur ces mêmes trades.
+    assert costs["un_objectif_tp2"]["ecart"]["n"] == costs["deux_objectifs_tp1_tp3"]["ecart"]["n"] == 60
+    assert costs["un_objectif_tp2"]["ecart"]["esperance_r"] == pytest.approx(0.2, abs=1e-4)
+    assert costs["deux_objectifs_tp1_tp3"]["ecart"]["esperance_r"] == pytest.approx(0.1, abs=1e-4)
+    assert costs["un_objectif_tp2"]["variante"]["esperance_r"] == pytest.approx(-0.09, abs=1e-4)
+    assert rep["strategies"]["crypto"]["pullback"]["couts_20e"] is None
+    assert not item["candidate"]          # descriptif : ne change ni « candidate » ni le nombre d'essais
+
+
+def test_texte_de_la_commande_frais(rep):
+    text = SS.costs_text(rep)
+    nom = rep["strategies"]["stock"]["pullback"]["nom"]
+    assert text.startswith("💶 **Ta mise de 20 € chez IBKR** (mesure, pas un essai)")
+    assert f"\n{nom} : trois brackets Fixe -0,28 R (90 trades) · Dégressif -0,23 R (écart +0,05, t " in text
+    assert "un bracket (TP2) -0,09 R (écart +0,20, t " in text and ", 60 trades)" in text
+    assert "deux brackets (TP1 et TP3)" in text and "Crypto" not in text
+    assert "pas encore de trade" in SS.costs_text(None)
+    old = {"strategies": {"stock": {"pullback": {"nom": nom, "mise_20e": {"n": 5, "esperance_r": -0.3}}}}}
+    assert "Variantes : au prochain calcul" in SS.costs_text(old)      # tableau calculé avant cette mesure
+    part = rep | {"partiel": {"stock": {"declaration": 11, "jours_rattrapage": 513, "lignes_exclues": 1}}}
+    assert "⏳ Tableau partiel : 513 jours en rattrapage (n° 11 seule en attendant)" in SS.costs_text(part)
+
+
+def test_brief_et_commande_discord(rep, monkeypatch, tmp_path):
+    monkeypatch.setattr(SS, "cached", lambda conn: rep)
+    got = BRIEF._strategies(None)["marches"]["stock"]["pullback"]["couts_20e_ecart_r"]
+    assert got == pytest.approx({"degressif": 0.05, "un_objectif_tp2": 0.2, "deux_objectifs_tp1_tp3": 0.1}, abs=1e-4)
+    assert BRIEF._strategies(None)["marches"]["crypto"]["pullback"]["couts_20e_ecart_r"] is None
+    assert "!frais" in bot.HELP
+
+
+async def test_commande_frais(rep, monkeypatch, tmp_path):
+    monkeypatch.setenv("JARVIS_LAB_DB", str(tmp_path / "absent.db"))
+    assert (await bot.handle("!frais")).startswith("💶 Base du labo absente")
+    (tmp_path / "lab.db").touch()
+    monkeypatch.setenv("JARVIS_LAB_DB", str(tmp_path / "lab.db"))
+    monkeypatch.setattr(SS, "cached", lambda conn: rep)
+    assert (await bot.handle("!mise")).startswith("💶 **Ta mise de 20 € chez IBKR**")

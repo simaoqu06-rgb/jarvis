@@ -5,12 +5,23 @@
 - run_live_day(day) : la séance qui vient de finir (actions) et les créneaux crypto du jour dont
   l'horizon est passé. Rejouer un jour remplace ses trades : jamais de doublon.
 La collecte des données (réseau) est séparée du calcul : `collect=False` travaille sur la base seule.
+
+Données manquantes (avis du 10 octobre, I4) : un symbole dont un lot a échoué à la source fait échouer le jour
+(nouvel essai au passage suivant) au lieu de le calculer en silence sur un univers amputé. Au 3e essai, le jour se
+calcule sans lui et le note (`missing_symbols` dans day:<D>) : un symbole durablement en panne (paire retirée
+d'OKX, ticker refusé dans un lot Alpaca) sauterait sinon tous les jours du rejeu. Sauf si plus de la moitié de
+l'univers manque (panne de la source) : le jour est alors sauté et compté (skipped:<D>). Les créneaux crypto
+d'un jour du direct pas encore complet se calculent sans les absents (le jour est refait une fois complet,
+avec la même règle). Chaque jour garde aussi
+les valeurs de l'univers sans trade et pourquoi (`absent` : historique<100, séance vide, plan impossible).
 """
 import asyncio
 import logging
 import time
+from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 
+from app.core.http import SourceError
 from app.lab import collector as CO
 from app.lab import generator as G
 from app.lab import heartbeat
@@ -54,7 +65,7 @@ def day_ready(market: str, day: date, now: datetime) -> bool:
 
 
 async def ensure_daily_range(db: LabDB, market: str, first_day: date, last_day: date,
-                             now: datetime | None = None, transport=None) -> None:
+                             now: datetime | None = None, transport=None, failed_out: set | None = None) -> None:
     """Bougies journalières de tous les symboles, de 450 jours avant `first_day` à `last_day` - 1."""
     now = now or datetime.now(timezone.utc)
     if market == "stock":
@@ -68,40 +79,62 @@ async def ensure_daily_range(db: LabDB, market: str, first_day: date, last_day: 
     if index not in symbols:
         symbols = [*symbols, index]
     await CO.ensure_daily(db, market, symbols, first_day - timedelta(days=CO.DAILY_HISTORY_DAYS),
-                          last_day - timedelta(days=1), now, transport)
+                          last_day - timedelta(days=1), now, transport, failed_out=failed_out)
 
 
-async def prepare_day(db: LabDB, market: str, day: date, now: datetime | None = None, transport=None) -> list[dict]:
+async def prepare_day(db: LabDB, market: str, day: date, now: datetime | None = None, transport=None,
+                      missing_out: set | None = None) -> list[dict]:
     """Collecte ce qu'il faut pour le jour (journalier de tous les symboles, 5 min de l'univers),
-    calcule l'univers et le renvoie. Seuls les manques sont demandés."""
+    calcule l'univers et le renvoie. Seuls les manques sont demandés.
+
+    Un lot en échec à la source lève SourceError (I4). Avec `missing_out` (dernier essai), ses symboles y sont
+    notés et le jour se calcule sans eux, sauf panne de la source : plus de la moitié de l'univers sans ses
+    bougies de 5 min, ou univers vide."""
     now = now or datetime.now(timezone.utc)
-    await ensure_daily_range(db, market, day, day, now, transport)
+    failed: set = set()
+    await ensure_daily_range(db, market, day, day, now, transport, failed_out=failed)
     universe = U.build(db, market, day, save=False)
     names = [u["symbol"] for u in universe]
     start, end = CO.stock_window(day) if market == "stock" else CO.crypto_window(day)
-    await CO.ensure_intraday(db, market, names, start, end, now, transport)
+    await CO.ensure_intraday(db, market, names, start, end, now, transport, failed_out=failed)
+    index = G.INDEX["stock"]
+    if market == "stock" and index not in names and CO.session_ts(day):
+        # Labo v2, déclaration n° 6 : séance de SPY en 5 min (sortie sur avalement baissier de l'indice).
+        await CO.ensure_intraday(db, market, [index], *CO.session_ts(day), now, transport, failed_out=failed)
+    if failed:
+        lost = failed & set(names)
+        if missing_out is None or not names or 2 * len(lost) > len(names):
+            raise SourceError(f"{len(failed)} symboles sans données : {', '.join(sorted(failed)[:5])}")
+        missing_out.update(failed)
     return universe
 
 
 MAX_DAY_ATTEMPTS = 3
 
 
+def last_try(db: LabDB, job: str, day: date) -> bool:
+    """Le prochain essai du jour est le dernier avant qu'il ne soit sauté (I4 : calculé sans les symboles manquants)."""
+    return (db.get(job, f"attempts:{day.isoformat()}", 0) or 0) + 1 >= MAX_DAY_ATTEMPTS
+
+
 def run_day(db: LabDB, market: str, day: date, origin: str, universe: list[dict] | None = None,
-            now: datetime | None = None, progress: tuple[str, str] | None = None) -> int:
+            now: datetime | None = None, progress: tuple[str, str] | None = None, missing: set | None = None) -> int:
     """Calcule et journalise un jour (sans réseau). Renvoie le nombre de trades écrits.
 
     Un symbole en erreur est sauté (une ligne de journal) et compté dans le bilan du jour,
-    gardé dans progress (job du rejeu ou du direct, clé « day:AAAA-MM-JJ »)."""
+    gardé dans progress (job du rejeu ou du direct, clé « day:AAAA-MM-JJ »), avec les valeurs de l'univers
+    sans trade et leur motif (`absent`) et les symboles que la source n'a pas donnés (`missing`, I4)."""
     version, s = method(db)
     if universe is None:
         universe = U.build(db, market, day, save=False)
     errors: list[dict] = []
     strat: list[dict] = []
+    absent: list[dict] = []
     now_ts = int(now.timestamp()) if now else None
     if market == "stock":
-        moments, rows = G.stock_day(db, day, s, universe, errors, strat)
+        moments, rows = G.stock_day(db, day, s, universe, errors, strat, absent)
     else:
-        moments, rows = G.crypto_day(db, day, s, universe, now_ts, errors, strat)
+        moments, rows = G.crypto_day(db, day, s, universe, now_ts, errors, strat, absent)
     job = progress[0] if progress else f"{origin}:{market}"
     with db.transaction():
         db.replace_universe(market, day.isoformat(), universe)
@@ -113,8 +146,12 @@ def run_day(db: LabDB, market: str, day: date, origin: str, universe: list[dict]
             key, job_v2 = f"inline_from:{origin}", ST.progress_job(market)
             if not db.get(job_v2, key):
                 db.set(job_v2, key, day.isoformat())
-        db.set(job, f"day:{day.isoformat()}", {"trades": len(rows), "errors": len(errors),
-                                               "error_symbols": [e["symbol"] for e in errors[:10]]})
+        info = {"trades": len(rows), "errors": len(errors), "error_symbols": [e["symbol"] for e in errors[:10]],
+                "absent": len(absent), "absent_motifs": dict(Counter(a["motif"] for a in absent)),
+                "absent_symbols": absent[:10]}
+        if missing:
+            info |= {"missing": len(missing), "missing_symbols": sorted(missing)[:10]}
+        db.set(job, f"day:{day.isoformat()}", info)
         if progress:
             db.set(job, progress[1], day.isoformat())
     return len(rows)
@@ -166,8 +203,9 @@ async def replay(start_day: date, end_day: date, market: str, db: LabDB | None =
             break
         heartbeat.beat(f"rejeu {market} : {day}")
         try:
-            universe = await prepare_day(db, market, day, now, transport) if collect else None
-            n = run_day(db, market, day, "replay", universe, progress=(job, "last_day"))
+            missing = set() if last_try(db, job, day) else None
+            universe = await prepare_day(db, market, day, now, transport, missing) if collect else None
+            n = run_day(db, market, day, "replay", universe, progress=(job, "last_day"), missing=missing)
         except Exception as exc:  # données manquantes, source en panne… : 3 essais puis on saute
             if day_failed(db, job, day, exc):
                 done += 1
@@ -192,8 +230,11 @@ async def run_live_day(day: date, db: LabDB | None = None, markets=MARKETS, coll
         complete = day_ready(market, day, now)
         progress = ("live:" + market, "last_day") if complete else None
         try:
-            universe = await prepare_day(db, market, day, now, transport) if collect else None
-            out[market] = run_day(db, market, day, "live", universe, now=now, progress=progress)
+            # Jour pas encore complet : calculé sans les symboles en échec (il sera refait une fois complet) ;
+            # complet : nouvel essai au passage suivant, calculé sans eux au dernier (I4).
+            missing = set() if not complete or last_try(db, progress[0], day) else None
+            universe = await prepare_day(db, market, day, now, transport, missing) if collect else None
+            out[market] = run_day(db, market, day, "live", universe, now=now, progress=progress, missing=missing)
         except Exception as exc:
             if complete:
                 day_failed(db, f"live:{market}", day, exc)  # 3 échecs : le jour est sauté

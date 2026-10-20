@@ -11,7 +11,7 @@ Toutes les ~10 min :
    résumé du soir (après 22 h 30 à Paris). Budgets par période dans LAB2_BUDGET : gros la nuit et
    le week-end, minimes pendant la séance.
 4. Labo 3 (étape « methode ») : décisions de Simão et types de catalyseurs déposés par le serveur,
-   challenger, bascule automatique ou retrait, fichier du champion lu par JARVIS en direct.
+   challenger, regards fixes (promotion proposée à Simão) ou retrait, fichier du champion lu par JARVIS en direct.
 5. Carnet des leçons (étape « lecons », lessons.py) : leçons déposées par la routine du soir,
    re-mesurées quand les trades changent, fichier des leçons confirmées lu par JARVIS en direct.
 6. Grade de JARVIS (étape « grade », grade.py) : avis du council et décisions de Simão, grade de
@@ -23,6 +23,23 @@ Toutes les ~10 min :
 8. Lot B : « potentiel » (potentiel.py, part des séances qui touchent +8 % selon le gap, fichier
    lab_potentiel.json lu par le scanner) et « derives » (derivs.py, funding et open interest Bybit, lus
    par le tableau des stratégies crypto), dans le budget derivs_calls de la période.
+9. Déclaration n° 6 : « couverture » (universe.coverage_step), part des actions ouvertes en gap ≥ 4 % avec un
+   ATR ≥ 4 % présentes dans l'univers du labo, quelques séances par passage (coverage_days).
+10. Déclaration n° 8, D1 : « archive » (archive.py), actus Finnhub d'avant 9 h 45 des actions en gap, calendrier
+   des résultats et profils, la séance la plus ancienne d'abord (Finnhub gratuit perd une séance par jour),
+   archivés sans être lus, hors séance US, archive_seconds et archive_days par passage.
+11. Déclaration n° 8 : « cout » (cout.py), R net des trades v1 d'actions recalculé une fois au coût du demi-pas
+   (D3) ; « killmode_complet » (kill_complet.py), séances dont l'archive est complète, bougies Alpaca relues et
+   gardées en mémoire, hors séance US, kill_complet_seconds par passage.
+12. Déclaration n° 9 : « potentiel_plus10 » (plus10.py), listes S+10 et Rebond sur toute la base, bougies de 5 min
+   non ajustées relues et gardées en mémoire, hors séance US, plus10_seconds par passage.
+13. « autopsie » (autopsie.py) : où les trades échouent (MFE/MAE contre le hasard) et grade indicatif des GO
+   confirmés, recalculés quand les trades changent, au plus toutes les stats_age secondes.
+14. « rates » (rates.py) : chasse aux ratés du potentiel +10, les actions à ≥ +10 % depuis l'ouverture des 20 dernières
+   séances et la raison du raté (pas de plan, plan non déclenché, stop avant TP1), recalculée quand les mouvements, les
+   trades ou le scanner +10 changent, au plus toutes les stats_age secondes.
+15. « filtres » (filtres.py) : ce que coûte chaque filtre du scanner de 15 h 10 sur les trades v1 d'actions,
+   recalculé quand les trades ou les réglages changent, au plus toutes les stats_age secondes, hors séance US.
 Le battement (lab.heartbeat) porte l'étape en cours, affichée par /api/lab/status et !labo.
 Le rejeu couvre JARVIS_LAB_REPLAY_DAYS séances (504 ≈ 2 ans) avant le premier lancement du worker ;
 le direct prend le relais à partir de ce jour-là. JARVIS_LAB_ENABLED=off met le worker en veille.
@@ -34,21 +51,30 @@ import time as clock
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
+from app.lab import archive as ARC
 from app.lab import catalysts as CAT
 from app.lab import collector as CO
+from app.lab import cout as COUT
 from app.lab import derivs as DER
+from app.lab import empreinte as E
+from app.lab import filtres as FIL
 from app.lab import generator as G
 from app.lab import grade as GRADE
 from app.lab import heartbeat
+from app.lab import kill_complet as KC
 from app.lab import lessons as L
+from app.lab import plus10 as P10
 from app.lab import method as M
 from app.lab import potentiel as PO
+from app.lab import autopsie as AUT
+from app.lab import rates as RATES
 from app.lab import rattrapage as RAT
 from app.lab import regime as REG
 from app.lab import runner as R
 from app.lab import stats as STATS
 from app.lab import strat_stats as SS
 from app.lab import summary as SUM
+from app.lab import universe as U
 from app.lab import validator as V
 from app.lab.db import LabDB, now_iso
 from app.sources import alpaca
@@ -69,9 +95,15 @@ KEY_WARNING_SECONDS = 3600
 # Labo 2 : jours de mouvements calculés, appels Finnhub, règles validées et âge maximal des
 # statistiques en cache (secondes), par période.
 LAB2_BUDGET = {
-    "nuit": {"moves_days": 30, "news_calls": 40, "rules": 3, "stats_age": 3600, "derivs_calls": 300},
-    "jour": {"moves_days": 5, "news_calls": 10, "rules": 1, "stats_age": 3 * 3600, "derivs_calls": 100},
-    "seance": {"moves_days": 2, "news_calls": 0, "rules": 0, "stats_age": 6 * 3600, "derivs_calls": 30},
+    "nuit": {"moves_days": 30, "news_calls": 40, "rules": 3, "stats_age": 3600, "derivs_calls": 300,
+             "coverage_days": 60, "archive_seconds": 1200, "archive_days": 40, "kill_complet_seconds": 600,
+             "plus10_seconds": 600},
+    "jour": {"moves_days": 5, "news_calls": 10, "rules": 1, "stats_age": 3 * 3600, "derivs_calls": 100,
+             "coverage_days": 10, "archive_seconds": 600, "archive_days": 10, "kill_complet_seconds": 120,
+             "plus10_seconds": 120},
+    "seance": {"moves_days": 2, "news_calls": 0, "rules": 0, "stats_age": 6 * 3600, "derivs_calls": 30,
+               "coverage_days": 2, "archive_seconds": 0, "archive_days": 2, "kill_complet_seconds": 0,
+               "plus10_seconds": 0},
 }
 _key_warned_at: float | None = None
 
@@ -117,6 +149,14 @@ def replay_seconds(now: datetime, summary_last_day: str | None) -> float:
     if summary_last_day != local.date().isoformat() and local < target:
         box = min(box, (target - local).total_seconds())
     return box
+
+
+def rattrapage_seconds(now: datetime, summary_last_day: str | None) -> float:
+    """Durée permise au rattrapage du labo v2 d'un marché à ce passage : RATTRAPAGE_SECONDS de la période, sans déborder
+    sur l'heure du résumé du soir tant qu'il n'est pas fait, comme le rejeu (replay_seconds). Depuis la n° 10, il a des
+    centaines de jours devant lui et prend tout son budget à chaque passage : 2 marchés × 10 min juste avant 22 h 30
+    repoussaient le résumé après la routine du soir."""
+    return min(float(RATTRAPAGE_SECONDS[period(now)]), replay_seconds(now, summary_last_day))
 
 
 def replay_budget(now: datetime) -> int:
@@ -173,9 +213,10 @@ def warn_missing_keys(now_mono: float | None = None) -> bool:
 
 
 def crypto_windows_due(day: date, now: datetime, done_until: int | None) -> bool:
-    """Un nouveau créneau crypto du jour a-t-il atteint son horizon depuis le dernier passage ?"""
+    """Un nouveau créneau crypto du jour a-t-il atteint son horizon depuis le dernier passage ? Un jour complet
+    encore à journaliser (son calcul complet a échoué) l'est toujours : nouvel essai, puis sauté au 3e (I4)."""
     due = [m for m in G.crypto_moments(day) if m + 86400 <= now.timestamp()]
-    return bool(due) and (done_until is None or due[-1] > done_until)
+    return bool(due) and (done_until is None or due[-1] > done_until or R.day_ready("crypto", day, now))
 
 
 def _history_start(market: str, day: date, stock_sessions: int, crypto_days: int) -> int:
@@ -282,10 +323,12 @@ async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, tra
         heartbeat.beat()
     if "labo2" not in report:
         report["labo2"] = await lab2(db, current(), collect)
-    seconds = RATTRAPAGE_SECONDS[period(current())] if collect else 0
-    if seconds:
+    if collect and RATTRAPAGE_SECONDS[period(current())]:
         report["rattrapage"] = {}
         for market in markets:
+            seconds = rattrapage_seconds(current(), db.get("summary", "last_day"))
+            if not seconds:
+                continue
             heartbeat.beat(f"labo v2 : rattrapage {market}")
             try:
                 report["rattrapage"][market] = await RAT.step(db, market, seconds, transport)
@@ -305,17 +348,19 @@ async def tick(db: LabDB, now: datetime | None = None, collect: bool = True, tra
 
 
 def trades_signature(db: LabDB) -> list:
+    """COUNT et MAX(id) des trades, compteur rev:trades (un trade réécrit sur place) et empreinte du code des stats."""
     row = db.conn.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM trades").fetchone()
-    return [row[0], row[1]]
+    return [row[0], row[1], *E.sig(db.conn, "trades")]
 
 
 def refresh_stats(db: LabDB, now: datetime, max_age: float, force: bool = False) -> dict | None:
     """Recalcule les statistiques de la version en cours si les trades ont changé et que le cache a
-    plus de `max_age` secondes (ou `force`). Renvoie les statistiques à jour, ou None si inchangées."""
+    plus de `max_age` secondes (ou `force`, ou un autre code : déploiement). Renvoie les statistiques à jour,
+    ou None si inchangées."""
     sig = trades_signature(db)
     last = db.get("stats", "signature")
     at = db.get("stats", "at", 0) or 0
-    if not force and (sig == last or now.timestamp() - at < max_age):
+    if not force and (sig == last or (now.timestamp() - at < max_age and not E.code_changed(last))):
         return None
     version = V.current_version(db.conn)
     data = STATS.compute(db.conn, version=version) if version else STATS.compute(db.conn)
@@ -328,11 +373,12 @@ def refresh_stats(db: LabDB, now: datetime, max_age: float, force: bool = False)
 
 def refresh_strategies(db: LabDB, now: datetime, max_age: float) -> int | None:
     """Labo v2 : tableau des stratégies et diagnostic v1 (strat_stats), recalculés quand les lignes ont
-    changé et que le cache a plus de `max_age` secondes. Renvoie le nombre de lignes, ou None."""
+    changé et que le cache a plus de `max_age` secondes (tout de suite après un déploiement). Renvoie le nombre
+    de lignes, ou None."""
     sig = SS.signature(db.conn)
     last = db.get("strats", "signature")
     at = db.get("strats", "at", 0) or 0
-    if sig == last or (SS.cached(db.conn) and now.timestamp() - at < max_age):
+    if sig == last or (SS.cached(db.conn) and now.timestamp() - at < max_age and not E.code_changed(last)):
         return None
     data = SS.report(db.conn)
     with db.transaction():
@@ -366,7 +412,13 @@ async def lab2(db: LabDB, now: datetime, collect: bool = True) -> dict:
     await step("regimes", lambda: sum(REG.refresh(db, m) for m in R.MARKETS))
     await step("mouvements", lambda: CAT.backfill_moves(db, now, budget["moves_days"]))
     await step("potentiel", lambda: PO.step(db))
+    await step("couverture", lambda: U.coverage_step(db, budget["coverage_days"]))
+    await step("archive", lambda: ARC.step(db, now, budget["archive_seconds"], collect,
+                                                budget["archive_days"]))
+    await step("cout", lambda: COUT.step(db))
     if collect:
+        await step("killmode_complet", lambda: KC.step(db, budget["kill_complet_seconds"]))
+        await step("potentiel_plus10", lambda: P10.step(db, now, budget["plus10_seconds"]))
         await step("derives", lambda: DER.collect(db, now, budget["derivs_calls"]))
     if collect and not CO.CAL.session_open(now):
         await step("actus", lambda: CAT.fetch_news(db, now, budget["news_calls"]))
@@ -376,6 +428,10 @@ async def lab2(db: LabDB, now: datetime, collect: bool = True) -> dict:
     await step("lecons", lambda: L.step(db, now, budget["stats_age"]))
     await step("grade", lambda: GRADE.step(db, now))
     await step("strategies", lambda: refresh_strategies(db, now, budget["stats_age"]))
+    await step("autopsie", lambda: AUT.step(db, now, budget["stats_age"]))
+    await step("rates", lambda: RATES.step(db, now, budget["stats_age"]))
+    if not CO.CAL.session_open(now):  # un journalier relu par action : pas pendant la séance US
+        await step("filtres", lambda: FIL.step(db, now, budget["stats_age"]))
     summary_day = SUM.due(now, db.get("summary", "last_day"))
     stats = await step("stats", lambda: refresh_stats(db, now, budget["stats_age"], force=bool(summary_day)))
     if stats:

@@ -449,6 +449,20 @@ def test_cloture_a_prix_zero(client):
     assert S.Book(None).close("absent", None) is None
 
 
+def test_api_r_net_et_desaccords(client, monkeypatch):
+    """La clôture du cockpit note le R net de frais estimés ; l'API des désaccords lit la pente du labo."""
+    trade = scheduler.book.add(plan(tps=(102.0, 104.0, 106.0)) | {"score": {"go": False, "decision": "NO GO",
+                                                                             "reasons": []}})
+    r = client.post(f"/api/trading/trades/{trade['id']}/close?price=99")
+    # 11 actions en 3 brackets : trois entrées, puis le tout vendu en un seul ordre (4 $ pour 22 $ de risque).
+    assert r.json()["realized_r"] == -0.5 and r.json()["realized_r_net"] == pytest.approx(-0.5 - 4 / 22, abs=1e-3)
+    assert trade["realized_r_net"] == r.json()["realized_r_net"]
+    assert client.get("/api/trading/trades").json()[0]["realized_r_net"] == trade["realized_r_net"]
+    monkeypatch.setattr(S, "note_slopes", lambda: {"stock": -0.02})
+    st = client.get("/api/trading/disagreements").json()
+    assert st["pente_note"] == {"stock": -0.02} and st["contre"]["closed"] == 1 and st["contre"]["days"] == 1
+
+
 async def test_routes_prennent_le_verrou(monkeypatch):
     from app import main
 
@@ -475,3 +489,69 @@ def test_journaux_sans_cles_d_api():
     assert logging.getLogger().getEffectiveLevel() <= logging.INFO
     assert logging.getLogger("httpx").level == logging.WARNING
     assert logging.getLogger("httpcore").level == logging.WARNING
+
+
+# --- L5a : le suivi des trades réels (GO confirmé, sortie au prix réel) -----------------------------
+
+async def test_prends_go_reprend_le_go_confirme_du_jour(monkeypatch):
+    """`!prends … go` : stop et objectifs du GO confirmé du jour (pas recalculés), trade marqué go_confirme, avec
+    JARVIS même si la note recalculée à l'entrée a baissé ; le suivi garde ta règle (stop à l'entrée après TP2)."""
+    from app.notify import bot
+
+    book = S.Book(None)
+    monkeypatch.setattr(scheduler, "book", book)
+    today = datetime.now(timezone.utc).astimezone(NY).date().isoformat()
+    monkeypatch.setattr(scheduler, "confirm_state", {"day": today, "closed": False, "gos": {
+        "ACME": {"status": "confirmé", "entry": 10.0, "stop": 9.5, "targets": [10.6, 11.0, 11.5], "trigger": 10.21,
+                 "composite": 7.4, "last_bar": None, "events": []},
+        "BETA": {"status": "annulé", "entry": 5.0, "stop": 4.8, "targets": [5.3, 5.5, 5.8], "composite": 7.1,
+                 "last_bar": None, "events": []}}})
+    seen = {}
+
+    async def build_plan(symbol, market, side, entry, stop, targets, **kw):
+        seen.update(entry=entry, stop=stop, targets=targets)
+        p = plan(symbol, entry, stop, tuple(targets))
+        return p | {"score": {"go": False, "decision": "NO GO", "reasons": ["R/R 1.2 sous le minimum de 1.5"]}}
+
+    monkeypatch.setattr(bot.trading, "build_plan", build_plan)
+    monkeypatch.setattr(bot.trading, "plan_text", lambda p: "PLAN")
+    txt = await bot.handle("!prends ACME 10.25 go")
+    assert seen == {"entry": 10.25, "stop": 9.5, "targets": [10.6, 11.0, 11.5]}
+    tr = book.trades[-1]
+    assert tr["policy"] == "go_confirme" and tr["note"] == "via GO confirmé" and not S.against_jarvis(tr)
+    assert "pas d'accord" not in txt and "GO confirmé du jour : stop 9.5, objectifs 10.6 · 11 · 11.5" in txt
+    assert "La note recalculée à ton entrée est NO GO" in txt
+    await bot.handle("!prends ACME go")  # sans prix : l'ordre stop de la confirmation
+    assert seen["entry"] == 10.21
+    # Sans GO confirmé aujourd'hui : réponse claire, rien n'est suivi.
+    n = len(book.trades)
+    assert "Pas de GO confirmé aujourd'hui pour BETA (son GO est annulé)" in await bot.handle("!prends BETA 5.1 go")
+    assert "n'est pas dans les GO du scanner du jour" in await bot.handle("!prends ZETA 5 go")
+    scheduler.confirm_state["day"] = "2026-01-02"
+    assert "pas de GO du scanner aujourd'hui" in await bot.handle("!prends ACME 10.25 go")
+    assert len(book.trades) == n
+    # Le suivi : stop inchangé après TP1, remonté à l'entrée après TP2.
+    tr["last_check"] = int(SESSION.timestamp())
+    S.apply_bars(tr, minute_bars(SESSION, [(10.65, 10.2)]), SESSION)
+    assert tr["targets_hit"] == 1 and tr["stop_current"] == 9.5
+    S.apply_bars(tr, minute_bars(SESSION + timedelta(minutes=1), [(11.05, 10.7)]), SESSION)
+    assert tr["targets_hit"] == 2 and tr["stop_current"] == 10.25
+
+
+async def test_sortie_ferme_ou_corrige_au_prix_reel(monkeypatch):
+    from app.notify import bot
+
+    book = S.Book(None)
+    monkeypatch.setattr(scheduler, "book", book)
+    nvda = book.add(plan("NVDA", 132.5, 130.0, (135.0, 137.5, 140.0)))
+    txt = await bot.handle("!sortie NVDA 131.2")
+    assert nvda["status"] == "closed" and nvda["events"][-1]["price"] == 131.2 and "clôturé à 131.2" in txt
+    acme = book.add(plan("ACME", 100.0, 98.0, (102.0, 104.0, 106.0)))
+    acme["last_check"] = int(SESSION.timestamp())
+    S.apply_bars(acme, minute_bars(SESSION, [(100.2, 97.5)]), SESSION)  # stop noté à 98 par le suivi
+    assert S.realized_r(acme) == -1.0
+    txt = await bot.handle("!sortie ACME 96.5")
+    assert S.realized_r(acme) == -1.75 and acme["events"][-1]["corrige"] and "sortie corrigée à 96.5" in txt
+    assert "Aucun trade MSFT suivi" in await bot.handle("!sortie MSFT 400")
+    assert "ton prix de sortie réel" in await bot.handle("!sortie ACME")
+    assert "!sortie NVDA 131.2" in bot.HELP and "go` = le GO confirmé du jour" in bot.HELP

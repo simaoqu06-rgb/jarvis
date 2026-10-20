@@ -2,6 +2,8 @@
 import sqlite3
 from datetime import datetime, timezone
 
+import pytest
+
 from app.lab import db as lab_db
 from app.notify import bot
 from app.trading import advice as A
@@ -141,10 +143,32 @@ def test_message_avant_la_cloture_une_fois_par_seance():
 
 def test_commandes_lisent_le_prix_d_entree_et_le_stop():
     assert bot.parse_trade(["nvda", "132,5", "stop", "128"]) == {
-        "symbol": "NVDA", "market": "stock", "side": "long", "entry": 132.5, "stop": 128.0}
+        "symbol": "NVDA", "market": "stock", "side": "long", "entry": 132.5, "stop": 128.0, "targets": None}
     req = bot.parse_trade(["eth", "short", "2500"])
     assert req["market"] == "crypto" and req["side"] == "short" and req["entry"] == 2500 and req["stop"] is None
     assert bot.parse_trade(["NVDA"])["entry"] is None
+    req = bot.parse_trade(["mrvl", "281", "stop", "273,9", "tp", "286.8", "290,5", "299.5"])
+    assert (req["entry"], req["stop"], req["targets"]) == (281.0, 273.9, [286.8, 290.5, 299.5])
+    req = bot.parse_trade(["mrvl", "tp", "286.8", "290.5", "281", "stop", "273.9"])
+    assert req["targets"] == [286.8, 290.5, 281.0] and req["entry"] is None  # tout nombre après tp est un objectif
+    with pytest.raises(ValueError):
+        bot.parse_trade(["mrvl", "281", "tp"])
+
+
+def test_rouvre_un_trade_dont_le_stop_n_a_pas_ete_execute():
+    book = S.Book(None)
+    plan = {"symbol": "MRVL", "side": "long", "entry": 281.0, "stop": 279.5, "targets": [],
+            "created_at": "2026-10-07T13:30:00+00:00"}
+    old = book.add(plan)
+    book.close(old["id"], 276.75)
+    assert S.reopen(book, "MRVL", plan) is None  # clôturé à la main : rien à rouvrir
+    old["events"][-1]["kind"] = "stop"
+    old["stop_current"] = 279.5
+    new_plan = plan | {"stop": 273.9, "created_at": "2026-10-08T13:50:00+00:00"}
+    assert S.reopen(book, "mrvl", new_plan)["id"] == old["id"]
+    assert len(book.trades) == 1
+    t = book.trades[0]
+    assert t["status"] == "open" and t["stop_current"] == 273.9 and "non exécuté" in t["note"]
 
 
 async def test_positions_sans_trade_suivi(monkeypatch):
@@ -191,3 +215,24 @@ async def test_message_avant_la_cloture_garde_les_conseils(monkeypatch):
     await scheduler.tick_closing(NOW)  # une seule fois par séance
     assert len(sent) == 1 and "Avant la clôture US" in sent[0] and "GARDER" in sent[0]
     assert book.trades[0]["conseils"][0]["decision"] == "GARDER"
+
+
+async def test_un_kill_pris_se_vend_a_la_cloture(monkeypatch):
+    """Un KILL pris ne reçoit pas de conseil garder / alléger : sa règle le vend avant la clôture."""
+    from app import scheduler
+
+    book = S.Book(None)
+    book.trades.append(trade(100.0, market="stock", symbol="ACME", killmode=True))
+    monkeypatch.setattr(scheduler, "book", book)
+    monkeypatch.setattr(scheduler.state, "data", {})
+    monkeypatch.setattr(scheduler.state, "save", lambda: None)
+    sent = []
+    monkeypatch.setattr(scheduler, "_queue", lambda text, kind, **kw: sent.append(text))
+
+    async def fake(trades, now):
+        raise AssertionError("pas de conseil sur un KILL")
+
+    monkeypatch.setattr(A, "advise_book", fake)
+    await scheduler.tick_closing(NOW)
+    assert len(sent) == 1
+    assert "vers 15 h 59 New York, annule les TP et SL de ACME puis vends le reste au marché" in sent[0]
