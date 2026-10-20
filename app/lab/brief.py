@@ -11,6 +11,8 @@ analystes ne reçoivent plus seulement des totaux : `detail` (espérance par set
 calculée par le code avec IC en grappes), `strategies` (tableau du labo v2 en bref, confirmation des GO) et
 `autopsie` (où les trades échouent, élan contre le hasard, grade indicatif des GO confirmés).
 `filtres_scanner` : ce que coûte chaque filtre du scanner de 15 h 10, mesuré sur les trades v1 d'actions (filtres.py).
+`declaration` (2e tour d'avis, C4) : la déclaration en vigueur est-elle entièrement re-mesurée (status.declaration_state) ;
+aucune hypothèse « prête à déclarer » avant « complete ».
 """
 import fcntl
 import json
@@ -208,6 +210,17 @@ def _grade(conn) -> dict | None:
         return None
 
 
+def _declaration(conn) -> dict | None:
+    """2e tour d'avis (C4) : la déclaration en vigueur est-elle entièrement re-mesurée, et sinon ce qui reste."""
+    from app.lab import status as STATUS  # import tardif, comme le serveur
+
+    try:
+        n = STATUS.declaration_state(conn)
+    except Exception:  # une information, jamais une panne du brief
+        return None
+    return n and n | {"texte": STATUS.declaration_line(n)}
+
+
 def _drop_detail(detail: dict | None) -> bool:
     """Retire du détail la dimension la moins utile qui reste (jour, puis note), sur tous les marchés."""
     for dim in ("jour_semaine", "note"):
@@ -230,7 +243,7 @@ def build(conn, now: datetime, db_file: str, morning: dict | None = None, dm: bo
             "methode": M.state(conn), "resume": (SUM.latest(conn) or {}).get("resume"), "stats": _stats(conn),
             "fiches_a_classer": _catalysts(conn, now), "types_permis": list(CAT.TYPES),
             "regles_recentes": _rules(conn, now), "compteurs": V.counts(conn), "lecons": _lessons(conn),
-            "grade": _grade(conn),
+            "grade": _grade(conn), "declaration": _declaration(conn),
             "detail": _detail(conn), "strategies": _strategies(conn), "autopsie": AUT.compact(AUT.cached(conn)),
             "filtres_scanner": FIL.compact(FIL.cached(conn)),
             "point_du_matin": {k: morning.get(k) for k in ("jour", "etat", "rejetees", "propositions", "texte")}

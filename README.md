@@ -140,7 +140,9 @@ chaque côté et un intervalle qui exclut 0 ; « JARVIS a raison » seulement si
 labo (pente > 0). Les sorties sont au prix suivi (stop franchi en gap : à l'ouverture ; objectif : franchi
 d'un pas) ou au tien avec `!sortie`. Ce R net sert aussi à l'arrêt de la journée à −3 R, aux trades réels
 de `!grade` et au journal du cockpit. Un GO confirmé pris avec `!prends NVDA 132.5 go` garde le stop et les
-objectifs du scanner et compte avec JARVIS. Le même principe s'applique aux Claude qui travaillent sur JARVIS
+objectifs du scanner et compte avec JARVIS. La taille est un désaccord à part : un trade pris à ta règle de 20 €
+(ou à un risque demandé) quand JARVIS propose 0 % forme un troisième groupe, « taille à ta règle », jugé sur la même règle (30 trades sur 20 jours, IC qui exclut 0) ; un GO pris sous un grade F reste
+d'accord avec la note, pas avec la taille. Le même principe s'applique aux Claude qui travaillent sur JARVIS
 ([CLAUDE.md](CLAUDE.md)).
 
 ## Scanner avant l'ouverture US
@@ -287,8 +289,11 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
 - **La nuit** : le worker valide les règles (Labo 2).
 - **Le matin (8 h - 9 h, heure de Paris)** : un seul message privé groupé (`app/lab/morning.py`) avec
   chaque règle validée, sa preuve chiffrée (« Les trades où rvol > 5 font −0,40 R en moyenne sur 212
-  trades ; les exclure donne +0,15 R par trade sur 3 périodes de test ») et son « pourquoi », plus le
-  nombre d'idées écartées depuis la veille. Boutons Approuver / Refuser par règle, ou `!oui N` /
+  trades ; les exclure donne +0,15 R par trade sur 3 périodes de test », écart relatif en R du labo,
+  avec ce que font encore les trades gardés, puis « Jours neufs depuis la soumission : 70 historiques
+  jamais lus (rejeu), 5 du direct » (tous les jours après la frontière, y compris le 1er bloc du
+  walk-forward et l'embargo, qui ne sont pas testés) ; sans jour du direct : « validée sur l'historique seulement : le challenger en direct
+  décidera ») et son « pourquoi », plus le nombre d'idées écartées depuis la veille. Boutons Approuver / Refuser par règle, ou `!oui N` /
   `!non N` (mêmes propositions que les réglages, même cockpit). Rien de validé : pas de message.
   Jamais hors de 8 h - 9 h ; manqué, il repart le lendemain ; jamais deux le même jour, même après un
   redémarrage (état dans `data/lab_morning.json`, marqué avant l'envoi). **Rodage** :
@@ -304,7 +309,11 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
   que l'effet tient ; **démentie**, c'est définitif (encore mesurée, jamais reconfirmée). Les confirmées
   (`data/lab_lessons.json`) s'affichent dans les plans en direct (ligne « Leçons du labo », avec la note
   qu'elles donneraient) **sans toucher au verdict** : GO / NO GO reste calculé sur la note brute. Une
-  leçon « favorable » dont les trades perdent encore est dite « relative ». La routine relit le carnet
+  leçon « favorable » dont les trades perdent encore est dite « relative » (« pas mieux que la moyenne » si ses
+  trades font même pire que l'ensemble) ; en actions, l'espérance est aussi comptée à 20 € (commission IBKR) et
+  la plus basse décide (« perd encore 0,12 R à 20 € »). La preuve dit ses jours de rejeu et du direct (jours où
+  elle a des trades concernés) ; une confirmée qui a moins de 20 jours du direct est dite
+  « (historique) », dans `!lecons` et dans les plans. La routine relit le carnet
   (dans `GET /api/lab/brief`) avant d'analyser ; Simão le lit avec `!lecons`.
 - **Approuvée** : la règle crée la version suivante (v2 = v1 + ses filtres), d'abord **challenger**.
   Les trades restent journalisés une seule fois (version de génération v1) ; champion et challenger
@@ -312,15 +321,21 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
   trades déclenchés **en direct** depuis sa création, sur les seuls marchés de ses nouvelles règles, en R
   à ta mise de 20 € pour les actions (frais IBKR réels), avec un écart et un z en grappes par jour. Elle
   n'est jugée qu'à 3 regards fixes, à 20, 40 et 60 jours de trades : le challenger est promouvable si
-  l'écart atteint +0,02 R par trade, z ≥ 2,13 (5 % répartis sur les 3 regards), aucun marché touché ne
-  recule, la capture du potentiel +10 tient (même tolérance que le validateur) et il garde au moins 100
-  trades. Il ne bascule pas seul : tu reçois une proposition « mettre en place la méthode v2 » (boutons,
-  `!oui N` / `!non N`), avec l'espérance des trades gardés (« filtre moins perdant, méthode toujours
-  perdante » si elle reste ≤ 0). Approuvée : « Méthode v2 en place : … » ; refusée : v2 est retirée ;
-  sans réponse, il reste mesuré et le regard suivant remplace la proposition. Pas assez net au dernier
-  regard (ou 100 jours sans l'atteindre), il est retiré (message aussi). Seuils `challenger_looks_days`,
-  `challenger_min_z`, `challenger_min_gain`, `challenger_min_trades`, `challenger_max_days` dans
-  `lab_config`. Des règles approuvées pendant un essai attendent sa fin (sauf le même matin : elles
+  l'écart atteint +0,02 R par trade, z ≥ le seuil du challenger n° k, aucun marché touché ne recule, la
+  capture du potentiel +10 tient (même tolérance que le validateur) et il garde au moins 100 trades. Le
+  seuil dépense 5 % au total sur TOUS les challengers (6·0,05/(π²k²) pour le k-ième, même série que les
+  essais du validateur ; k = 1 + challengers précédents jugés à au moins un regard, figé à sa création),
+  réparti sur les 3 regards, en t de Student à g − 1 degrés (g jours du regard) : 2,53 au premier regard
+  du premier challenger, 4,58 pour le dixième. Il ne bascule pas seul : tu reçois une proposition « mettre
+  en place la méthode v2 » (boutons, `!oui N` / `!non N`), avec l'espérance des trades gardés (« filtre
+  moins perdant, méthode toujours perdante » si elle reste ≤ 0, « méthode toujours perdante » seul tant que
+  l'écart n'est pas connu et positif, « positive mais non prouvée » si son IC95 touche 0 ; !labo et le
+  cockpit le disent aussi). Approuvée : « Méthode v2 en place : … » ; refusée : v2
+  est retirée ; sans réponse, il reste mesuré et le regard suivant remplace la proposition ; une
+  promotion du dernier regard sans réponse depuis 14 jours est retirée. Pas assez net au dernier regard
+  (ou 100 jours sans l'atteindre), il est retiré (message aussi). Seuils `challenger_looks_days`,
+  `challenger_alpha`, `challenger_min_gain`, `challenger_min_trades`, `challenger_max_days`,
+  `challenger_answer_days` dans `lab_config`. Des règles approuvées pendant un essai attendent sa fin (sauf le même matin : elles
   rejoignent le challenger tant qu'il n'a aucun trade).
 - **Refusée** : rangée dans la mémoire des échecs (« refusée par Simão »), jamais reproposée.
 - **En direct** : le worker écrit la méthode en place dans `data/lab_champion.json`. Le scanner
@@ -329,13 +344,23 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
   du labo : … ») et dans `data/scans.jsonl`. Contexte du direct reconstruit comme au labo
   (`app/lab/live.py` : note sans la part catalyseur, volume relatif et variation de la veille, régime
   de SPY) ; champs absents traités comme « non vérifiés ». Fichier absent ou illisible : aucun filtre,
-  une ligne de journal, le direct continue. `!plan` et le cockpit ne sont pas filtrés (demandes à toi).
+  une ligne de journal, le direct continue. Tous les autres plans longs (`!plan`, `!prends`, API,
+  crypto) passent par le même filtre (`live.plan_verdict` dans `build_plan` ; crypto : contexte de
+  `lessons.crypto_row` ramené au créneau du labo qui précède (00, 04… 20 h UTC), paire au nom du labo
+  « BTC-USDT », régime de BTC), sauf `!prends … go` (le GO confirmé a déjà été gardé au scanner : le plan
+  recalculé au déclenchement garde la taille du MP). Un plan écarté reste affiché, mais le grade ne mesurant
+  que les trades que garde la méthode, JARVIS n'y propose aucun risque (« 🏅 … 0 % : plan écarté par la
+  méthode v2 (règle « … ») », ta règle de 20 € à part), et `!avis` ramène un GO écarté à « attendre ».
+  Donnée manquante (indice du régime, bougies journalières pour le volume relatif et la variation de la veille,
+  contexte) : la règle concernée ne s'applique pas, plan gardé, une ligne de journal.
 - **Cockpit** : page `/cockpit/labo` (lecture seule) : grade, avancement, chiffres clés, méthode en
   place et challenger, dernières propositions, règles testées, dernier message du matin.
 - **Grade de JARVIS** (`app/lab/grade.py`, barème validé par Simão le 2026-10-07) : de F- à S+, la
   preuve mesurée par le worker (sans jeton) que la méthode en place gagne, par marché.
   - Lettre = espérance nette en R sur les 60 derniers jours de bourse de la méthode en place (hors
-    échantillon ; actions : R après commission IBKR à 20 €, `r_20e`) : S ≥ +0,40 R, A ≥ +0,25,
+    échantillon : après une promotion, seuls comptent les jours journalisés depuis, jamais ceux de
+    l'essai qui l'a décidée ; actions : R après commission IBKR à 20 €, `r_20e`, ou `r_20e_deg`
+    quand `JARVIS_IBKR_PLAN=degressif`) : S ≥ +0,40 R, A ≥ +0,25,
     B ≥ +0,15, C ≥ +0,05 (borne basse de l'IC95 en t de Student > 0 dès C), D positive mais pas
     prouvée, E entre −0,10 et 0, F < −0,10. Moins de 100 trades sur 10 jours : « non noté ». La
     fenêtre réelle est publiée (rejeu du … au …, direct depuis le …) ; coupée par un trou de plus de
@@ -352,13 +377,19 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
   - Taille, une seule règle : risque = min(`JARVIS_CAPITAL` (€) × % proposé, `JARVIS_RISK_EUR` = 20 €),
     20 € sans capital connu, converti au change BCE du jour, en actions entières (« 💰 Risque 20 €
     (23,0 $) : 46 actions »). Grade à 0 % : JARVIS ne propose pas de taille ; ta règle de 20 € est
-    affichée à part, « hors avis de JARVIS » (plans, GO confirmés, potentiel +10, Killmode). Un
-    risque demandé explicitement (`risk_pct`) remplace le % du grade et est signalé hors budget
-    s'il engage plus que ce que propose JARVIS.
+    affichée à part, « hors avis de JARVIS » (plans, GO confirmés, potentiel +10, Killmode), dans la
+    ligne d'ordre même des MP automatiques (« **46 actions à ta règle de 20 €** (hors avis de
+    JARVIS) »). Quand ce 0 % vient de l'arrêt de la journée ou du budget de risque ouvert plein, les
+    MP automatiques (GO confirmé, potentiel +10) ne chiffrent aucune quantité (« pas de taille :
+    arrêt de la journée (−3,3 R) ») : choix par défaut, `JARVIS_MP_TAILLE_APRES_ARRET=oui` pour
+    revenir à ta règle de 20 €. Un risque demandé explicitement (`risk_pct`) remplace le % du grade
+    et est signalé hors budget s'il engage plus que ce que propose JARVIS (ligne 💰 : « risque
+    demandé, hors budget »).
   - Changements : baisse immédiate ; hausse après au moins 150 nouveaux trades sur 5 nouveaux jours,
     et une hausse de **lettre** attend ton accord (proposition Approuver / Refuser en privé, `!oui N`) ;
     à partir de C, une baisse de 20 R depuis le sommet ramène tout de suite en D (coupe-circuit) ; une
-    nouvelle méthode repart de « non noté ». IC95 entièrement sous zéro sur 150 trades : méthode
+    nouvelle méthode repart de « non noté » sur les marchés dont elle change les filtres (une règle
+    actions laisse le grade crypto intact). IC95 entièrement sous zéro sur 150 trades : méthode
     déclarée morte (message). E, F ou morte : mode survie de la routine du soir. Message privé à
     chaque changement de lettre ; un − / + dans la même lettre (risque inchangé) reste dans `!grade`.
   - Le council du soir contrôle le grade (`POST /api/lab/grade/avis`, un avis par marché et par soir,
@@ -407,6 +438,11 @@ Liste, seuils et sorties sont déclarés d'avance : [docs/labo-strategies.md](do
 - **Bloc scellé** : le rejeu du 6 avril au 5 octobre 2026 est calculé mais rangé à part, invisible des
   statistiques, du brief, du grade et du validateur (`app/lab/seal.py`). Il sert une seule fois.
 - Les jours traités avant le labo v2 sont rattrapés hors séance (bougies relues à la source, rien stocké).
+- Deuxième tour d'avis : avant qu'une déclaration réécrive des lignes mesurées autrement, le worker les archive une fois
+  (`app/lab/audit.py`, `data/archives/labo2-avant-n<déclaration>.db`, la première `labo2-avant-n11.db` ; une copie
+  manuelle `labo2-avant-n10.db` est appariée à part) ; l'audit apparié ancien → nouveau sur les mêmes trades est
+  affiché pour audit, jamais pour décider (section « Audit » de `!strategies`, `GET /api/lab/strategies/audit`).
+  `!labo` dit « n° 11 : complète » (la déclaration en vigueur) ou ce qui reste à refaire.
 - `!strategies`, `GET /api/lab/strategies`, ligne « Labo v2 » et ligne 🔒 de `!labo`.
 
 ## Avis sur un actif et conseil avant la clôture, en prix
@@ -476,12 +512,13 @@ de titres (S-1, S-3, 424B) sur 30 jours, actus de la semaine et ce qui, dans tou
 | `!societe NVDA` | fiche société : résultats, plus fortes séances de l'année et leur actu, chiffres, analystes, dirigeants, dépôts SEC, actus |
 | `!prends NVDA` | calcule le plan et suit le trade (TP/SL annoncés, cockpit) ; `!prends NVDA 132.5 stop 128 tp 140 145 150` = ton entrée, ton stop et tes objectifs réels |
 | `!prends NVDA 132.5 go` | suit le GO confirmé du jour avec son stop et ses objectifs (pas recalculés) ; sans GO confirmé ce jour, rien n'est suivi |
+| `!prends ACME 106.6 kill` | suit le KILL de Killmode du jour (sa taille de 20 €, sa gestion) ; refusé pour une crypto ou sans KILL noté ce jour (`action` force l'action d'un ticker lu comme crypto, ex. l'ETF BTC) |
 | `!sortie NVDA 131.2` | ta sortie réelle : clôture le trade suivi à ce prix, ou corrige le prix de sa dernière sortie s'il est déjà terminé |
 | `!positions` | trades suivis : ventes, stop suiveur et renforts en prix, et sortir, alléger ou garder (aussi envoyé seul 30 min avant la clôture US) |
 | `!position NVDA 132.5` | la même chose pour une position prise hors de JARVIS (`short`, `stop 128` en plus), avec la commande `!prends` pour qu'il la suive |
 | `!scan` | scanner tout de suite |
 | `!bilan` | bilan du forward-test |
-| `!desaccords` | trades pris contre l'avis de JARVIS (NO GO) comparés aux plans GO : qui avait raison |
+| `!desaccords` | trades pris contre l'avis de JARVIS (NO GO) comparés aux plans GO, et trades pris à ta règle de taille quand JARVIS propose 0 % : qui avait raison |
 | `!propositions` | réglages proposés qui attendent ta réponse |
 | `!oui 3` / `!non 3` | approuver ou refuser la proposition 3 (ou les boutons) |
 | `!regle` | réglages actuels |

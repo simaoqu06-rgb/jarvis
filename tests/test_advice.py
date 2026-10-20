@@ -207,6 +207,20 @@ def test_avis_jamais_contre_la_tendance_ni_avant_les_resultats():
     assert v["decision"] == "ATTENDRE" and any("augmentation de capital" in r for r in v["reasons"])
 
 
+def test_avis_plan_ecarte_par_la_methode_sans_entree():
+    """#54 : un plan que la méthode championne écarte n'a pas d'entrée (le scanner ne le proposerait pas) ; un autre
+    côté gardé passe."""
+    ecarte = {"grade": "A", "risque_propose": 0.0, "ecarte": True,
+              "raison": "écarté par la méthode v2 (règle « stop trop large »)"}
+    long_ = plan("long", True, 8, [entry("maintenant"), entry("repli")]) | {"grade": ecarte}
+    v = A.decide([long_])
+    assert v["decision"] == "ATTENDRE" and not v["orders"]
+    assert v["reasons"][-1] == ("long : écarté par la méthode v2 (règle « stop trop large ») : le scanner ne le "
+                                "proposerait pas")
+    short = plan("short", True, 7, [entry("maintenant", "short")])
+    assert A.decide([long_, short])["decision"] == "ENTRER SHORT"
+
+
 def test_avis_attend_et_dit_la_meilleure_entree():
     v = A.decide([plan("long", False, 5, [entry("maintenant", ok=False, rr2=1.0), entry("repli", ok=False, rr2=1.5)])])
     assert v["decision"] == "ATTENDRE" and "la meilleure : long sur repli à 100, R/R 1.5" in v["reasons"][-1]
@@ -239,6 +253,31 @@ def test_mesure_du_labo_lit_la_table_des_trades(tmp_path):
 
 def strategy(nom, z, ci, days=64, candidate=False, **over):
     return {"nom": nom, "jours": days, "ic95": ci, "ic95_ibkr": ci, "candidate": candidate, "temoin": {"z": z}} | over
+
+
+def test_note_go_moins_mauvais_n_est_pas_un_gain():
+    """#54, scénario 3 de GPT : un GO meilleur que le NO GO mais encore perdant (ou nul) n'est pas « prouvé »."""
+    m = {"marche": {"GO": {"n": 500, "r": -0.02, "wins": 200}, "NO GO": {"n": 900, "r": -0.15, "wins": 300}}}
+    assert not A.note_proven(m) and "pas encore prouvé" in A.note_line(m)
+    m["marche"]["GO"]["r"] = 0.0
+    assert not A.note_proven(m)
+
+
+def test_mesure_du_labo_filtre_version_de_generation_et_rejeu(tmp_path):
+    """Plans longs rejoués de la méthode en cours : ni le direct ni une autre version n'y entrent."""
+    path = tmp_path / "lab.db"
+    db = lab_db.LabDB(str(path))
+    db.conn.execute("INSERT INTO method_versions (version, created_at, settings) VALUES "
+                    "('v0', '2025-01-01T00:00:00+00:00', '{}'), ('v1', '2026-01-01T00:00:00+00:00', '{}')")
+    for i, (origin, version, decision, r) in enumerate([("replay", "v1", "GO", 1.0), ("replay", "v1", "NO GO", -1.0),
+                                                         ("live", "v1", "GO", -3.0), ("replay", "v0", "GO", -3.0)]):
+        db.conn.execute("INSERT INTO trades (origin, method_version, market, symbol, side, day, planned_at, triggered, "
+                        "r_net, decision) VALUES (?, ?, 'stock', 'NVDA', 'long', '2026-01-02', ?, 1, ?, ?)",
+                        (origin, version, i, r, decision))
+    db.conn.commit()
+    m = A.lab_measure("stock", "NVDA", str(path))
+    assert m["version"] == "v1" and m["marche"] == {"GO": {"n": 1, "r": 1.0, "wins": 1},
+                                                     "NO GO": {"n": 1, "r": -1.0, "wins": 0}}
 
 
 def lab_table(tmp_path, name, stock, crypto=None):

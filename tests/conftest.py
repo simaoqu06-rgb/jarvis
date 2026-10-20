@@ -15,6 +15,15 @@ def seal_hors_des_dates_de_test(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def aucun_recalcul_v1_ponctuel(monkeypatch):
+    """Le worker recalcule une fois la séance d'actions du direct du 06/10/2026 (empreinte.V1_RECALCULS) : beaucoup de
+    tests prennent ce jour pour un direct synthétique. Vidé ici ; les tests du recalcul le remettent."""
+    from app.lab import empreinte as E
+
+    monkeypatch.setattr(E, "V1_RECALCULS", ())
+
+
+@pytest.fixture(autouse=True)
 def change_eur_usd_sans_reseau(monkeypatch):
     """build_plan lit le change EUR→USD du jour (taille en euros) : fixé à 1,15 (défaut de Killmode), sans réseau.
     Les tests du change lui-même gardent la vraie fonction (importée avant ce réglage)."""

@@ -151,7 +151,8 @@ def take_command(symbol: str, e: dict, with_entry: bool = True) -> str:
 def decide(plans: list[dict]) -> dict:
     """ENTRER maintenant, des ordres conditionnels (repli ou cassure) ou ATTENDRE, à partir des entrées en prix
     de chaque plan (`entries`, calculées sur la carte des niveaux). Renvoie la décision, le plan retenu, les
-    ordres (entrées) à poser et les raisons."""
+    ordres (entrées) à poser et les raisons. Un plan que la méthode championne écarte (grade.ecarte, apply_grade)
+    n'a pas d'entrée : le scanner ne le proposerait pas et le grade ne mesure pas ces plans."""
     floor = rr_floor()
     ranked = sorted(plans, key=lambda p: p["score"]["composite"], reverse=True)
     reasons = [f"{_side(p['side'])} : contre la tendance de fond ({_trend(p)['detail']})"
@@ -169,6 +170,9 @@ def decide(plans: list[dict]) -> dict:
             continue
         if p["side"] == "long" and cat.get("dilution"):
             reasons.append("long : augmentation de capital dans les actus (de nouvelles actions arrivent)")
+            continue
+        if (p.get("grade") or {}).get("ecarte"):  # hors de la méthode championne : le grade ne mesure pas ce plan
+            reasons.append(f"{_side(p['side'])} : {p['grade']['raison']} : le scanner ne le proposerait pas")
             continue
         allowed.append(p)
     for p in allowed:
@@ -207,20 +211,29 @@ def decision_icon(decision: str) -> str:
 
 
 def lab_measure(market: str, symbol: str, path: str | None = None) -> dict | None:
-    """Ce que le labo a mesuré sur la méthode v1 (plans longs rejoués, hors bloc scellé) : sur ce
-    symbole et sur tout le marché, résultat des plans GO et NO GO déclenchés. None sans base."""
+    """Ce que le labo a mesuré sur la méthode de génération en cours (plans longs rejoués : origine « replay »,
+    hors bloc scellé ; ni le direct ni les autres versions n'y entrent) : sur ce symbole et sur tout le
+    marché, résultat des plans GO et NO GO déclenchés, en R du labo. Deux AVG SQL, pas de calcul par trade
+    (commande interactive). None sans base."""
     from app.lab import db as lab_db  # import tardif : le labo importe le moteur de plans
 
     conn = lab_db.open_readonly(path) if path else lab_db.open_readonly()
     if conn is None:
         return None
     try:
-        out = {}
+        try:
+            version = lab_db.generation_version(conn)
+        except sqlite3.Error:  # base sans table des versions (d'avant le Labo 3) : une seule version
+            version = None
+        scope, scope_args = "origin = 'replay' AND side = 'long'", ()
+        if version is not None:
+            scope, scope_args = scope + " AND method_version = ?", (version,)
+        out = {"version": version}
         for key, where, args in (("symbole", "market = ? AND symbol = ?", (market, symbol)),
                                  ("marche", "market = ?", (market,))):
             rows = conn.execute(
-                f"SELECT decision, COUNT(*), AVG(r_net), SUM(r_net > 0) FROM trades WHERE {where} "
-                "AND triggered = 1 AND r_net IS NOT NULL GROUP BY decision", args).fetchall()
+                f"SELECT decision, COUNT(*), AVG(r_net), SUM(r_net > 0) FROM trades WHERE {where} AND {scope} "
+                "AND triggered = 1 AND r_net IS NOT NULL GROUP BY decision", args + scope_args).fetchall()
             out[key] = {d or "?": {"n": n, "r": round(r, 2), "wins": w or 0} for d, n, r, w in rows}
         return out
     except sqlite3.Error as exc:

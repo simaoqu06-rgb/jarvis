@@ -673,7 +673,15 @@ function sizeHtml(p) {
   const s = p.sizing, rule = p.sizing_regle;
   if (s && s.risk_amount_eur != null) return ` · 💰 risque ${fmt(s.risk_amount_eur)} € (${fmt(s.risk_amount)} $) : ${qty(s)}`;
   if (s) return ` · 💰 risque ${s.risk_pct} % = ${fmt(s.risk_amount)} · taille ${fmt(s.quantity)} (${fmt(s.notional)}) · levier ${s.leverage}×`;
-  if (rule) return ` · 💰 JARVIS ne propose pas de taille (grade ${esc((p.grade || {}).grade || "non noté")} : 0 %). Ta règle de ${fmt(rule.risk_amount_eur)} € : ${qty(rule)} (exception, hors avis de JARVIS)`;
+  if (rule) {
+    // La lettre seule quand c'est elle qui dit 0 % ; sinon la vraie raison (arrêt du jour, budget, grade périmé,
+    // illisible, fenêtre discontinue, plan écarté par la méthode), comme service.sizing_lines sur Discord.
+    const g = p.grade || {};
+    const byLetter = !(g.risque_grade > 0) && !g.perime && !g.ecarte && !/^(grade illisible|fenêtre discontinue)/.test(g.raison || "");
+    const why = byLetter || !g.raison ? ` (grade ${esc(g.grade || "non noté")} : 0 %)`
+      : g.ecarte ? ` : plan ${esc(g.raison)}` : ` (0 % : ${esc(g.raison)})`;
+    return ` · 💰 JARVIS ne propose pas de taille${why}. Ta règle de ${fmt(rule.risk_amount_eur)} € : ${qty(rule)} (exception, hors avis de JARVIS)`;
+  }
   return "";
 }
 
