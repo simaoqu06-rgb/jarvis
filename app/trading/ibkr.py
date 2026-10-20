@@ -4,7 +4,10 @@ Simão (2026-10-08) : 20 € de perte maximale par trade (JARVIS_RISK_EUR). La q
 (service.apply_grade, règle unique : risque en € = min(capital × % du grade, JARVIS_RISK_EUR), au change EUR/USD
 du jour, actions entières), puis la position est découpée en un bracket IBKR par TP (même entrée, même SL ; un TP
 touché ne ferme que sa part). Un bracket IBKR n'ayant qu'un TP, chaque part a son ordre d'entrée et son ordre de
-sortie : 2 ordres par bracket, donc 2 minimums de commission.
+sortie : 2 ordres par bracket, donc 2 minimums de commission. Avec moins d'actions que de TP, chaque bracket vise
+l'objectif du milieu de sa part (1 action : TP2 ; 2 actions : TP1 et TP3), comme killmode.bracket_orders et la mesure
+du labo à 20 €. Quand le grade propose 0 %, JARVIS ne propose pas de taille : le bloc suit alors ta règle de 20 €
+(`sizing_regle`), marqué « ta règle, hors avis de JARVIS », comme la ligne 💰.
 
 Commissions IBKR Pro estimées au barème de Killmode (killmode.IBKR_PLANS et order_commission ; plan du compte :
 JARVIS_IBKR_PLAN ; comparatif : /mnt/project-files/trading/plateforme-actions-us.md) :
@@ -33,25 +36,32 @@ def brackets(p: dict) -> dict | None:
     """Brackets IBKR d'un plan d'action (long ou short) à sa taille en euros (`sizing`), ou None sans elle."""
     from app.trading import killmode as K  # import tardif : killmode importe service, qui importe ce module
 
-    s = p.get("sizing") or {}
+    # Grade à 0 % : JARVIS ne propose pas de taille ; les brackets suivent alors ta règle de 20 € (`sizing_regle`),
+    # dite comme telle, comme la ligne 💰 (service.sizing_lines).
+    s = p.get("sizing") or p.get("sizing_regle") or {}
+    rule = not p.get("sizing") and bool(p.get("sizing_regle"))
     entry, stop = p["entry"], p["stop"]
     per_share = abs(entry - stop)
     if not per_share or p.get("market") != "stock" or s.get("risk_amount_eur") is None:
         return None
     risk_eur, risk_usd, eurusd, quantity = s["risk_amount_eur"], s["risk_amount"], s.get("eurusd"), s["quantity"]
     if quantity < 1:
-        return {"risk_eur": risk_eur, "risk_usd": risk_usd, "eurusd": eurusd, "quantity": 0,
+        return {"risk_eur": risk_eur, "risk_usd": risk_usd, "eurusd": eurusd, "quantity": 0, "hors_avis": rule,
                 "raison": f"stop trop loin : 1 action risque déjà {per_share:.2f} $"}
     tps = [t["price"] for t in p["targets"]] or [entry]
-    sizes = K._brackets(quantity, len(tps))
-    rows = [{"name": p["targets"][i]["name"] if p["targets"] else "TP", "quantity": n, "take_profit": tps[i]}
-            for i, n in enumerate(sizes)]
+    names = [t["name"] for t in p["targets"]] or ["TP"]
+    # Chaque bracket vise l'objectif du milieu de sa part (1 action : TP2 ; 2 actions : TP1 et TP3), comme
+    # killmode.bracket_orders et la mesure du labo à 20 € (r_20e, `!frais`).
+    parts = [{"prix": x, "part": 1 / len(tps), "raison": i} for i, x in enumerate(tps)]
+    legs = K._legs(quantity, len(tps), parts)
+    sizes = [n for n, _ in legs]
+    rows = [{"name": names[e["raison"]], "quantity": n, "take_profit": e["prix"]} for n, e in legs]
     real_risk = quantity * per_share
     fees = {}
     for key, plan in K.IBKR_PLANS.items():
         # Pire cas pour les frais : tous les brackets sortent (au TP ou au SL), 2 ordres chacun.
         worst = trade_commission(sizes, entry, [stop] * len(sizes), plan)
-        best = trade_commission(sizes, entry, tps[:len(sizes)], plan)
+        best = trade_commission(sizes, entry, [r["take_profit"] for r in rows], plan)
         single = trade_commission([quantity], entry, [stop], plan)
         cost = max(worst, best)
         fees[key] = {"usd": round(cost, 2), "r": round(cost / real_risk, 3),
@@ -60,7 +70,7 @@ def brackets(p: dict) -> dict | None:
     return {
         "risk_eur": risk_eur, "risk_usd": risk_usd, "eurusd": eurusd,
         "quantity": quantity, "notional_usd": round(quantity * entry, 2), "real_risk_usd": round(real_risk, 2),
-        "entry": entry, "stop": stop, "side": p["side"], "brackets": rows,
+        "entry": entry, "stop": stop, "side": p["side"], "brackets": rows, "hors_avis": rule,
         "fees": fees, "plan": K.IBKR_PLAN if K.IBKR_PLAN in K.IBKR_PLANS else "fixe", "cheapest": cheapest,
     }
 
@@ -69,9 +79,6 @@ def attach(p: dict) -> None:
     """Ajoute p["ibkr"] à un plan d'action. Jamais d'exception : plan inchangé en cas de souci."""
     if p.get("market") != "stock":
         return
-    grade = p.get("grade") or {}
-    if grade and grade.get("risque_propose", 1) <= 0:
-        return  # le grade arrête la journée : pas de taille proposée
     try:
         out = brackets(p)
         if out is not None:
@@ -90,11 +97,12 @@ def lines(p: dict) -> list[str]:
     if not b:
         return []
     fx = f"{b['risk_usd']:g} $ au change {b['eurusd']:.4f}" if b["eurusd"] else f"{b['risk_usd']:g} $, taux EUR/USD indisponible"
+    rule = " · ta règle, hors avis de JARVIS" if b.get("hors_avis") else ""
     if not b["quantity"]:
-        return [f"🧾 IBKR · risque {b['risk_eur']:g} € ({fx}) : {b['raison']}"]
+        return [f"🧾 IBKR · risque {b['risk_eur']:g} € ({fx}) : {b['raison']}{rule}"]
     sl = "SL" if b["side"] == "long" else "SL (rachat)"
     out = [f"🧾 **IBKR · {b['quantity']} actions** ({_px(b['notional_usd'])} $) · perte au SL "
-           f"{b['real_risk_usd']:.2f} $ (max {b['risk_eur']:g} € = {fx})"]
+           f"{b['real_risk_usd']:.2f} $ (max {b['risk_eur']:g} € = {fx}){rule}"]
     for i, r in enumerate(b["brackets"], start=1):
         out.append(f"-# Bracket {i} : {r['quantity']} @ entrée {_px(b['entry'])} · {sl} {_px(b['stop'])} · "
                    f"{r['name']} {_px(r['take_profit'])}")

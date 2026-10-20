@@ -124,12 +124,12 @@ def test_plan_from_bars_identique_a_build_plan(full_db, monkeypatch):
     monkeypatch.setattr(T.C, "safe_check", fake_cat)
     monkeypatch.setenv("JARVIS_CAPITAL", "10000")
     import asyncio
-    # Risque demandé explicitement : gardé (en euros, plafonné à 20 €, au change du jour) ; seuls le grade et la
-    # taille du direct changent le plan.
+    # Risque demandé explicitement : gardé (en euros, plafonné à 20 €, au change du jour) ; seuls le grade, la
+    # taille du direct et les brackets IBKR qui en découlent changent le plan.
     live = asyncio.run(T.build_plan("AAA", "stock", now=now, risk_pct=T.RISK_PCT))
     core = T.plan_from_bars("AAA", "stock", "long", inp["bars"], inp["daily"], inp["h4"], now, cat)
     assert live["grade"]["grade"] == "non noté" and live["grade"]["hors_budget"]
-    assert ({k: v for k, v in live.items() if k not in ("grade", "sizing")}
+    assert ({k: v for k, v in live.items() if k not in ("grade", "sizing", "ibkr")}
             == {k: v for k, v in core.items() if k != "sizing"})
     assert live["sizing"]["risk_amount_eur"] == 20.0 and live["sizing"]["eurusd"] == 1.15
     assert isinstance(live["sizing"]["quantity"], int) and live["targets"][0]["eta_text"]

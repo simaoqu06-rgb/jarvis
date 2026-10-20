@@ -50,17 +50,32 @@ def test_stop_trop_loin_pour_une_action():
 
 
 def test_moins_d_actions_que_de_tp():
-    b = ibkr.brackets(_plan(entry=10.0, stop=0.0))
-    assert b["quantity"] == 2 and [r["quantity"] for r in b["brackets"]] == [1, 1]
+    # Objectif du milieu de la part de chaque bracket, comme killmode.bracket_orders et le labo (r_20e).
+    tps = (110.0, 120.0, 130.0)
+    two = ibkr.brackets(_plan(entry=100.0, stop=90.0, tps=tps))     # 22 $ / 10 $ par action : 2 actions
+    assert [(r["quantity"], r["name"]) for r in two["brackets"]] == [(1, "TP1"), (1, "TP3")]
+    one = ibkr.brackets(_plan(entry=100.0, stop=85.0, tps=tps))     # 22 $ / 15 $ : 1 action
+    assert [(r["quantity"], r["name"], r["take_profit"]) for r in one["brackets"]] == [(1, "TP2", 120.0)]
+    assert [(n, x) for n, x in K.bracket_orders(100.0, 85.0, list(tps), 1.10)] == [(1, 120.0)]
 
 
-def test_crypto_et_grade_a_zero_sans_brackets():
+def test_crypto_sans_brackets():
     c = _plan(market="crypto")
     ibkr.attach(c)
     assert "ibkr" not in c
-    g = _plan() | {"grade": {"risque_propose": 0}}
-    ibkr.attach(g)
-    assert "ibkr" not in g
+
+
+def test_grade_a_zero_ta_regle_hors_avis():
+    # Le grade propose 0 % : pas de taille de JARVIS, les brackets suivent ta règle de 20 €, dite comme telle.
+    p = _plan() | {"grade": {"risque_propose": 0}}
+    p["sizing_regle"] = p.pop("sizing") | {"hors_grade": True}
+    ibkr.attach(p)
+    assert p["ibkr"]["hors_avis"] and p["ibkr"]["quantity"] == 44
+    assert "ta règle, hors avis de JARVIS" in ibkr.lines(p)[0]
+    rien = _plan() | {"grade": {"risque_propose": 0}, "sizing": None}
+    ibkr.attach(rien)
+    assert "ibkr" not in rien
+    assert not ibkr.brackets(_plan())["hors_avis"]
 
 
 def test_lignes_discord():

@@ -668,10 +668,11 @@ function scoreHtml(p) {
 function ibkrHtml(b) {
   if (!b) return "";
   const fx = b.eurusd ? `${b.risk_usd} $ au change ${b.eurusd.toFixed(4)}` : `${b.risk_usd} $, taux EUR/USD indisponible`;
-  if (!b.quantity) return `<div class="small" style="margin-top:4px">🧾 IBKR · risque ${b.risk_eur} € (${fx}) : ${esc(b.raison)}</div>`;
+  const rule = b.hors_avis ? " · ta règle, hors avis de JARVIS" : "";
+  if (!b.quantity) return `<div class="small" style="margin-top:4px">🧾 IBKR · risque ${b.risk_eur} € (${fx}) : ${esc(b.raison)}${rule}</div>`;
   const label = { fixe: "Fixe", degressif: "Dégressif" }, f = b.fees, mine = b.plan, other = mine === "fixe" ? "degressif" : "fixe";
   const tip = f[other].usd < f[mine].usd ? ` · en ${label[other]} : ${f[other].usd.toFixed(2)} $ (${f[other].r.toFixed(2)} R)` : "";
-  return `<div class="small" style="margin-top:6px">🧾 <b>IBKR · ${b.quantity} actions</b> (${fmt(b.notional_usd)} $) · perte au SL ${b.real_risk_usd.toFixed(2)} $ <span class="muted">(max ${b.risk_eur} € = ${fx})</span>
+  return `<div class="small" style="margin-top:6px">🧾 <b>IBKR · ${b.quantity} actions</b> (${fmt(b.notional_usd)} $) · perte au SL ${b.real_risk_usd.toFixed(2)} $ <span class="muted">(max ${b.risk_eur} € = ${fx})${rule}</span>
     ${b.brackets.map((r, i) => `<div class="muted">Bracket ${i + 1} : <b>${r.quantity}</b> @ entrée ${fmt(b.entry)} · SL ${fmt(b.stop)} · ${esc(r.name)} ${fmt(r.take_profit)}</div>`).join("")}
     <div class="muted">Commissions estimées (${label[mine]}, ${b.brackets.length} brackets) : ${f[mine].usd.toFixed(2)} $ = ${f[mine].r.toFixed(2)} R${tip} · 1 seul bracket : ${f[mine].un_bracket_usd.toFixed(2)} $</div></div>`;
 }
