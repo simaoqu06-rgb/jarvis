@@ -665,6 +665,18 @@ function scoreHtml(p) {
     ${news.length ? `<div class="small" style="margin-top:8px">${news.map((n) => `<div>${tone[n.tone] || ""} ${safeUrl(n.url) ? `<a href="${esc(safeUrl(n.url))}" target="_blank" rel="noopener noreferrer">${esc(n.title)}</a>` : esc(n.title)}</div>`).join("")}</div>` : ""}`;
 }
 
+function ibkrHtml(b) {
+  if (!b) return "";
+  const fx = b.eurusd ? `${b.risk_usd} $ au change ${b.eurusd.toFixed(4)}` : `${b.risk_usd} $, taux EUR/USD indisponible`;
+  const rule = b.hors_avis ? " · ta règle, hors avis de JARVIS" : "";
+  if (!b.quantity) return `<div class="small" style="margin-top:4px">🧾 IBKR · risque ${b.risk_eur} € (${fx}) : ${esc(b.raison)}${rule}</div>`;
+  const label = { fixe: "Fixe", degressif: "Dégressif" }, f = b.fees, mine = b.plan, other = mine === "fixe" ? "degressif" : "fixe";
+  const tip = f[other].usd < f[mine].usd ? ` · en ${label[other]} : ${f[other].usd.toFixed(2)} $ (${f[other].r.toFixed(2)} R)` : "";
+  return `<div class="small" style="margin-top:6px">🧾 <b>IBKR · ${b.quantity} actions</b> (${fmt(b.notional_usd)} $) · perte au SL ${b.real_risk_usd.toFixed(2)} $ <span class="muted">(max ${b.risk_eur} € = ${fx})${rule}</span>
+    ${b.brackets.map((r, i) => `<div class="muted">Bracket ${i + 1} : <b>${r.quantity}</b> @ entrée ${fmt(b.entry)} · SL ${fmt(b.stop)} · ${esc(r.name)} ${fmt(r.take_profit)}</div>`).join("")}
+    <div class="muted">Commissions estimées (${label[mine]}, ${b.brackets.length} brackets) : ${f[mine].usd.toFixed(2)} $ = ${f[mine].r.toFixed(2)} R${tip} · 1 seul bracket : ${f[mine].un_bracket_usd.toFixed(2)} $</div></div>`;
+}
+
 function sizeHtml(p) {
   // Règle unique en euros (taille de JARVIS), ou ta règle de 20 € à part quand le grade ne propose rien.
   const qty = (s) => p.market !== "stock" ? `taille ${fmt(s.quantity)} pour ${fmt(s.notional)} $`
@@ -695,6 +707,7 @@ function planHtml(p) {
     </div>
     ${scoreHtml(p)}
     <div class="small muted" style="margin-top:4px">Stop ${esc(p.stop_source)}${sizeHtml(p)}</div>
+    ${ibkrHtml(p.ibkr)}
     ${g ? `<div class="small" style="margin-top:4px">🏅 Grade JARVIS <b>${esc(g.grade)}</b> · risque proposé <b>${g.risque_propose} %</b>${g.observation ? " · plan en observation" : ""} <span class="muted">(${esc(g.raison)})</span>${g.hors_budget ? ` · ⚠️ <b>hors budget</b> : risque demandé ${g.risque_demande} %, ton choix` : ""}</div>` : ""}
     <div class="tps">${p.targets.map((x) => `<div class="tp">
       <div class="name">${x.name}</div>

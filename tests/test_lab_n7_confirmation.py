@@ -173,9 +173,9 @@ def test_plan_du_direct_identique_a_build_plan(full_db, monkeypatch):  # noqa: F
     now = datetime.fromtimestamp(U.stock_decision_ts(GEN_DAY), timezone.utc)
     plan, floored = G.stock_plans("AAA", inp, T.settings)
     live = _live_plan(monkeypatch, inp, now)
-    # même code, même plan, même note ; le direct ajoute le grade et sa taille en euros (risque demandé, sans
-    # capital : 20 €), le labo n'en a pas
-    assert ({k: v for k, v in live.items() if k not in ("grade", "sizing")}
+    # même code, même plan, même note ; le direct ajoute le grade, sa taille en euros (risque demandé, sans
+    # capital : 20 €) et les brackets IBKR qui en découlent, le labo n'en a pas
+    assert ({k: v for k, v in live.items() if k not in ("grade", "sizing", "ibkr")}
             == {k: v for k, v in floored.items() if k != "sizing"})
     assert floored["sizing"] is None and live["sizing"]["risk_amount_eur"] == 20.0
     assert floored["stop"] < plan["stop"] and "1/3 de l'ATR journalier" in floored["stop_source"]
