@@ -111,6 +111,9 @@ ROBUST = ("r_glisse_x2", "r_glisse_x3", "r_retard", "r_manque")
 # IBKR déjà comptée dedans) ; r_20e (à la mise de Simão) est affiché, il ne décide pas de « candidate ».
 ROBUST_STOCK = (*ROBUST, "r_3c")
 WITH_COMMISSION = ("r_3c", "r_20e")  # colonnes qui comptent déjà la commission IBKR
+# Demande de Simão (20/10/2026, fil « Bilan d'avancement de JARVIS ») : ce que coûte sa mise de 20 € selon le barème
+# et le nombre de brackets, en écart apparié à r_20e sur les mêmes trades. Descriptif : aucun essai, aucun verdict.
+COSTS_20E = (("r_20e_deg", "degressif"), ("r_20e_1s", "un_objectif_tp2"), ("r_20e_2s", "deux_objectifs_tp1_tp3"))
 # n° 10 : la politique que mesure le tableau, en une ligne (X1, point 4).
 POLICY = ("entrée au signal (ordre stop ou limite ; v1 limitée au dernier cours connu ; GO brut au marché à "
           "l'ouverture, GO confirmé par ordre stop au déclencheur jusqu'à 11 h 30 New York) · stop à l'entrée après "
@@ -281,7 +284,7 @@ def _acc(market: str | None = None) -> dict:
             "ecarts": defaultdict(mean), "vwap": defaultdict(mean), "robuste": defaultdict(mean),
             "tranches": defaultdict(lambda: defaultdict(mean)), "ecart_journee": mean(), "effet_heure": mean(),
             "tirages": defaultdict(lambda: [0.0, 0]), "oi7": defaultdict(mean), "va": defaultdict(mean),
-            "structure": [0, 0]}
+            "structure": [0, 0], "couts20": defaultdict(mean)}
 
 
 def _feed(a: dict, r: dict) -> None:
@@ -301,6 +304,10 @@ def _feed(a: dict, r: dict) -> None:
     if r["market"] == "stock":
         a["commission"].add(day, comm)
         a["robuste"]["r_20e"].add(day, values.get("r_20e"))  # n° 10 : candidate_compte, hors de « tient »
+        base = values.get("r_20e")
+        for c, _ in COSTS_20E:  # un ou deux brackets : plans à trois objectifs seulement (None ailleurs)
+            x = values.get(c)
+            a["couts20"][c].add(day, x - base if x is not None and base is not None else None)
     a["frais"][r["frais"]].add(day, ref)
     for c in r["ecarts"]:
         a["ecarts"][c].add(day, r["ecarts"][c])
@@ -389,6 +396,8 @@ def _item(market: str, name: str, a: dict, trials: int) -> dict:
         "tranches": _tranches(a["tranches"]) if market == "stock" and name != ST.REFERENCE and not go else None,
         "robustesse": {c: a["sorties"][c].result() for c in robust(market)},
         "mise_20e": a["sorties"]["r_20e"].result() if market == "stock" else None,  # n° 8, D2
+        "couts_20e": {key: {"variante": a["sorties"][c].result(), "ecart": a["couts20"][c].result()}
+                      for c, key in COSTS_20E} if market == "stock" else None,  # 20/10/2026, descriptif
         "robuste": {**rob, "moitie_1": halves[0], "moitie_2": halves[1], "tient": holds},
         "ordres_limites_retires": a["manques"],
         "temoin": {"esperance_r": a["temoin"].result()["esperance_r"], "ecart_r": ecart["esperance_r"],
@@ -1072,3 +1081,43 @@ def text(rep: dict | None) -> str:
         lines.append(_entree_text(rep["entree_v1"]))
     lines.append(f"🔒 {rep['scelle']['texte']}")
     return "\n".join(lines)
+
+
+COSTS_20E_FR = {"degressif": "Dégressif", "un_objectif_tp2": "un bracket (TP2)",
+                "deux_objectifs_tp1_tp3": "deux brackets (TP1 et TP3)"}
+
+
+def costs_text(rep: dict | None) -> str:
+    """`!frais` (20/10/2026, descriptif) : à la mise de 20 €, un bracket par objectif au plan Fixe contre le barème
+    Dégressif et un ou deux brackets, en écart apparié sur les mêmes trades (un ou deux brackets : plans à trois
+    objectifs seulement)."""
+    stock = ((rep or {}).get("strategies") or {}).get("stock") or {}
+    rows, variants = [], False
+    for it in stock.values():
+        m20, costs = it.get("mise_20e") or {}, it.get("couts_20e") or {}
+        if not m20.get("n"):
+            continue
+        parts = []
+        for key, label in COSTS_20E_FR.items():
+            v = costs.get(key) or {}
+            gap, own = v.get("ecart") or {}, v.get("variante") or {}
+            if gap.get("n"):
+                parts.append(f"{label} {_r(own.get('esperance_r'))} R (écart {_r(gap['esperance_r'])}, t {_z(gap['z'])}"
+                             + (f", {gap['n']} trades" if gap["n"] != m20["n"] else "") + ")")
+        variants = variants or bool(parts)
+        rows.append(f"{it['nom']} : trois brackets Fixe {_r(m20.get('esperance_r'))} R ({m20['n']} trades)"
+                    + "".join(f" · {p}" for p in parts))
+    if not rows:
+        return "💶 **Ta mise de 20 € chez IBKR** : pas encore de trade d'actions mesuré à 20 € au labo."
+    lines = ["💶 **Ta mise de 20 € chez IBKR** (mesure, pas un essai) · espérance nette par trade avec un bracket par "
+             "objectif au plan Fixe, puis chaque variante et son écart sur les mêmes trades (+ = mieux) · le Dégressif "
+             "ne change que le barème ; un ou deux brackets reprennent les sorties simulées (chaque bracket sort comme "
+             "la sortie qui couvre le milieu de sa tranche) : c'est le coût des ordres, pas une autre sortie, compté "
+             "sur les plans à trois objectifs seulement"]
+    part = ((rep or {}).get("partiel") or {}).get("stock")
+    if part:
+        lines.append(f"⏳ Tableau partiel : {part['jours_rattrapage']} jours en rattrapage (n° {part['declaration']} "
+                     "seule en attendant)")
+    if not variants:
+        lines.append("Variantes : au prochain calcul du tableau des stratégies.")
+    return "\n".join(lines + rows)
