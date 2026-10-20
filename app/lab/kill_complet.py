@@ -298,6 +298,16 @@ async def step(db: LabDB, max_seconds: float, transport=None) -> int | str:
 
 # --- Tableau (lecture seule) -----------------------------------------------------------------------
 
+def stale_days(conn: sqlite3.Connection) -> int:
+    """2e tour d'avis (C4) : séances dont des lignes sont à une autre méthode de coût (cost_fingerprint), à recalculer ; 0 sur une
+    base sans Killmode complet."""
+    try:
+        return conn.execute("SELECT COUNT(DISTINCT day) FROM kill_complet WHERE cout IS NOT ?",
+                            (cost_fingerprint(),)).fetchone()[0]
+    except sqlite3.Error:
+        return 0
+
+
 def report(conn: sqlite3.Connection, trials: int) -> dict | None:
     """Mesures de la déclaration n° 8 sur les lignes de l'empreinte déclarée et du coût en vigueur ; None avant la
     première séance."""
@@ -379,7 +389,7 @@ def text(rep: dict | None) -> str | None:
              (f"témoins propres {SS._r(g['temoin_propre']['r_20e']['esperance_r'])} R "
               f"({g['temoin_propre']['declenches']})"),
              (f"écart apparié {SS._r(gap['esperance_r'])} R sur {gap['jours']} séances (t {SS._z(gap['z'])}, seuil "
-              f"{SS._z(gap['seuil_t'])}" + (", ✅ le catalyseur aide" if gap.get("aide") else "") + ")"),
+              f"{SS._z(gap['seuil_t'])}" + SS._relative(gap.get("aide"), main["esperance_r"]) + ")"),  # 2e tour d'avis (C7)
              (f"témoins avec veto {SS._r(g['temoin_autre']['r_20e']['esperance_r'])} R "
               f"({g['temoin_autre']['declenches']})")]
     if g["donnees"]["signaux"] or g["fenetre_coupee"]["signaux"] or rep.get("operations_sur_titre"):

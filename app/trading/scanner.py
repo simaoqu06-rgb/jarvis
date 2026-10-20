@@ -171,11 +171,15 @@ async def scan(now: datetime | None = None, s=settings, save: bool = True) -> di
             skipped.append(f"{symbol} (plan impossible : {exc})")
             continue
         if champ["regles"]:
-            try:  # bougies déjà en cache (lues par build_plan) : celles de la note du plan
-                daily_score = await T._optional_candles(symbol, "stock", 1440, "alpaca")
-            except Exception:
-                daily_score = daily.get(symbol)
-            verdict = LAB.verdict_for(plan, daily_score, daily.get(symbol), index_daily, now, s, champ)
+            # build_plan a déjà évalué la méthode (live.plan_verdict, mêmes fonctions, mêmes bougies Alpaca) : le
+            # plan affiché et le tri du scanner disent la même chose. Sinon (aucune règle sur les actions), ici.
+            verdict = plan.get("methode")
+            if verdict is None:
+                try:  # bougies déjà en cache (lues par build_plan) : celles de la note du plan
+                    daily_score = await T._optional_candles(symbol, "stock", 1440, "alpaca")
+                except Exception:
+                    daily_score = daily.get(symbol)
+                verdict = LAB.verdict_for(plan, daily_score, daily.get(symbol), index_daily, now, s, champ)
             if not verdict["garde"]:
                 filtered.append({"symbol": symbol, "version": verdict["version"], "regles": verdict["regles"],
                                  "composite": plan["score"]["composite"]})

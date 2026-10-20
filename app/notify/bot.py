@@ -18,7 +18,7 @@ qu'aux comptes listés dans JARVIS_DISCORD_OWNER_ID et ignore tout le reste sans
   !scan                 scanner pré-ouverture tout de suite
   !confirmations        GO du scanner confirmés ou pas après l'ouverture, et ce que ça rapporte
   !bilan                bilan du forward-test sur le compte fictif
-  !desaccords           trades pris contre l'avis de JARVIS (plans NO GO) comparés aux autres
+  !desaccords           trades pris contre l'avis de JARVIS (plans NO GO, taille à ta règle sous 0 %) comparés aux autres
   !propositions         réglages que JARVIS propose et qui attendent ta réponse
   !oui 3 / !non 3       approuver ou refuser la proposition 3 (ou les boutons sous le message)
   !regle                réglages actuels
@@ -51,6 +51,7 @@ from datetime import datetime, timezone
 
 from app import config
 from app.lab import db as lab_db
+from app.lab import audit as lab_audit
 from app.lab import autopsie as lab_autopsie
 from app.lab import grade as lab_grade
 from app.lab import lessons as lab_lessons
@@ -215,6 +216,25 @@ def parse_trade(args: list[str]) -> dict:
             "targets": targets or None} | ({"killmode": True} if "kill" in words else {}) | go
 
 
+def kill_refused(req: dict, words: list[str]) -> str:
+    """`!prends … kill` refusé : Killmode ne couvre que les actions US, et seulement un KILL noté aujourd'hui (sinon le
+    trade aurait la taille d'un KILL, 1 action au moins, et ne serait mesuré nulle part)."""
+    sym = req["symbol"]
+    price = f"{req['entry']:g}" if req["entry"] is not None else "<ton prix>"
+    stop = f" stop {req['stop']:g}" if req["stop"] is not None else ""
+    plain = f"`!prends {sym} {price}{stop}`"
+    if req["market"] != "stock":
+        text = (f"Killmode ne couvre que les actions US : `kill` refusé pour {sym} (crypto), rien n'est suivi. "
+                f"Pour la crypto, retire `kill` : {plain}.")
+        if "crypto" not in words:  # ticker lu comme une crypto : ce peut être une action du même nom (ex. l'ETF BTC)
+            text += f" Si c'est l'action {sym}, ajoute `action` : `!prends {sym} {price}{stop} action kill`."
+        return text
+    if sym in CRYPTO | set(config.WATCHLIST_CRYPTO):  # sans `action`, la commande serait relue comme la crypto
+        plain = f"`!prends {sym} {price}{stop} action`"
+    return (f"Pas de KILL de Killmode aujourd'hui pour {sym} : `kill` refusé, rien n'est suivi. {plain} sans `kill` "
+            "pour le suivre sur un plan recalculé.")
+
+
 GO_STATUS_FR = {"attente": "en attente du repli", "repli": "repli vu, reprise du VWAP pas encore confirmée",
                 "annulé": "annulé", "expiré": "expiré à 11 h 30 New York"}
 
@@ -304,7 +324,8 @@ def strategies_text() -> str:
     if conn is None:
         return "🧪 Base du labo absente : le service jarvis-lab n'a pas encore démarré."
     try:
-        return lab_strategies.text(lab_strategies.cached(conn))
+        audit = lab_audit.text(lab_audit.cached(conn))  # 2e tour d'avis (C2) : pour audit, jamais pour décider
+        return lab_strategies.text(lab_strategies.cached(conn)) + (f"\n\n{audit}" if audit else "")
     finally:
         conn.close()
 
@@ -363,7 +384,9 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
                     f"`!prends {a['symbol']} {req['entry']:g}{' short' if req['side'] == 'short' else ''}` pour que JARVIS la suive.")
         if cmd == "prends":
             req = parse_trade(args)
-            kill = killmode.kill_today(req["symbol"]) if req.get("killmode") else None
+            kill = killmode.kill_today(req["symbol"]) if req.get("killmode") and req["market"] == "stock" else None
+            if req.get("killmode") and kill is None:  # scénario 2 de GPT : jamais la taille ni la gestion d'un KILL
+                return kill_refused(req, [a.lower() for a in args[1:]])
             if kill:  # stop et objectifs du KILL du jour quand ils manquent : la gestion que son journal mesure
                 req["stop"] = req["stop"] if req["stop"] is not None else kill["stop"]
                 req["targets"] = req["targets"] or kill["targets"]
@@ -380,8 +403,10 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
                 req["entry"] = req["entry"] if req["entry"] is not None else go.get("trigger")
                 req["stop"] = req["stop"] if req["stop"] is not None else go["stop"]
                 req["targets"] = req["targets"] or go["targets"]
+            # Un GO confirmé a déjà été gardé par la méthode championne au scanner (seuls ses picks sont confirmés) :
+            # pas de second filtre sur le plan recalculé au déclenchement, il garde la taille du MP de confirmation.
             plan = await trading.build_plan(req["symbol"], req["market"], req["side"], req["entry"], req["stop"],
-                                            req["targets"])
+                                            req["targets"], methode=go is None)
             if go:
                 plan["policy"] = "go_confirme"
             if req.get("killmode"):

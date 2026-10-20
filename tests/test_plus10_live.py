@@ -166,6 +166,60 @@ async def test_tick_taille_selon_le_grade(live, monkeypatch):
     assert "hors avis" not in sent[0]
 
 
+async def _tick_with_grade(live, monkeypatch, trades=(), risk_now=None):
+    """tick_plus10 à 9 h 46 sous un grade donné ; renvoie le texte envoyé (salon et MP)."""
+    from app import scheduler as SCH
+    from app.lab import grade as GR
+
+    async def rate():
+        return 1.15
+
+    sent = []
+    monkeypatch.setattr(SCH, "_usd_per_eur", rate)
+    monkeypatch.setattr(SCH, "_queue", lambda texts, kind="", **kw: sent.append(texts))
+    monkeypatch.setattr(SCH, "_dm_trades", lambda texts: None)
+    monkeypatch.setattr(SCH, "_kick_outbox", lambda: None)
+    monkeypatch.setattr(SCH.book, "trades", list(trades))
+    monkeypatch.delenv("JARVIS_CAPITAL", raising=False)
+    if risk_now:
+        monkeypatch.setattr(GR, "risk_now", risk_now)
+    live.now = at(9, 46)
+    await SCH.tick_plus10(at(9, 46))
+    assert len(sent) == 1
+    return sent[0]
+
+
+async def test_tick_sous_grade_f_taille_a_ta_regle_dans_la_ligne(live, monkeypatch):
+    from app.lab import grade as GR
+
+    stock = {"grade": "F", "rang": 1, "non_note": False, "risque_grade": 0.0, "risque_max": 0.0, "mode_survie": True}
+    monkeypatch.setattr(GR, "current", lambda: {"marches": {"stock": stock}, "verifie_le": at(9, 46).isoformat()})
+    text = await _tick_with_grade(live, monkeypatch)
+    assert "range 15 min : ordre stop d'achat 106.51" in text and " · 11 actions à ta règle de 20 € (hors avis)" in text
+    assert "-# Taille à ta règle de 20 € (hors avis de JARVIS : grade F, 0 % proposé)." in text
+
+
+async def test_tick_grade_en_exception_taille_a_ta_regle(live, monkeypatch):
+    def boom(*a, **k):
+        raise ValueError("grade")
+    text = await _tick_with_grade(live, monkeypatch, risk_now=boom)
+    assert " · 11 actions à ta règle de 20 € (hors avis)" in text and "grade illisible" in text
+
+
+async def test_tick_apres_l_arret_du_jour_pas_de_taille(live, monkeypatch):
+    """Choix par défaut : après l'arrêt de la journée, pas de quantité ; le MP part sans planter (taille None)."""
+    from app.lab import grade as GR
+    from tests.test_lab_grade import trade
+
+    stock = {"grade": "A", "rang": 16, "non_note": False, "risque_grade": 3.0, "risque_max": 3.0, "mode_survie": False}
+    monkeypatch.setattr(GR, "current", lambda: {"marches": {"stock": stock}, "verifie_le": at(9, 46).isoformat()})
+    stopped = [trade(status="closed", events=[{"kind": "stop", "price": 95.0, "at": at(9, 40).isoformat()}])
+               for _ in range(3)]
+    text = await _tick_with_grade(live, monkeypatch, trades=stopped)
+    assert "range 15 min : ordre stop d'achat 106.51" in text and " · pas de taille : arrêt de la journée (−3,9 R)" in text
+    assert "actions" not in text and "🏅 Grade JARVIS **A** · risque proposé **0 %**" in text
+
+
 def test_texte_grade_f_hors_avis_et_action_hors_budget():
     c = {"kind": "confirmee", "listes": {"s10": [], "rebond": []}, "mesures": {}, "niveaux_complets": {},
          "gaps_attente": {}, "risk_usd": 23.0, "eurusd": 1.15, "risk_eur": 20.0,

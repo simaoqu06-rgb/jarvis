@@ -448,6 +448,12 @@ réalité, d'où le journal des appels en direct pour juger le mode complet.
     ordres du jour), vente du reste au marché à la dernière minute de la séance après avoir annulé TP et SL ;
   - toujours non modélisés : exécutions partielles et carnet au-delà du meilleur ask, état limite LULD avant
     une pause (les transactions à la bande sont lues, la pause est comptée comme trou), fixing de clôture.
+- Méthode du solde n° 5 (10 octobre, 2e tour d'avis, vérification de la n° 10) : seul le côté labo de la comparaison change.
+  `r_ibkr` rejoue l'appel en révision du simulateur des lignes du labo (`strategies.SIM_REV`, 2 depuis la n° 10) et
+  non plus en révision 1 : la comparaison du journal au labo opposait une révision 1 à des lignes en révision 2. Le
+  solde de Simão (minutes, transactions, résolution « prudente ») ne change pas. Tout le journal est re-soldé
+  (`SETTLE_METHOD = 5`, journal vide en production). La ligne du labo sous un KILL ajoute « (tableau partiel,
+  rattrapage en cours) » tant que le tableau des actions est partiel.
 
 ## Déclaration n° 6 (8 octobre 2026) : trois règles de sortie de Gemini, actions
 
@@ -913,7 +919,7 @@ inchangé.**
 | `r_ouverture` | chaque plan v1 (exécuté ou non) acheté au marché à l'ouverture de 9 h 30, stop fixe | si v1 perd par sa méthode ou par son ordre limité, qui n'achète un gap haussier que s'il échoue |
 | `r_20e_deg` | `r_20e` au barème IBKR Dégressif | l'écart entre Fixe et Dégressif à ta taille |
 | `r_20e_1s`, `r_20e_2s` | `r_20e` avec un seul bracket (TP2) ou deux (TP1 et TP3) au lieu de trois | ce que coûtent les trois brackets à 20 € (minimum de 1 $ par ordre) |
-| `temoin_journee_r` | l'ancien témoin (journée) des actions | l'effet de l'heure |
+| `temoin_journee_r` | l'ancien témoin (journée) des actions | l'écart à l'ancien témoin (heure + achats d'avant l'exécution) |
 | `temoin_tirages` | le R de chaque tirage du témoin | la dispersion entre tirages |
 
 `r_20e_1s` et `r_20e_2s` reprennent les sorties de la simulation à trois objectifs : chaque bracket sort comme la
@@ -934,8 +940,22 @@ chaque variante et son écart apparié à `r_20e` sur les mêmes trades (`couts_
   par jour sous-estiment l'erreur. Le seuil en t se prend sur les semaines (environ 75 sur un an et demi : seuil
   3,56 au lieu de 3,43 sur ~527 jours, à 152 essais). Le se par jour et le facteur d'inflation sont affichés à côté. En actions,
   la même lecture en semaines est affichée, sans effet sur le verdict.
-- **Effet de l'heure** (écart au témoin de la journée − écart au témoin de la même heure) et **dispersion entre
-  tirages** (écart-type des moyennes par tirage) : affichés, sans effet.
+- **Écart à l'ancien témoin (heure + achats d'avant l'exécution)** (témoin de la même heure − témoin de la journée ;
+  « effet de l'heure » jusqu'au deuxième tour d'avis, mal nommé) et **dispersion entre tirages** (écart-type des moyennes par
+  tirage) : affichés, sans effet. Sous H0 (aucun effet d'heure), le premier lit déjà −0,04 à −0,15 R selon la
+  stratégie (+0,06 R pour v1 et son ordre limité) : le témoin de la journée achète aussi avant l'exécution, en
+  « sachant » que le prix atteindra le déclencheur. Ce n'est donc pas l'effet de l'heure seul.
+- **✅ réservé aux candidates absolues** (2e tour d'avis) : un bras meilleur qu'un autre (la confirmation des GO, un filtre
+  FRSH, une sortie de Gemini, le catalyseur de Killmode complet) dit « ↗ aide (relatif) », et ajoute « perd encore
+  X R à 20 € » quand le bras amélioré ne gagne pas à 20 € (« ≈ » pour les sorties de Gemini : espérance à 20 € de la
+  stratégie plus l'écart moyen de la sortie). Avant, « ✅ la confirmation aide » se lisait comme une stratégie
+  gagnante.
+- **Témoin non battu = pas d'avantage d'horaire après le signal ; ne dit rien du choix de l'action ou du jour**
+  (légende du tableau, voir Limites).
+- **Lignes sans témoin** : comptées par stratégie (« N lignes sans témoin (hors de l'écart) ») ; elles restent dans
+  l'espérance. Surtout `go_brut`, les jours où l'ouverture est déjà au-dessus du TP1.
+- Sous `rebond_confirme`, une note fixe : « anticipation connue ≈ +0,01 R sous H0 (bougie ambiguë), correction à
+  déclarer » (voir Limites ; la n° 11 ne la contient pas).
 - **Entrée de v1** : « limite ou rien » contre « ouverture ou rien », plan par plan (une branche non exécutée vaut 0).
   Sur les GO, avec `go_brut` ramené au risque prévu de v1, par écart ouverture / entrée, les ouvertures au-dessus du
   TP1 à part ; sur tous les plans, avec `r_ouverture`, par gap d'ouverture.
@@ -948,9 +968,11 @@ chaque variante et son écart apparié à `r_20e` sur les mêmes trades (`couts_
 Sur une marche aléatoire au cent près (aucun avantage par construction), l'écart apparié ordre stop − témoin des
 biais du simulateur (simulé − vrai, le vrai rejoué transaction par transaction) : révision 2 entre −0,017 et
 +0,001 R sur huit graines (tolérance 0,02 R, ~2,5 erreurs-types), révision 1 entre +0,025 et +0,079 R en faveur de
-l'ordre stop. **Biais résiduel connu** : avec un stop serré (1 σ d'une bougie), un plus bas sous le stop dans la
-bougie d'exécution compte −1 R alors qu'il a pu venir avant l'exécution : −0,04 à −0,06 R contre l'ordre stop. Il
-peut cacher un avantage, pas en inventer un.
+l'ordre stop. **Biais résiduel connu** : avec un stop serré, un plus bas sous le stop dans la bougie d'exécution
+compte −1 R alors qu'il a pu venir avant l'exécution. Contre l'ordre stop : −0,06 R à 1 σ d'une bougie, −0,10 R à
+0,75 σ, −0,28 R à 0,5 σ (2e tour d'avis, même montage que le test, 3 000 chemins ; −0,04 à −0,06 R n'était vrai qu'à 1 σ). Il
+peut cacher un avantage à stop serré, pas en inventer un. Le simulateur seul ne voit pas une anticipation dans un
+signal (`rebond_confirme`, voir Limites) : le R vrai en profite aussi.
 
 ### Effet attendu
 
@@ -971,15 +993,111 @@ recalculées (marque `plus10.MESURE`, le tableau ne lit que les recalculées), e
 direct en actions attendent leur journalier (relu au passage de la séance suivante), puis le rattrapage, qui traite
 d'abord l'arriéré du rejeu. Jusqu'à la fin du rattrapage, le tableau, l'autopsie et le grade indicatif des GO
 confirmés ne lisent que les lignes de la n° 10, avec la mention « Tableau partiel : N jours en rattrapage » (et
-« rattrapage … en cours » dans `!autopsie` et `!grade`) : les lignes d'avant sont exclues, jamais mélangées.
+« rattrapage … en cours » dans `!autopsie` et `!grade`) : les lignes d'avant sont exclues, jamais mélangées. Deuxième tour d'avis :
+elles restent exclues (et comptées) tant qu'il en reste, même sans jour à refaire (une ligne d'un jour dont le
+journalier manque revenait dans le tableau à la fin du rattrapage) ; un jour du direct qui attend seulement son
+journalier ne rend pas le tableau partiel. Chaque ligne garde aussi l'empreinte du modèle de coût (`cout_rev` :
+barème IBKR, révision du simulateur) ; le tableau dit « N révisions du code / du coût » d'un marché quand il en mêle
+plusieurs ; les lignes sans révision du coût (n° 10 écrites avant la colonne) sont dites à part, sans alerte.
 
 ### Limites
 
 - Le témoin après exécution détient 5 à 30 min de moins (sortie à la clôture) : négligeable devant le biais d'avant.
+- **Le témoin des actions est la moyenne des 6 bougies qui suivent la bougie d'exécution**, pas 10 tirages au hasard :
+  sa fenêtre n'a que 6 bougies (`WITNESS_SPAN`), toutes prises. `WITNESS_DRAWS` (point 3 ci-dessus) ne joue que pour
+  le témoin de la journée et la crypto ; la « dispersion entre tirages » des actions mesure l'écart entre ces 6
+  bougies, pas un bruit de tirage.
+- **Le délai se compte en bougies, pas en minutes**, depuis le début de la bougie d'exécution : la 1re entrée du
+  témoin peut tomber à moins de 5 min d'un ordre stop rempli en cours de bougie, et, pour une action peu échangée
+  (aucun filtre de liquidité), les 6 bougies présentes peuvent couvrir bien plus de 30 min. Aucun effet mesuré sous
+  H0.
+- **Aucun faux avantage du témoin sous H0** : marches au hasard sans dérive, volatilité en U ou constante, environ
+  265 000 trades rejoués par le vrai code du labo ; la plus haute borne des IC 95 % de l'écart lu est +0,007 R. Le
+  seul biais mesuré va contre l'ordre stop à stop serré (−0,06 R à 1 σ, −0,10 R à 0,75 σ, −0,28 R à 0,5 σ) : il peut
+  cacher un avantage à stop serré.
+- **`rebond_confirme` bat son témoin sans avantage** : +0,013 R [+0,004 ; +0,023] sous H0 en volatilité en U (vraie
+  chaîne `stock_day`, 40 000 séances ; réplication +0,015 R). Une bougie qui touche à la fois le stop et l'entrée
+  annule l'ordre dès son début (`strategies.py`, boucle du signal) : les trades « remplis puis arrêtés » disparaissent.
+  C'est une anticipation du signal, que le témoin ne peut pas neutraliser. Le signal n'est pas corrigé dans la n° 10
+  (ses lignes changeraient) : une note fixe le dit sous sa ligne. La correction reste à déclarer : la n° 11 (18
+  octobre) a pris d'autres pistes.
+- **`go_brut` n'a pas de témoin les jours où l'ouverture est déjà au-dessus du TP1** (un multiple ≤ 0) : ces jours,
+  justement ceux que change L4, sortent de l'écart mais restent dans l'espérance. Le tableau les compte.
+- **Limite de régime** : le témoin partage l'état du marché d'après le signal. Sous H1, une dérive de +1 R attendu
+  qui démarre à l'exécution (10 000 séances, achat au marché / ordre stop) : sur 10 min, écart lu +0,83 / +0,71 R ;
+  sur 60 min, stratégie +0,62 / +0,57 R mais écart lu +0,13 / +0,03 R ; jusqu'à la clôture, stratégie +0,21 / +0,25 R
+  et écart lu −0,003 / −0,035 R. Le témoin absorbe tout avantage qui dure plus de 30 min environ : « témoin non
+  battu » veut dire « pas d'avantage d'horaire après le signal », et ne dit rien du choix de l'action ou du jour.
+  Une stratégie qui choisit bien l'action et le jour peut gagner sans jamais être candidate.
+- **Origine du +0,23 R** annoncé dans la réaction pour la révision 1 : un rejeu à blanc particulier (stop = 1 σ d'une
+  bougie de 5 min, 60 bougies, 30 pas par bougie). Le montage du test du dépôt donne +0,10 R à 1 σ, et le signe
+  s'inverse à 0,5 σ (−0,15 R) : l'ordre de grandeur dépend du montage, le sens à ~1 σ est confirmé. L'audit apparié
+  (ci-dessous) donne la mesure sur données réelles, sur les mêmes trades.
 - Une division survenue dans les deux séances d'historique de 5 min n'est pas corrigée (rare).
 - `r_ouverture` se lit par gap d'ouverture : le prix d'ouverture n'est pas gardé dans la ligne de v1.
 - Le journalier brut pour toute la base (tranches de prix et minimum de 5 $ des mesures de la n° 9) n'est pas fait ici.
-- La comparaison du journal de Killmode au labo (`r_ibkr`, `killmode.settle`) rejoue encore en révision 1 : à aligner.
+- La comparaison du journal de Killmode au labo (`r_ibkr`, `killmode.settle`) rejouait en révision 1 : alignée au
+  2e tour d'avis (méthode du solde n° 5).
+
+### Archive et audit apparié (2e tour d'avis)
+
+Le rattrapage efface les lignes d'avant en les réécrivant : sans copie, l'« Effet attendu » ci-dessus ne pouvait se
+contrôler que sur des tableaux agrégés, sur des fenêtres de jours différentes. Depuis le 2e tour d'avis (`app/lab/audit.py`) :
+
+- **Archive** : en tête de chaque passage du worker (avant le grade, le Labo 2, le rejeu et le rattrapage) et de
+  chaque rattrapage, les lignes qu'une nouvelle déclaration va réécrire sont copiées une fois, toutes colonnes, dans
+  `data/archives/labo2-avant-n<déclaration>.db` (à côté de `lab.db`), sous les mêmes noms de tables : `strat_trades`
+  (lignes d'une autre déclaration), `kill_complet` (autre empreinte de coût), `plus10_trades` (séances d'une autre
+  mesure, et leurs mesures par séance dans `plus10_seances`). Une table `archive_info` note l'heure, ce qui est
+  remplacé, les lignes par table et ce que la déclaration change (n° 10 : « simulateur révision 1, témoin sur la
+  journée, 5 tirages, prix ajustés »). **Mise en service après la n° 11** (déclarée le 18 octobre, PR #56, avant la
+  fusion de l'archive) : le premier fichier automatique est `labo2-avant-n11.db`, avec les lignes que le rattrapage
+  de la n° 11 n'a pas encore réécrites au déploiement ; les lignes d'avant la n° 10 ne sont gardées que si la copie
+  manuelle de DEPLOY.md a été faite à temps (`labo2-avant-n10.db`). Une clé de progress (`audit:archive`) par marché et
+  déclaration, empreinte de coût et mesure : faite une fois, plus rien à lire ensuite. Si l'archive échoue, le
+  passage ne réécrit rien (rattrapage, Killmode complet et n° 9 attendent ; le direct et le rejeu n'écrivent que des
+  jours neufs). L'échec est noté (progress `lab` / `archive_audit`) et dit en tête de `!labo` et dans
+  `/api/lab/status` jusqu'au passage qui réussit ; un fichier d'archive vide n'est pas publié comme audit. Jamais de
+  table `*_sealed`.
+- **Copie manuelle** : si le fichier contient déjà ces tables (commande de DEPLOY.md, `CREATE TABLE … AS SELECT *`),
+  elles ne sont ni recréées ni modifiées ; seules les lignes absentes y sont ajoutées (même clé que la base). Ajouter
+  plutôt que ne rien faire : une copie manuelle peut dater d'après des jours déjà réécrits, ou ne couvrir qu'une
+  partie (la commande d'origine ne prenait que `declaration IS NULL`) ; l'union garantit que toute ligne effacée ensuite est dans
+  l'archive, sans toucher à ce qui y est.
+- **Audit apparié** : lignes archivées et lignes de la déclaration en vigueur appariées sur (origine, marché,
+  action, jour, stratégie, créneau). Par marché et par stratégie : paires, déclenchées avant, après et des deux
+  côtés, et sur les paires déclenchées des deux côtés, la moyenne de nouveau − ancien pour la sortie de référence
+  (commission IBKR comprise en actions, comme le tableau), `r_net`, le témoin et l'écart stratégie − témoin, avec IC
+  en grappes par jour (semaines en crypto). Chaque fichier est apparié à part : `labo2-avant-n10.db` (copie manuelle)
+  donne la mesure sur données réelles du biais de la révision 1 et de l'« Effet attendu » de la n° 10, puisque la
+  n° 11 ne change pas les lignes des stratégies d'avant ; `labo2-avant-n11.db` est le contrôle de cette affirmation
+  (≈ 0 attendu sur les lignes de la n° 10 des stratégies d'avant ; les stratégies de la n° 11 n'ont pas de paire). Des
+  lignes plus anciennes encore en base au déploiement s'y mêleraient : la note d'`archive_info` le dit (« pas toutes
+  de la n° 10 »), comme celle de Killmode complet et de la n° 9, qui ont leur propre marque (coût, mesure).
+  Sauf les séances du direct dont les plans v1 ont été recalculés (`empreinte.V1_RECALCULS` : actions du 06/10/2026),
+  archivées sur les anciens plans : exclues de l'appariement, et le texte le dit.
+- **Pour audit, jamais pour décider** : ni « candidate », ni le grade, ni le brief, ni les leçons ne lisent l'archive
+  (un test balaie le code). Affichée dans `!strategies` (« Audit de la n° 11 (ancien → nouveau, mêmes trades) », une
+  ligne « Mesures d'avant la n° 10 » par marché si la copie manuelle existe) et par `GET /api/lab/strategies/audit`,
+  en cache du worker (étape « audit »).
+
+### Avant la déclaration suivante
+
+Écrit le 10 octobre pour la n° 11 ; la n° 11 a été déclarée le 18 octobre (PR #56) avant que ces conditions ne soient
+en service. Elles valent donc pour la n° 12 et les suivantes. On ne déclare la suivante que quand :
+
+- `!labo` dit « n° <en vigueur> : complète » (stratégies, n° 9 et Killmode complet re-mesurés ; sinon la ligne dit
+  ce qui reste : jours à rattraper par marché, lignes d'avant exclues, séances n° 9 et Killmode complet à
+  recalculer) ;
+- le tableau de la déclaration en vigueur a été relu une fois sans retouche de paramètres, avec la liste des ✅ et
+  des ☑️ écrite ;
+- l'audit apparié a été lu.
+
+Pendant un rattrapage, aucun réglage de note ou de plan approuvé (`go_min`, poids, `rr_min`) : le rattrapage rejoue
+les plans v1 gardés dans `trades` sans filtrer la version de méthode (`rattrapage.v1_trades` ne lit pas
+`method_version`), le tableau mêlerait donc des versions de méthode. Restent à déclarer (la n° 11 ne les contient
+pas) : la correction de `rebond_confirme` (une bougie ambiguë laisse l'ordre posé, jugée au pire par le simulateur)
+et un témoin transversal (même heure, même jour, une autre action de l'univers sans signal).
 
 ### Hypothèses pour la n° 11, non déclarées
 
@@ -1113,6 +1231,9 @@ Limite assumée : les mouvements du jour et les fiches catalyseurs de ces dates 
 
 ## Où voir les chiffres
 
-`!strategies` sur Discord, `GET /api/lab/strategies` (clé du labo), ligne « Labo v2 » de `!labo`.
+`!strategies` sur Discord, `GET /api/lab/strategies` (clé du labo), ligne « Labo v2 » de `!labo`, et la ligne de
+la déclaration en vigueur dans `!labo` (« n° 11 : complète », ou ce qui reste à refaire). Audit des mesures
+remplacées (pour audit, jamais pour décider) : la section « Audit » de `!strategies` et
+`GET /api/lab/strategies/audit`.
 Les jours traités avant le labo v2 sont rattrapés par le worker hors séance (`app/lab/rattrapage.py`) :
 bougies relues à la source et gardées en mémoire, rien n'est stocké.

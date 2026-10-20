@@ -143,7 +143,9 @@ PAUSE_MIN = 300        # bougies qui commencent à 5 min ou plus l'une de l'autr
 # l'atteint, sinon posé (les deux joués si une seule des deux cotations l'atteint) ; après une suspension prouvée
 # (bougies à 5 min l'une de l'autre et transaction de réouverture), les cotations de la pause ne servent plus au
 # prix ; pas de bougie dans les 2 dernières minutes = incomplet.
-SETTLE_METHOD = 4
+# 5 (10 octobre, 2e tour d'avis) : `r_ibkr`, le côté labo de la comparaison au labo, rejoué en révision du simulateur du labo
+# (strategies.SIM_REV, déclaration n° 10) et non plus en révision 1 ; le solde de Simão lui-même ne change pas.
+SETTLE_METHOD = 5
 STEP = 60              # bougies du solde : 1 min
 LATENCY = 60           # appel lu et ordre saisi chez IBKR : l'ordre est actif à la 1re minute pleine après 60 s
 BARS_DIR = os.getenv("JARVIS_KILLMODE_BARS_PATH", "data/killmode_bars")  # bougies d'1 min de chaque solde
@@ -975,7 +977,7 @@ def settle(call: dict, bars: list[dict], step: int = STEP, ticks: dict | None = 
     restée ambiguë est jouée dans tous les ordres possibles (`orderings`) : le pire résultat donne `sorties` (d'où
     vient le chiffre qui décide), le meilleur `sorties_fav` (affiché), `sorties_2t` le pire avec des objectifs
     exigés à 2 pas (stress de Gemini, affiché). `r_ibkr` rejoue l'appel comme le labo (bougies de 5 min dès la
-    suivante, résolution et frais du labo), pour la comparaison au labo seulement. Garde le détail (remplissage,
+    suivante, résolution, révision du simulateur et frais du labo : méthode 5), pour la comparaison au labo seulement. Garde le détail (remplissage,
     sorties, pire excursion) d'où le bilan recalcule les frais réels, et la règle refaite sur les bougies SIP. Les
     chemins sont classés sur le R aux frais réels (`_at_size`, au change `eurusd` et au plan `plan_ibkr` du solde)."""
     ticks = ticks or {}
@@ -1000,7 +1002,7 @@ def settle(call: dict, bars: list[dict], step: int = STEP, ticks: dict | None = 
     res2, _, paths2, cut2 = run(2)
     five = CO.aggregate(bars, CO.BASE_TF, "stock") if step < BAR else bars
     b5 = -(-call["at"] // BAR) * BAR  # le labo : bougies de 5 min dès celle qui suit l'appel
-    lab = SIM.simulate(plan, [b for b in five if b["t"] >= b5], decided_at=b5, **kw)
+    lab = SIM.simulate(plan, [b for b in five if b["t"] >= b5], decided_at=b5, sim_rev=ST.SIM_REV, **kw)  # n° 10
     risk = call["entry"] - call["stop"]
     seen = {a["t"]: a["cas"] for r in paths for a in r.get("ambigus", [])}
     worst, best, stress2 = priced(res), priced(fav), priced(res2)
@@ -1475,7 +1477,8 @@ def call_gap(book: list[dict], scan_only: bool = False, key: str = "r_20e") -> d
 def lab_item() -> dict | None:
     """La stratégie `killmode` au labo v2 : None si la base n'est pas lisible, {} si rien n'est encore rejoué.
     La mesure sur les jours que la règle n'avait pas vus quand elle a été choisie (jours_suivants) fait foi dès
-    que le labo la donne."""
+    que le labo la donne. 2e tour d'avis (C5) : `tableau_partiel` quand le tableau des actions est partiel (rattrapage d'une
+    déclaration en cours, strat_stats.partial)."""
     from app.lab import db as lab_db
 
     try:
@@ -1490,16 +1493,17 @@ def lab_item() -> dict | None:
         log.warning("Killmode : tableau du labo illisible : %s", exc)
         return None
     it = ((rep.get("strategies") or {}).get("stock") or {}).get("killmode") or {}
+    partial = {"tableau_partiel": True} if (rep.get("partiel") or {}).get("stock") else {}
     if "jours_vus_jusqu_au" in it or it.get("jours_suivants"):  # None tant qu'aucun jour non vu n'est rejoué
-        return (it.get("jours_suivants") or {}) | {"jours_non_vus": True}
-    return it
+        return (it.get("jours_suivants") or {}) | {"jours_non_vus": True} | partial
+    return it | partial
 
 
 def lab_line(it: dict | None) -> str | None:
     """La ligne du labo en clair, avec ce qu'elle mesure ; None si la base n'est pas lisible."""
     if it is None:
         return None
-    head = f"🧪 Labo, {LAB_SCOPE}"
+    head = f"🧪 Labo, {LAB_SCOPE}" + (" (tableau partiel, rattrapage en cours)" if it.get("tableau_partiel") else "")
     if not it.get("declenches"):
         return f"{head} : pas encore de trade rejoué" + (
             " sur les jours non vus au choix de la règle." if it.get("jours_non_vus") else ".")

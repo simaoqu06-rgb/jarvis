@@ -35,6 +35,10 @@ Changements du grade officiel (worker, chaque passage, zéro jeton) :
   depuis le dernier changement) ramène tout de suite en D ;
 - council du soir : un avis par marché et par soirée (POST /api/lab/grade/avis), un cran au plus ;
   une baisse s'applique, une hausse de lettre passe par Approuver/Refuser ;
+- nouvelle méthode : remise à zéro d'un marché seulement si ses filtres EFFECTIFS changent (règles du
+  champion qui le touchent, ou nouvelle génération) ; sur ce marché, seuls comptent ensuite les jours
+  journalisés après la promotion (frontière par jour, comme les leçons), jamais ceux de l'essai qui l'ont
+  décidée. Une promotion d'une règle actions ne touche donc pas le grade crypto ;
 - version morte : au moins MORT_TRADES trades et borne haute de l'IC sous 0 : annoncée, mode survie.
 
 Le serveur web n'écrit jamais dans la base : avis et décisions passent par data/lab_queue/grade/ ; le
@@ -79,7 +83,9 @@ KELLY_PART = 0.25
 RISQUE_OUVERT_MAX = 4.0
 ARRET_JOUR_R = -3.0
 TROU_JOURS = 10        # écart calendaire entre deux jours de la fenêtre au-delà duquel elle est coupée
-GRADE_CALC = 2         # version du calcul (2 : R des actions après commission IBKR à 20 €, Kelly corrigé)
+# Version du calcul (2 : R des actions après commission IBKR à 20 €, Kelly corrigé ; 3 : après une promotion, seuls
+# les jours journalisés après elle comptent, sur les seuls marchés dont elle change les filtres ; barème IBKR du compte).
+GRADE_CALC = 3
 MAX_AGE_H = env_float("JARVIS_GRADE_MAX_AGE_H", 6.0)  # au-delà, le grade est périmé : risque 0 %
 MOTIFS_MAX, VOIX_MAX = 1500, 1000
 SOURCES_FR = {"calcul": "calcul", "council": "council du soir", "simao": "accord de Simão",
@@ -225,10 +231,12 @@ def drawdown(rs) -> float:
 
 # --- Lecture de la base (worker) ----------------------------------------------------------------
 
-def _scope(conn, market: str, base_id: int | None) -> tuple[str, list, str | None]:
-    """Trades déclenchés de la version de génération gardés par le champion, sur le marché ; pour un
-    champion filtré, seulement ce qu'il n'a pas vu (journalisés depuis sa mise en essai : hors
-    échantillon)."""
+def _scope(conn, market: str, seen: dict | None = None) -> tuple[str, list, str | None]:
+    """Trades déclenchés de la version de génération gardés par le champion, sur le marché. `seen` : frontière du
+    marché (Grader.frontier, jours journalisés à la promotion qui a changé ses filtres) : seuls comptent les jours
+    d'après, comme pour les leçons (lessons.unseen_sql), jamais ceux de l'essai qui ont décidé la promotion ;
+    None : pas de borne (marché sans filtre du champion)."""
+    from app.lab import lessons as L  # import tardif, comme validator.frontier_sql
     from app.lab import method as M
 
     version = V.current_version(conn)
@@ -236,23 +244,32 @@ def _scope(conn, market: str, base_id: int | None) -> tuple[str, list, str | Non
     kept, kparams = V.champion_filter(conn)
     sql = (f"t.method_version = ? AND t.market = ? AND t.triggered = 1 AND t.r_net IS NOT NULL AND {kept}")
     params = [version, market, *kparams]
-    if champ["regles"]:
-        start = champ.get("debut_ts") or 0
-        sql += " AND (t.planned_at >= ? OR t.id > ?)"
-        params += [start, base_id or 0]
+    if seen is not None:
+        cond, cparams = L.unseen_sql({k: d for k, d in seen.items() if k.endswith(f":{market}")})
+        sql += f" AND {cond}"
+        params += cparams
     return sql, params, champ["version"]
+
+
+def ibkr_plan() -> str:
+    """Barème IBKR du compte de Simão (JARVIS_IBKR_PLAN, lu par Killmode et le suivi des trades) : « fixe » ou
+    « degressif »."""
+    from app.trading import killmode as K  # import tardif : killmode importe le labo
+
+    return "degressif" if K.IBKR_PLAN == "degressif" else "fixe"
 
 
 def cost_r(market: str, r_net: float, result: str | None) -> float:
     """R d'un trade pour le grade : actions, après commission IBKR à la mise de Simão (RISK_EUR, un bracket par
-    objectif, minimum par ordre : strategies.cost_variants, r_20e), r_net s'il manque le détail ; crypto : r_net
+    objectif, minimum par ordre : strategies.cost_variants), au barème du compte (r_20e au Fixe, r_20e_deg au
+    Dégressif : l'écart change de signe selon le nombre d'actions), r_net s'il manque le détail ; crypto : r_net
     (frais OKX déjà comptés)."""
     if market != "stock" or not result:
         return r_net
     from app.lab import strategies as ST  # import tardif, comme strategies le fait pour killmode
 
     try:
-        r = ST.cost_variants("stock", json.loads(result))["r_20e"]
+        r = ST.cost_variants("stock", json.loads(result))["r_20e_deg" if ibkr_plan() == "degressif" else "r_20e"]
     except (ValueError, KeyError, TypeError, ZeroDivisionError):
         return r_net
     return r_net if r is None else r
@@ -278,9 +295,9 @@ def last_segment(days: list[str], gap: int = TROU_JOURS) -> list[str]:
     return days[cut:]
 
 
-def window_rows(conn, market: str, base_id: int | None = None) -> tuple[list[tuple], str | None, set[str]]:
+def window_rows(conn, market: str, seen: dict | None = None) -> tuple[list[tuple], str | None, set[str]]:
     """Lignes de la fenêtre pour evaluate (R du grade, cost_r), version, et jours du direct de la fenêtre."""
-    sql, params, version = _scope(conn, market, base_id)
+    sql, params, version = _scope(conn, market, seen)
     join = "FROM trades t LEFT JOIN regimes r ON r.market = t.market AND r.day = t.day"
     row = conn.execute(f"SELECT DISTINCT t.day {join} WHERE {sql} ORDER BY t.day DESC LIMIT 1 OFFSET ?",
                        (*params, FENETRE_JOURS - 1)).fetchone()
@@ -301,11 +318,12 @@ def window_rows(conn, market: str, base_id: int | None = None) -> tuple[list[tup
     return rows, version, live
 
 
-def window(conn, market: str, base_id: int | None = None) -> tuple[list[tuple], dict]:
+def window(conn, market: str, seen: dict | None = None) -> tuple[list[tuple], dict]:
     """Fenêtre du grade et son étendue réelle (`fenetre`). Un trou de plus de TROU_JOURS jours (rejeu puis
     direct) : notée sur le dernier segment s'il a MIN_TRADES trades sur MIN_JOURS jours (`coupee_au`), sinon
-    gardée entière et marquée `discontinue` (risque 0 : une hausse de risque exige une preuve récente)."""
-    rows, _, live = window_rows(conn, market, base_id)
+    gardée entière et marquée `discontinue` (risque 0 : une hausse de risque exige une preuve récente).
+    `seen` : frontière du marché (_scope)."""
+    rows, _, live = window_rows(conn, market, seen)
     days = sorted({r[1] for r in rows})
     fen = span(days, live)
     if fen["trou_max_jours"] > TROU_JOURS:
@@ -318,10 +336,10 @@ def window(conn, market: str, base_id: int | None = None) -> tuple[list[tuple], 
     return rows, fen
 
 
-def since(conn, market: str, after_id: int, base_id: int | None = None) -> dict:
+def since(conn, market: str, after_id: int, seen: dict | None = None) -> dict:
     """Trades journalisés depuis le dernier changement : nombre, jours, baisse depuis le sommet (mêmes R que le
     grade)."""
-    sql, params, _ = _scope(conn, market, base_id)
+    sql, params, _ = _scope(conn, market, seen)
     rs, days = [], set()
     for day, r, result in conn.execute(
             f"SELECT t.day, t.r_net, t.result FROM trades t LEFT JOIN regimes r ON r.market = t.market "
@@ -460,20 +478,64 @@ class Grader:
         else:
             self.propose(market, st, target, source, reason, soiree)
 
+    def filters(self, version: str | None, market: str) -> dict:
+        """Ce qui fait la population mesurée sur un marché : version de génération et empreinte des filtres
+        EFFECTIFS du marché (règles de `version` qui le touchent)."""
+        from app.lab import method as M
+
+        conn = self.db.conn
+        v = next((x for x in M.versions(conn) if x["version"] == version), None)
+        champ = M.champion(conn)
+        if v is None and version == champ["version"]:
+            v = champ  # version de génération sans ligne (base d'avant le Labo 3)
+        v = v or {"version": version, "base": None, "regles": []}
+        return {"generation": M.base_of(v, conn), "filtres": M.filters_key(v["regles"], market)}
+
+    def frontier(self, champ: dict, market: str, base_id: int | None) -> dict | None:
+        """Frontière du marché (hors échantillon) quand des règles du champion le touchent : ce qui était journalisé
+        à sa promotion (method._promote, « vu_a_la_promotion »), sinon au trade `base_id` (remise à zéro, ou grade
+        d'avant ce suivi) ; None sans règle sur ce marché (aucune borne)."""
+        from app.lab import lessons as L
+        from app.lab import method as M
+
+        if not M.market_rules(champ["regles"], market):
+            return None
+        seen = M.version_settings(self.db.conn, champ["version"]).get("vu_a_la_promotion")
+        if not isinstance(seen, dict):
+            seen = L.seen_until(self.db.conn, base_id)
+        return {k: d for k, d in seen.items() if k.endswith(f":{market}")}
+
     # -- passage --
     def grade_market(self, market: str, force: bool = False) -> dict:
         conn = self.db.conn
         st = self.state(market)
         from app.lab import method as M
 
-        champ_version = M.champion(conn)["version"]
-        if st.get("version") != champ_version:
+        champ = M.champion(conn)
+        champ_version = champ["version"]
+        key = self.filters(champ_version, market)
+        old = ({"generation": st.get("generation"), "filtres": st["filtres"]} if "filtres" in st
+               else self.filters(st.get("version"), market))  # grade d'avant ce suivi : sa version le dit
+        if st.get("version") is None or old != key:
+            # Les trades gardés sur CE marché changent (nouvelle génération, ou filtres du marché) : remise à zéro.
+            # Une promotion qui ne touche pas ce marché n'y change rien (avant : toute promotion remettait tout à zéro).
             if st.get("version") is not None:
                 self.history(market, st, None, None, "nouvelle_version",
                              f"méthode {champ_version} en place : grade remis à zéro (hors échantillon)")
-            st = {"rang": None, "version": champ_version, "depuis_id": max_trade_id(conn), "base_id": max_trade_id(conn),
-                  "change_le": None, "hausse": None, "morte": False, "seq": st.get("seq", 0)}
-        rows, fen = window(conn, market, st.get("base_id"))
+            base = max_trade_id(conn)
+            st = {"rang": None, "version": champ_version, "depuis_id": base, "base_id": base,
+                  "change_le": None, "hausse": None, "morte": False, "seq": st.get("seq", 0),
+                  "frontiere": self.frontier(champ, market, base), "frontiere_version": champ_version}
+        elif st.get("version") != champ_version:
+            st["version"] = champ_version
+            self.history(market, st, st["rang"], None, "nouvelle_version",
+                         f"méthode {champ_version} en place, mêmes filtres sur les {MARKET_FR[market]} : grade gardé")
+        if "frontiere" not in st:  # grade d'avant ce suivi : borne recalculée une fois (base_id de sa remise à zéro)
+            st |= {"frontiere": self.frontier(champ, market, st.get("base_id")), "frontiere_version": champ_version}
+        st |= key
+        rows, fen = window(conn, market, st["frontiere"])
+        if st["frontiere"] is not None:
+            fen["apres"] = st.get("frontiere_version")
         m = evaluate(rows) | {"fenetre": fen}
         st["mesure"] = m
         measured = m.get("rang")
@@ -490,7 +552,7 @@ class Grader:
                     self.set_rank(market, st, D_PLUS, "calcul", f"premier grade, mesuré {name(measured)}", measured, m)
                     self.propose(market, st, measured, "calcul", f"mesuré {name(measured)} dès le premier calcul")
             else:
-                new = since(conn, market, st["depuis_id"], st.get("base_id"))
+                new = since(conn, market, st["depuis_id"], st["frontiere"])
                 st["nouveaux"] = new
                 if cur >= C_MINUS and new["baisse_r"] >= COUPE_CIRCUIT_R:
                     self.set_rank(market, st, min(D_RANK, measured), "coupe_circuit",
@@ -589,7 +651,7 @@ def signature(db: LabDB) -> list:
     from app.lab import empreinte as E  # I3 : trades réécrits sur place, code des stats
 
     row = db.conn.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM trades").fetchone()
-    return [row[0], row[1], M.champion(db.conn)["version"], GRADE_CALC, *E.sig(db.conn, "trades")]
+    return [row[0], row[1], M.champion(db.conn)["version"], GRADE_CALC, ibkr_plan(), *E.sig(db.conn, "trades")]
 
 
 def step(db: LabDB, now: datetime | None = None) -> dict:
@@ -774,8 +836,10 @@ def _day(d: str | None) -> str:
 
 def window_text(f: dict | None) -> str | None:
     """« fenêtre : rejeu du … au …, direct depuis le … » ; None sans fenêtre publiée."""
+    after = (f" · seuls comptent les jours journalisés après la mise en place de la méthode {f['apres']} "
+             "(hors échantillon)") if f and f.get("apres") else ""
     if not f or not f.get("jours"):
-        return None
+        return f"fenêtre : aucun jour encore{after}" if after else None
     parts = []
     if f.get("rejeu_du"):
         parts.append(f"rejeu du {_day(f['rejeu_du'])} au {_day(f['rejeu_au'])}")
@@ -788,7 +852,7 @@ def window_text(f: dict | None) -> str | None:
     elif f.get("discontinue"):
         out += (f" · ⚠️ fenêtre discontinue : risque 0 % tant que les jours après le trou n'ont pas {MIN_TRADES} "
                 f"trades sur {MIN_JOURS} jours")
-    return out
+    return out + after
 
 
 def unreadable(exc: Exception) -> dict:
@@ -843,7 +907,8 @@ def _eur(x: float) -> str:
 def plan_line(g: dict) -> str:
     """Une ligne pour le plan sur Discord (et l'avertissement d'un risque demandé au-delà du budget)."""
     head = f"🏅 Grade JARVIS **{g['grade']}** · risque proposé **{g['risque_propose']:g} %**"
-    line = head + (f" : plan en observation ({g['raison']})" if g.get("observation") else f" ({g['raison']})")
+    line = head + (f" : plan {g['raison']}" if g.get("ecarte") else  # écarté par la méthode : la raison suffit
+                   f" : plan en observation ({g['raison']})" if g.get("observation") else f" ({g['raison']})")
     if g.get("hors_budget"):
         line += (f"\n⚠️ **Hors budget** : risque demandé {g['risque_demande']:g} %"
                  + (f" ({_eur(g['risque_demande_eur'])})" if g.get("risque_demande_eur") else "")
@@ -932,18 +997,21 @@ def text(data: dict | None, hist: list[dict] | None = None, now: datetime | None
 def reels(trades: list[dict]) -> dict:
     """Troisième population (avis de GPT, 10 oct.) : trades réellement pris et suivis par JARVIS (`!prends`),
     terminés, hors Killmode (mesuré par son propre journal), en R réalisé avant frais et net des frais estimés
-    (service.realized_r_net ; gagnants comptés nets). Indicatif : aucun effet."""
+    (service.realized_r_net ; gagnants comptés nets). Indicatif : aucun effet. `regle` : ceux pris à ta taille quand
+    JARVIS n'en proposait pas autant (service.at_rule, le pari « 20 € quand JARVIS propose 0 % »), et leur R net moyen."""
     from app.trading import service as T
 
     out = {}
     for market in MARKETS:
         mine = [t for t in trades if t.get("market", "stock") == market and not t.get("killmode")]
-        done = [(T.realized_r(t), T.realized_r_net(t)) for t in mine if T.realized_r(t) is not None]
-        rs, nets = [r for r, _ in done], [n for _, n in done]
+        done = [(T.realized_r(t), T.realized_r_net(t), T.at_rule(t)) for t in mine if T.realized_r(t) is not None]
+        rs, nets = [r for r, _, _ in done], [n for _, n, _ in done]
+        rule = [n for _, n, at in done if at]
         out[market] = {"termines": len(rs), "esperance_r": round(sum(rs) / len(rs), 3) if rs else None,
                        "total_r": round(sum(rs), 2), "gagnants": sum(n > 0 for n in nets),
                        "esperance_net_r": round(sum(nets) / len(nets), 3) if nets else None,
-                       "total_net_r": round(sum(nets), 2)}
+                       "total_net_r": round(sum(nets), 2), "regle": len(rule),
+                       "regle_net_r": round(sum(rule) / len(rule), 3) if rule else None}
     return out
 
 
@@ -966,6 +1034,8 @@ def populations_text(indicatif: list[str], real: dict | None) -> str:
         lines.append(f"-# {MARKET_FR[market].capitalize()} : {g['termines']} terminés, {g['gagnants']} gagnants, "
                      f"{g['esperance_net_r']:+.2f} R en moyenne ({g['esperance_r']:+.2f} brut), "
                      f"{g['total_net_r']:+.2f} R au total ({g['total_r']:+.2f} brut)"
+                     + (f" · dont {g['regle']} à ta règle de taille ({g['regle_net_r']:+.2f} R nets), "
+                        "détail dans `!desaccords`" if g.get("regle") else "")
                      + (" · trop peu pour conclure" if g["termines"] < 30 else ""))
     return "\n".join(lines)
 

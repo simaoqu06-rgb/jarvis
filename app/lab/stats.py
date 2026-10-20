@@ -31,8 +31,10 @@ Période « récente » honnête (avis du 10 octobre, I5) : les 20 derniers jour
 trou entre la fin du rejeu et le début du direct (des mois) ; elle est coupée au dernier écart de plus de GAP_DAYS
 jours calendaires (le direct seul dès qu'il y a un trou), et chaque marché publie à côté de debut_recent le plus
 grand écart de ses 20 derniers jours (trou_max_jours) et les jours en direct de la période (jours_direct).
-Traçabilité (I2, I4) : trades par révision du code, alerte quand une même version en compte plusieurs
-(revisions_code), et part des trades dont la séance est couverte à moins de 50 % (couverture_donnees).
+Traçabilité (I2, I4) : trades par révision du code (revisions_code), et part des trades dont la séance est couverte
+à moins de 50 % (couverture_donnees). Deuxième tour d'avis du 10 octobre : les lignes sans révision (« inconnue ») sont
+séparées entre celles qu'une rupture de comportement listée touche (empreinte.V1_RUPTURES) et les autres, et l'alerte
+« plusieurs comportements » ne vise plus qu'une vraie rupture (code_revisions).
 """
 import json
 import math
@@ -473,23 +475,91 @@ def compute(conn: sqlite3.Connection, min_n: int = MIN_TRADES, **filters) -> dic
     return out
 
 
-def code_revisions(conn: sqlite3.Connection, **filters) -> dict | None:
-    """I2 : trades par révision du code qui les a calculés (empreinte.code_rev), par version ; NULL = calculés
-    avant le suivi (« inconnue »). Plus d'une révision sous une même version : alerte, ses lignes ne viennent
-    peut-être pas d'un même comportement. None sur une base pas encore migrée."""
-    sql, params = where(filters)
+UNKNOWN_PROBE = "inconnue, plans identiques sur la sonde"
+MARKET_FR = {"stock": "actions", "crypto": "crypto"}
+
+
+def _fr_day(iso: str) -> str:
+    return date.fromisoformat(iso).strftime("%d/%m/%Y")
+
+
+def rupture_labels() -> list[tuple[str, str, str, list]]:
+    """Révisions « inconnue » des lignes qu'une rupture listée touche (empreinte.V1_RUPTURES) : (libellé, révision
+    d'avant, condition SQL sur l'alias t, paramètres), une pour le rejeu, une pour les séances du direct."""
+    from app.lab import empreinte as E  # import tardif, comme les autres modules du labo
+
+    out = []
+    for r in E.V1_RUPTURES:
+        m, avant = MARKET_FR.get(r["marche"], r["marche"]), r["avant"]
+        out.append((f"inconnue, avant {avant} (rejeu {m} ≤ {_fr_day(r['rejeu_jusqu_au'])})", avant,
+                    "t.market = ? AND t.origin = 'replay' AND t.day <= ?", [r["marche"], r["rejeu_jusqu_au"]]))
+        if r["direct"]:
+            days = ", ".join(_fr_day(d) for d in r["direct"])
+            out.append((f"inconnue, avant {avant} (direct {m} du {days})", avant,
+                        f"t.market = ? AND t.origin = 'live' AND t.day IN ({', '.join('?' * len(r['direct']))})",
+                        [r["marche"], *r["direct"]]))
+    return out
+
+
+def revision_mixes(conn: sqlite3.Connection, par: dict) -> dict[str, list[tuple[str, str]]]:
+    """Versions dont les trades viennent de plusieurs COMPORTEMENTS, avec (raison courte, alerte) : `par` est
+    code_revisions()["par_version"].
+
+    Critère : une révision du code est un hachage du source, qui change à chaque refactorisation sans changer le
+    comportement (empreinte.py) ; plusieurs révisions sous une version ne prouvent donc rien. Une vraie rupture, c'est :
+    - des lignes qu'une rupture listée touche (empreinte.V1_RUPTURES, sans révision) à côté d'autres lignes ;
+    - ou deux révisions connues dont les empreintes de comportement v1 diffèrent : la garde du worker note l'empreinte de
+      chaque révision qu'elle fait tourner (progress « empreintes_v1 ») et ne laisse écrire que celle de V1_FINGERPRINT ;
+      deux empreintes différentes sous une même version, c'est V1_FINGERPRINT changée sans ouvrir de version.
+    Les lignes « plans identiques sur la sonde » et les révisions sans empreinte notée (d'avant la garde) ne déclenchent
+    rien : la sonde n'y a trouvé aucun changement de plan (la collecte, elle, a pu être amputée sans trace avant la PR
+    #53 : couverture_donnees)."""
+    ruptures = {label: avant for label, avant, _, _ in rupture_labels()}
     try:
-        rows = conn.execute(f"SELECT t.method_version, COALESCE(t.code_rev, 'inconnue'), COUNT(*) FROM trades t{sql} "
-                            "GROUP BY 1, 2 ORDER BY 1, MIN(t.id)", params).fetchall()
+        fps = {k: json.loads(v) for k, v in conn.execute("SELECT key, value FROM progress WHERE job = 'empreintes_v1'")}
+    except sqlite3.Error:
+        fps = {}
+    out: dict[str, list[tuple[str, str]]] = {}
+    for version, revs in par.items():
+        total = sum(revs.values())
+        for avant in dict.fromkeys(ruptures[label] for label in revs if label in ruptures):
+            old = {label: n for label, n in revs.items() if ruptures.get(label) == avant}
+            n = sum(old.values())
+            if n < total:
+                detail = ", ".join(f"{label.split('(', 1)[1].rstrip(')')} : {k}" for label, k in old.items())
+                out.setdefault(version, []).append((
+                    f"trades d'avant {avant}",
+                    f"plusieurs comportements sous la même version : {version} compte {n} trades calculés avant {avant} "
+                    f"({detail}) sur {total}, d'une autre règle de plan (rupture listée dans empreinte.V1_RUPTURES)"))
+        known = {rev: fps[rev] for rev in revs if rev in fps}
+        if len(set(known.values())) > 1:
+            out.setdefault(version, []).append((
+                "empreintes v1 différentes",
+                f"plusieurs comportements sous la même version : {version} compte {len(known)} révisions du code aux "
+                "empreintes v1 différentes (" + " ; ".join(f"{rev} : {revs[rev]} trades, empreinte {fp}"
+                                                         for rev, fp in known.items()) + ")"))
+    return out
+
+
+def code_revisions(conn: sqlite3.Connection, **filters) -> dict | None:
+    """I2 : trades par révision du code qui les a calculés (empreinte.code_rev), par version. Sans révision (calculés
+    avant le suivi, NULL) : « inconnue, avant <révision> (…) » pour les lignes qu'une rupture listée touche, sinon
+    « inconnue, plans identiques sur la sonde ». Alerte seulement pour plusieurs comportements sous une même version
+    (revision_mixes), pas pour plusieurs révisions du source. None sur une base pas encore migrée."""
+    sql, params = where(filters)
+    labels = rupture_labels()
+    case = ("CASE WHEN t.code_rev IS NOT NULL THEN t.code_rev "
+            + "".join(f"WHEN {cond} THEN ? " for _, _, cond, _ in labels) + "ELSE ? END")
+    cparams = [p for label, _, _, ps in labels for p in (*ps, label)] + [UNKNOWN_PROBE]
+    try:
+        rows = conn.execute(f"SELECT t.method_version, {case}, COUNT(*) FROM trades t{sql} "
+                            "GROUP BY 1, 2 ORDER BY 1, MIN(t.id)", (*cparams, *params)).fetchall()
     except sqlite3.Error:
         return None
     par: dict = {}
     for version, rev, n in rows:
         par.setdefault(version, {})[rev] = n
-    alerts = [f"plusieurs comportements sous la même version : {version} compte {len(revs)} révisions du code ("
-              + ", ".join(f"{rev} : {n} trades" for rev, n in revs.items()) + ")"
-              for version, revs in par.items() if len(revs) > 1]
-    return {"par_version": par, "alertes": alerts}
+    return {"par_version": par, "alertes": [a for mixes in revision_mixes(conn, par).values() for _, a in mixes]}
 
 
 def coverage(conn: sqlite3.Connection, **filters) -> dict:

@@ -192,14 +192,16 @@ STRAT_MIGRATIONS = STRAT_N10 + STRAT_N11 + (("r_emperor", "REAL"), ("r_emperor_a
                     ("confirmation", "TEXT"), ("r_3c", "REAL"), ("r_20e", "REAL"))
 # I2 : traçabilité des lignes, écrite par replace_trades / replace_strat (et cout.step pour cout_rev).
 TRADE_TRACE = (("code_rev", "TEXT"), ("cout_rev", "TEXT"), ("computed_at", "INTEGER"))
-STRAT_TRACE = (("code_rev", "TEXT"), ("declaration", "INTEGER"), ("computed_at", "INTEGER"))
+# 2e tour d'avis (C6) : cout_rev des lignes du labo v2 (empreinte.strat_cost_rev) ; r_20e et r_3c, qui décident du ✅, dépendent
+# de killmode.real_r et du barème IBKR, hors de code_rev (STRAT_CODE).
+STRAT_TRACE = (("code_rev", "TEXT"), ("declaration", "INTEGER"), ("computed_at", "INTEGER"), ("cout_rev", "TEXT"))
 MIGRATIONS = {
     "rules": (("pourquoi", "TEXT"), ("council", "TEXT"), ("soiree", "TEXT"), ("decision", "TEXT"),
               ("decided_at", "TEXT"), ("seen_until", "TEXT")),
     "lessons": (("base_trade_id", "INTEGER"), ("seen_until", "TEXT")),
     "method_versions": (("base", "TEXT"), ("rules", "TEXT"), ("role", "TEXT"), ("started_ts", "INTEGER"),
                         ("decided_at", "TEXT"), ("note", "TEXT")),
-    "plus10_trades": STRAT_N10,  # n° 10 (plus10.TRADE_KEYS)
+    "plus10_trades": STRAT_N10 + (("cout_rev", "TEXT"),),  # n° 10 (plus10.TRADE_KEYS) ; 2e tour d'avis (C6) : modèle de coût
     # Labo v2, déclarations n° 2 et 3 : sorties EmperorBTC ; n° 6 : sorties de Gemini, VWAP à la décision et
     # mesure de Killmode (ATR, volume des 15 premières minutes, stop touché avant l'entrée) ; n° 7 : statut de la
     # confirmation du GO (confirme, annule, expire).
@@ -276,7 +278,10 @@ class LabDB:
         try:
             yield self
         except BaseException:
-            self.conn.execute("ROLLBACK")
+            # SQLite annule parfois seul la transaction (disque plein…) : un ROLLBACK de plus lèverait « no transaction
+            # is active » à la place de la vraie cause.
+            if self.conn.in_transaction:
+                self.conn.execute("ROLLBACK")
             raise
         else:
             self.conn.execute("COMMIT")
@@ -390,7 +395,8 @@ class LabDB:
 
         table = "strat_trades_sealed" if seal.sealed(origin, day) else "strat_trades"
         cols = [*STRAT_COLUMNS, *(c for c, _ in STRAT_TRACE)]
-        trace = [E.code_rev("strat"), ST.CRYPTO_DECLARATION if market == "crypto" else ST.DECLARATION, int(time.time())]
+        trace = [E.code_rev("strat"), ST.CRYPTO_DECLARATION if market == "crypto" else ST.DECLARATION, int(time.time()),
+                 E.strat_cost_rev(market)]
         with self.transaction():
             self.bump("strat")
             for t in ("strat_trades", "strat_trades_sealed"):
