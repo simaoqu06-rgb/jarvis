@@ -151,10 +151,65 @@ async def earnings_calendar(start: date, end: date) -> list[dict]:
 
 
 async def profile(symbol: str) -> dict:
-    """Nom, secteur et capitalisation (en dollars) d'une société."""
+    """Nom, secteur, capitalisation et nombre d'actions (en dollars et en titres) d'une société."""
     p = await get_json(f"{BASE}/stock/profile2", params={"symbol": symbol, "token": _key()})
     if not p or not p.get("name"):
         raise SourceError(f"{symbol} : profil inconnu")
-    cap = to_float(p.get("marketCapitalization"))
+    cap, shares = to_float(p.get("marketCapitalization")), to_float(p.get("shareOutstanding"))
     return {"symbol": symbol, "name": p.get("name"), "industry": p.get("finnhubIndustry"),
-            "market_cap": cap * 1e6 if cap is not None else None}
+            "market_cap": cap * 1e6 if cap is not None else None,
+            "shares": shares * 1e6 if shares is not None else None,
+            "exchange": p.get("exchange"), "ipo": p.get("ipo"), "url": p.get("weburl")}
+
+
+async def basic_financials(symbol: str) -> dict:
+    """Chiffres clés de la formule gratuite (clés de Finnhub telles quelles : 52WeekHigh, beta,
+    revenueGrowthTTMYoy, grossMarginTTM, netProfitMarginTTM, peExclExtraTTM, psTTM…)."""
+    p = await get_json(f"{BASE}/stock/metric", params={"symbol": symbol, "metric": "all", "token": _key()})
+    metric = p.get("metric") if isinstance(p, dict) else None
+    if not isinstance(metric, dict) or not metric:
+        raise SourceError(f"{symbol} : chiffres clés indisponibles")
+    return metric
+
+
+async def recommendations(symbol: str) -> list[dict]:
+    """Avis des analystes par mois (le plus récent d'abord) : nombre d'achats forts, achats, neutres, ventes."""
+    items = await get_json(f"{BASE}/stock/recommendation", params={"symbol": symbol, "token": _key()})
+    if not isinstance(items, list):
+        raise SourceError(f"{symbol} : réponse inattendue de recommendation")
+    keys = (("strong_buy", "strongBuy"), ("buy", "buy"), ("hold", "hold"), ("sell", "sell"), ("strong_sell", "strongSell"))
+    out = [{"period": r.get("period")} | {k: int(to_float(r.get(src)) or 0) for k, src in keys}
+           for r in items if isinstance(r, dict) and r.get("period")]
+    return sorted(out, key=lambda r: r["period"], reverse=True)
+
+
+async def insider_transactions(symbol: str, start: date, end: date) -> list[dict]:
+    """Transactions des dirigeants (formulaires 4) : nom, variation du nombre d'actions, date, code SEC
+    (S vente en bourse, P achat en bourse, M levée d'options, A attribution, F retenue fiscale…) et prix."""
+    p = await get_json(f"{BASE}/stock/insider-transactions",
+                       params={"symbol": symbol, "from": start.isoformat(), "to": end.isoformat(), "token": _key()})
+    rows = p.get("data") if isinstance(p, dict) else None
+    if not isinstance(rows, list):
+        raise SourceError(f"{symbol} : réponse inattendue de insider-transactions")
+    return [{"name": r.get("name"), "change": to_float(r.get("change")), "date": r.get("transactionDate"),
+             "code": r.get("transactionCode"), "price": to_float(r.get("transactionPrice"))}
+            for r in rows if isinstance(r, dict)]
+
+
+async def filings(symbol: str, start: date, end: date) -> list[dict]:
+    """Dépôts à la SEC entre deux dates : formulaire (8-K, S-3, 424B5…), date et lien."""
+    items = await get_json(f"{BASE}/stock/filings",
+                           params={"symbol": symbol, "from": start.isoformat(), "to": end.isoformat(), "token": _key()})
+    if not isinstance(items, list):
+        raise SourceError(f"{symbol} : réponse inattendue de filings")
+    return [{"form": f.get("form"), "filed": (f.get("filedDate") or "")[:10], "url": f.get("reportUrl") or f.get("filingUrl")}
+            for f in items if isinstance(f, dict) and f.get("form")]
+
+
+async def earnings_surprises(symbol: str) -> list[dict]:
+    """Derniers trimestres publiés (4 en formule gratuite) : BPA publié, attendu et écart en %."""
+    items = await get_json(f"{BASE}/stock/earnings", params={"symbol": symbol, "token": _key()})
+    if not isinstance(items, list):
+        raise SourceError(f"{symbol} : réponse inattendue de earnings")
+    return [{"period": e.get("period"), "actual": to_float(e.get("actual")), "estimate": to_float(e.get("estimate")),
+             "surprise_pct": to_float(e.get("surprisePercent"))} for e in items if isinstance(e, dict) and e.get("period")]

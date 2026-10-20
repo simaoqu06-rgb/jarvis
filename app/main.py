@@ -39,7 +39,7 @@ from app.lab import status as lab_status
 from app.lab import summary as lab_summary
 from app.lab import validator as lab_validator
 from app.notify import bot, discord
-from app.trading import advice, paper, scanner
+from app.trading import advice, company, paper, scanner
 from app.trading import proposals as PR
 from app.trading import service as trading
 from app.core import fallback
@@ -330,7 +330,8 @@ async def trading_disagreements():
 
 @app.get("/api/trading/opinion")
 async def trading_opinion(symbol: str, market: str | None = Query(None, description="stock ou crypto (deviné sinon)")):
-    """Avis de JARVIS sur un actif : long, short ou attendre, pourquoi, et ce que le labo a mesuré."""
+    """Avis de JARVIS sur un actif, en prix : entrer maintenant, sur repli ou sur cassure (stop, objectifs, R/R),
+    ou attendre, et pourquoi."""
     market = market or bot.parse_trade([symbol])["market"]
     try:
         o = await advice.opinion(symbol, market)
@@ -339,10 +340,35 @@ async def trading_opinion(symbol: str, market: str | None = Query(None, descript
     return {k: v for k, v in o.items() if k != "plan"} | {"text": advice.opinion_text(o)}
 
 
+@app.get("/api/trading/company")
+async def trading_company(symbol: str):
+    """Fiche société d'une action : résultats, plus fortes séances et leur actu, chiffres, analystes,
+    dirigeants, dépôts SEC, actus."""
+    try:
+        s = await company.sheet(symbol)
+    except SourceError as exc:
+        raise HTTPException(422, str(exc))
+    return s | {"text": company.sheet_text(s)}
+
+
+@app.get("/api/trading/position")
+async def trading_position(symbol: str, entry: float, side: str = "long", stop: float | None = None,
+                           market: str | None = Query(None, description="stock ou crypto (deviné sinon)")):
+    """Ordres en prix pour une position prise hors de JARVIS (ventes, stop suiveur, renforts) et la décision."""
+    market = market or bot.parse_trade([symbol])["market"]
+    try:
+        a = await advice.advise_position(symbol, market, side, entry, stop)
+    except trading.PlanError as exc:
+        raise HTTPException(422, str(exc))
+    return a | {"text": advice.advice_text(a)}
+
+
 @app.get("/api/trading/advice")
 async def trading_advice():
-    """Sortir, alléger ou garder chaque trade ouvert (conseils gardés sur les trades pour être mesurés)."""
-    advices = await advice.advise_book(scheduler.book.open_trades())
+    """Les ordres en prix (ventes, stop suiveur, renforts) et sortir, alléger ou garder pour chaque trade ouvert
+    (conseils gardés sur les trades pour être mesurés). Les KILL n'en ont pas, comme avant la clôture : ils gardent
+    la gestion que mesure leur journal (vendus à la clôture, aucun stop remonté)."""
+    advices = await advice.advise_book([t for t in scheduler.book.open_trades() if not t.get("killmode")])
     now = datetime.now(timezone.utc)
     async with scheduler._lock:
         by_id = {t["id"]: t for t in scheduler.book.trades}

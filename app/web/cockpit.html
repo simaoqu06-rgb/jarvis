@@ -339,7 +339,7 @@ function cardHtml(t) {
   const signals = (t.exit_signals || []).length
     ? `<div class="alert">⚠️ <div><b>Signes de sortie anticipée</b><br>${t.exit_signals.map(esc).join(" · ")}</div></div>` : "";
   const c = (t.conseils || []).at(-1);
-  const conseil = c ? `<div class="alert">🧭 <div><b>Conseil ${hm(c.at)} : ${esc(c.decision)}</b><br>${esc(c.why)}</div></div>` : "";
+  const conseil = c ? `<div class="alert">🧭 <div><b>Conseil ${hm(c.at)} : ${esc(c.decision)}</b><br>${esc(c.why)}${c.orders ? `<br>Ordres : ${esc(c.orders)}` : ""}</div></div>` : "";
   return `
     <div class="t-head">
       <div>

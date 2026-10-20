@@ -1,5 +1,6 @@
 """Délais rejoués honnêtes : départs qui se chevauchent (fenêtres indépendantes, IC de Wilson), « 3 cas sur 4 »
-ramené à tous les cas, et retard qui ne décide plus SORTIR quand garder est mesurable."""
+ramené à tous les cas, et retard qui ne décide SORTIR que si rien de mesurable ne dit de garder (depuis la PR #30,
+la mesure « garder jusqu'au prochain objectif » est retirée des conseils)."""
 import random
 import statistics
 from datetime import datetime, timezone
@@ -8,7 +9,6 @@ from app.trading import advice as A
 from app.trading import plan as P
 from app.trading import service as S
 from tests.test_advice import NOW as NOW_ADVICE
-from tests.test_advice import bars as bars_advice
 from tests.test_advice import trade as trade_advice
 from tests.test_trading import NOW, T0, bars, trade
 
@@ -114,23 +114,22 @@ def test_textes_du_plan():
     assert len(p["stop_first_ci95"]) == 2
 
 
-def late_trade(price, **over):
-    t = trade_advice(price, **over)
+def bars_advice(closes, step):
+    """Bougies d'heure finies juste avant NOW_ADVICE."""
+    return bars(closes, spread=0.3, start=int(NOW_ADVICE.timestamp()) - (len(closes) + 1) * step, step=step)
+
+
+def late_trade(price, entry):
+    t = trade_advice(entry, stop=entry - 2.0, last_price=price,
+                     targets=[{"name": f"TP{i}", "price": entry + 2.0 * i, "eta_latest": None, "eta_text": "~2 h"}
+                              for i in (1, 2, 3)])
     t["targets"][0]["eta_latest"] = "2026-10-07T12:00:00+00:00"  # dépassé à NOW
     return t
 
 
-def test_retard_ne_decide_pas_sortir_quand_garder_est_mesurable():
-    closes = [100 + 0.2 * i for i in range(300)]
-    price = closes[-1]
-    a = A.advise(late_trade(price, entry=price + 0.5), price, bars_advice(closes, 3600), None, None, NOW_ADVICE)
-    assert a["late"] and a["r_now"] <= 0 and a["hold"]["expectancy_r"] >= 0
-    assert a["decision"] == "GARDER"
-    assert any("(en retard)" in f for f in a["facts"])
-
-
 def test_retard_decide_sortir_si_rien_n_est_mesurable():
-    closes = [100 + 0.2 * i for i in range(40)]  # trop court pour rejouer garder
+    closes = [100 + 0.2 * i for i in range(40)]  # aucune mesure « garder » depuis la PR #30
     price = closes[-1]
     a = A.advise(late_trade(price, entry=price + 0.5), price, bars_advice(closes, 3600), None, None, NOW_ADVICE)
-    assert a["hold"] is None and a["decision"] == "SORTIR" and "en retard" in a["why"]
+    assert a["late"] and a["r_now"] <= 0 and "hold" not in a
+    assert a["decision"] == "SORTIR" and "en retard" in a["why"]
