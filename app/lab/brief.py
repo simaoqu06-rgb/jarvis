@@ -147,7 +147,9 @@ def _strategies(conn) -> dict | None:
                    "ic95": s.get("ic95"), "brut_r": s.get("brut_r"), "frais_r": s.get("frais_r"),
                    "candidate": s.get("candidate"), "candidate_compte": s.get("candidate_compte"),  # n° 10
                    "rentable_20e": s.get("rentable_20e"), "mise_20e_r": (s.get("mise_20e") or {}).get("esperance_r"),
-                   "temoin_ecart_r": (s.get("temoin") or {}).get("ecart_r"), "temoin_z": (s.get("temoin") or {}).get("z")}
+                   "temoin_ecart_r": (s.get("temoin") or {}).get("ecart_r"), "temoin_z": (s.get("temoin") or {}).get("z"),
+                   "couts_20e_ecart_r": {k: (v.get("ecart") or {}).get("esperance_r") for k, v in s["couts_20e"].items()}
+                   if s.get("couts_20e") else None}  # 20/10/2026 : `!frais`, écart apparié à mise_20e_r
             for name, s in strats.items()}
     conf = (rep.get("confirmation_go") or {})
     out["confirmation_go"] = {v: {"go": r.get("go"), "confirme_ou_rien_moins_brut": r.get("ecart_par_go")}

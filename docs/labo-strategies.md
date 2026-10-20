@@ -920,6 +920,11 @@ inchangé.**
 part du milieu de sa tranche (`killmode._legs`). C'est le coût des ordres, pas une re-simulation avec un seul
 objectif.
 
+`!frais` (20/10/2026, demande de Simão) affiche ces trois colonnes stratégie par stratégie : l'espérance à 20 € de
+chaque variante et son écart apparié à `r_20e` sur les mêmes trades (`couts_20e` dans `/strategies`,
+`couts_20e_ecart_r` dans le brief). Mesure descriptive : elle ne consomme aucun essai et ne décide d'aucune
+« candidate ».
+
 ### Lecture du tableau
 
 - **✅ seulement si la stratégie gagne aussi à 20 €** : `candidate` garde sa définition (avantage de la règle) ;
