@@ -266,6 +266,9 @@ class Mean:
         return out
 
 
+VA_BUCKETS = ("dessus", "dedans", "dessous", "inconnu")  # n° 11 : ouverture face à la valeur de la veille
+
+
 def _acc(market: str | None = None) -> dict:
     key = _week if market == "crypto" else None  # n° 10 (L5) : semaines ISO en crypto
 
@@ -277,7 +280,8 @@ def _acc(market: str | None = None) -> dict:
             "commission": mean(), "frais": defaultdict(mean), "funding": defaultdict(mean), "oi": defaultdict(mean),
             "ecarts": defaultdict(mean), "vwap": defaultdict(mean), "robuste": defaultdict(mean),
             "tranches": defaultdict(lambda: defaultdict(mean)), "ecart_journee": mean(), "effet_heure": mean(),
-            "tirages": defaultdict(lambda: [0.0, 0])}
+            "tirages": defaultdict(lambda: [0.0, 0]), "oi7": defaultdict(mean), "va": defaultdict(mean),
+            "structure": [0, 0]}
 
 
 def _feed(a: dict, r: dict) -> None:
@@ -307,6 +311,12 @@ def _feed(a: dict, r: dict) -> None:
     if r["market"] == "crypto":
         a["funding"][r["funding"]].add(day, ref)
         a["oi"][r["oi"]].add(day, ref)
+        a["oi7"][r["oi7"]].add(day, ref)
+    elif r.get("ouverture_va"):
+        a["va"][r["ouverture_va"]].add(day, ref)
+    if r.get("stop_structure") is not None:  # n° 11, A : part des trades où le stop structurel a remplacé l'autre
+        a["structure"][0] += bool(r["stop_structure"])
+        a["structure"][1] += 1
     if r["ecart_temoin"] is not None:
         a["temoin"].add(day, r["temoin"])
         a["ecart"].add(day, r["ecart_temoin"])
@@ -367,6 +377,11 @@ def _item(market: str, name: str, a: dict, trials: int) -> dict:
                         if k in a["funding"]} if market == "crypto" else None,
         "par_oi": {k: a["oi"][k].result() for _, _, k in (*DER.OI_BUCKETS, (0, 0, "inconnu"))
                    if k in a["oi"]} if market == "crypto" else None,
+        "par_oi7": {k: a["oi7"][k].result() for _, _, k in (*DER.OI7_BUCKETS, (0, 0, "inconnu"))
+                    if k in a["oi7"]} if market == "crypto" else None,  # n° 11, descriptif
+        "par_ouverture_va": {k: a["va"][k].result() for k in VA_BUCKETS if k in a["va"]}
+        if market == "stock" else None,  # n° 11, descriptif
+        "stop_structure": {"appliques": a["structure"][0], "trades": a["structure"][1]} if a["structure"][1] else None,
         "ecarts_sorties": {c: _helps(a["ecarts"][c].result(), trials) for c in ST.STOCK_EXITS}
         if market == "stock" and not go else None,
         "par_vwap": {k: a["vwap"][k].result() for k in VWAP_BUCKETS if k in a["vwap"]}
@@ -435,7 +450,7 @@ def _strategies(conn: sqlite3.Connection) -> dict:
     sql = (f"SELECT s.market, s.strategy, s.day, s.triggered, s.tp1_hit, s.temoin_r, s.temoin_triggered, s.rank, "
            f"s.entry, s.stop, s.symbol, s.signal_at, s.sur_vwap, s.gap_open_pct, s.atr_pct, s.vol15_adv, "
            f"s.stop_avant_entree, s.risk_pct, s.confirmation, {', '.join('s.' + c for c in COLUMNS)}, "
-           "s.temoin_journee_r, s.temoin_journee_triggered, s.temoin_tirages, r.label "
+           "s.temoin_journee_r, s.temoin_journee_triggered, s.temoin_tirages, s.ouverture_va, s.stop_structure, r.label "
            "FROM strat_trades s LEFT JOIN regimes r ON r.market = s.market AND r.day = s.day")
     acc: dict = {}
     trials = len(ST.trials())
@@ -448,11 +463,20 @@ def _strategies(conn: sqlite3.Connection) -> dict:
         (market, name, day, trig, tp1, wit, wit_trig, rank, entry, stop, symbol, signal_at, above, gap, atr_pct,
          vol15, stop_before, risk_pct, status) = row[:19]
         values = dict(zip(COLUMNS, row[19:19 + len(COLUMNS)]))
-        day_wit, day_wit_trig, draws = row[19 + len(COLUMNS):-1]  # n° 10
+        day_wit, day_wit_trig, draws, open_va, struct = row[19 + len(COLUMNS):-1]  # n° 10, n° 11
         refc = ST.ref_exit(name)
-        keys = [(market, name)]
-        if name in ST.POST_SEEN and day > ST.SEEN_UNTIL[market]:
-            keys.append((market, name, "suivants"))
+        oi7 = DER.oi7(derivs, symbol, signal_at) if market == "crypto" else None
+        names = [name]
+        for sub, v in ST.N11_SUBSETS.items():  # n° 11 : sous-ensembles jugés comme des stratégies
+            if v["market"] == market and v["base"] == name and (
+                    (oi7 is None or oi7 < ST.OI7_MAX_PCT) if market == "crypto" else open_va == "dessus"):
+                names.append(sub)
+        keys = []
+        for n in names:
+            keys.append((market, n))
+            seen = ST.seen_until(n, market)
+            if seen and day > seen:
+                keys.append((market, n, "suivants"))
         for key in keys:
             if key not in acc:
                 acc[key] = _acc(market)
@@ -473,7 +497,8 @@ def _strategies(conn: sqlite3.Connection) -> dict:
              "ref": ref, "refc": refc, "comm": comm, "frais": _cost_bucket(expected_cost_r(market, entry, stop, rank)),
              "ecarts": {}, "vwap": None, "bandes": {}, "temoin": wit,
              "ecart_temoin": values[refc] - wit if wit_trig and wit is not None and values[refc] is not None
-             else None, "journee": day_wit if day_wit_trig else None, "tirages": json.loads(draws) if draws else None}
+             else None, "journee": day_wit if day_wit_trig else None, "tirages": json.loads(draws) if draws else None,
+             "ouverture_va": (open_va or "inconnu") if market == "stock" else None, "stop_structure": struct}
         if market == "stock" and "go" not in spec:  # n° 6 : sorties de Gemini, VWAP et mesures de Killmode
             r["ecarts"] = {c: values[c] - values["r_net"] for c in ST.STOCK_EXITS
                            if values[c] is not None and values["r_net"] is not None}
@@ -490,6 +515,7 @@ def _strategies(conn: sqlite3.Connection) -> dict:
             funding, oi_chg = DER.context(derivs, symbol, signal_at)
             r["funding"] = DER.bucket(funding, DER.FUNDING_BUCKETS)
             r["oi"] = DER.bucket(oi_chg, DER.OI_BUCKETS)
+            r["oi7"] = DER.bucket(oi7, DER.OI7_BUCKETS)  # n° 11, descriptif
         for key in keys:
             _feed(acc[key], r)
     for key, a in acc.items():
@@ -497,9 +523,10 @@ def _strategies(conn: sqlite3.Connection) -> dict:
             continue
         market, name = key
         item = _item(market, name, a, trials)
-        if name in ST.POST_SEEN:  # n° 6 : jugée sur les jours qui suivent ceux déjà lus quand elle a été choisie
+        seen = ST.seen_until(name, market)
+        if seen:  # n° 6 et 11 : jugée sur les jours qui suivent ceux déjà lus quand elle a été choisie
             sub = acc.get((market, name, "suivants"))
-            item["jours_vus_jusqu_au"] = ST.SEEN_UNTIL[market]
+            item["jours_vus_jusqu_au"] = seen
             item["jours_suivants"] = _item(market, name, sub, trials) if sub else None
             item["candidate"] = bool(item["jours_suivants"] and item["jours_suivants"]["candidate"])
             item["candidate_compte"] = bool(item["jours_suivants"] and item["jours_suivants"]["candidate_compte"])
@@ -883,6 +910,26 @@ def _after_seen(it: dict) -> str:
     return f" · jugée après le {seen} : {_r(ref)} R, {sub['declenches']} trades, z témoin {_z(sub['temoin']['z'])}"
 
 
+N11_VA_SHOWN = ("orb15", "orb30", "killmode", ST.REFERENCE)
+
+
+def _n11_text(name: str, it: dict) -> str:
+    """n° 11, descriptifs : part des trades au stop structurel, espérance par OI 7 jours (crypto) et par position
+    de l'ouverture face à la valeur de la veille (orb15, orb30, killmode, v1)."""
+    parts = []
+    st = it.get("stop_structure")
+    if st and name in ST.N11_NAMES:
+        parts.append(f"stop structurel sur {st['appliques']}/{st['trades']} trades")
+    oi7 = it.get("par_oi7")
+    if oi7:
+        parts.append("OI 7 j " + ", ".join(f"{k.removeprefix('OI 7 j ')} {_r(v['esperance_r'])} ({v['n']})"
+                                           for k, v in oi7.items()))
+    va = it.get("par_ouverture_va")
+    if va and name in N11_VA_SHOWN:
+        parts.append("ouverture " + ", ".join(f"{k} {_r(v['esperance_r'])} ({v['n']})" for k, v in va.items()))
+    return "".join(f" · {p}" for p in parts)
+
+
 def _kill_text(kill: dict) -> str:
     """n° 6 : décomposition de Killmode (mesures, pas des essais) et couverture de l'univers."""
     sel, cond, lim = kill["selection"], kill["conditions"], kill["limite_11h"]
@@ -986,7 +1033,7 @@ def text(rep: dict | None) -> str:
                          f"{it['jours']} j · réussite {round(100 * (it['reussite'] or 0))} % · frais "
                          f"{_r(-(it.get('frais_r') or 0)) if it.get('frais_r') is not None else 'n/d'} R{comm}{stake} · "
                          f"vs témoin {_r(wit.get('ecart_r'))} R (t {_z(wit.get('z'))}, seuil {_z(it.get('seuil_t'))})"
-                         + _n10_text(it) + (" · échantillon faible" if it.get("echantillon_faible") else "")
+                         + _n10_text(it) + _n11_text(name, it) + (" · échantillon faible" if it.get("echantillon_faible") else "")
                          + _after_seen(it))
     n6 = rep.get("sorties_gemini")
     if n6:

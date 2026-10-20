@@ -248,8 +248,8 @@ def test_la_crypto_garde_son_rattrapage():
     # Les n° 7 et 8 ne touchaient que les actions : le rattrapage crypto de la n° 6 continuait. Une déclaration qui
     # change les lignes crypto doit remonter CRYPTO_DECLARATION (ce test la rappelle) : la n° 10 corrige le
     # simulateur (stops serrés), les deux marchés repartent, sans essai crypto de plus.
-    assert ST.progress_job("stock") == "strats:stock:d10" and ST.progress_job("crypto") == "strats:crypto:d10"
-    assert len([t for t in ST.trials() if t["market"] == "crypto"]) == 49 and ST.CRYPTO_DECLARATION == 10
+    assert ST.progress_job("stock") == "strats:stock:d11" and ST.progress_job("crypto") == "strats:crypto:d11"
+    assert len([t for t in ST.trials() if t["market"] == "crypto"]) == 51 and ST.CRYPTO_DECLARATION == 11
 
 
 def test_reference_des_bras_et_commission():

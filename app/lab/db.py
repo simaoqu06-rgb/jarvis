@@ -52,6 +52,9 @@ STRAT_N10 = (("r_be_tp2", "REAL"), ("r_ouverture", "REAL"), ("r_20e_deg", "REAL"
              ("r_20e_2s", "REAL"), ("temoin_journee_r", "REAL"), ("temoin_journee_triggered", "INTEGER"),
              ("temoin_tirages", "TEXT"))
 STRAT_COLUMNS += tuple(c for c, _ in STRAT_N10)
+# n° 11 : position de l'ouverture face à la zone de valeur de la veille (actions) et stop structurel appliqué (0/1)
+STRAT_N11 = (("ouverture_va", "TEXT"), ("stop_structure", "INTEGER"))
+STRAT_COLUMNS += tuple(c for c, _ in STRAT_N11)
 STRAT_DDL = """CREATE TABLE IF NOT EXISTS {name} (
     id INTEGER PRIMARY KEY,
     origin TEXT NOT NULL CHECK (origin IN ('replay', 'live')),
@@ -183,7 +186,7 @@ CREATE TABLE IF NOT EXISTS plus10_trades (
 """.format(trades=TRADES_DDL.format(name="trades"), trades_sealed=TRADES_DDL.format(name="trades_sealed"),
            strat=STRAT_DDL.format(name="strat_trades"), strat_sealed=STRAT_DDL.format(name="strat_trades_sealed"))
 # Colonnes ajoutées après coup (ALTER TABLE à l'ouverture par le worker ; idempotent).
-STRAT_MIGRATIONS = STRAT_N10 + (("r_emperor", "REAL"), ("r_emperor_alerte", "REAL"), ("r_emperor_confirme", "REAL"),
+STRAT_MIGRATIONS = STRAT_N10 + STRAT_N11 + (("r_emperor", "REAL"), ("r_emperor_alerte", "REAL"), ("r_emperor_confirme", "REAL"),
                     ("r_vwap", "REAL"), ("r_1430", "REAL"), ("r_spy", "REAL"), ("sur_vwap", "INTEGER"),
                     ("atr_pct", "REAL"), ("vol15_adv", "REAL"), ("stop_avant_entree", "INTEGER"),
                     ("confirmation", "TEXT"), ("r_3c", "REAL"), ("r_20e", "REAL"))

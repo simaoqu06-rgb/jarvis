@@ -118,6 +118,15 @@ la bougie d'entrée, objectif déjà dépassé vendu au prix d'achat) ; actions 
 lignes faites par le rattrapage) ; témoin des actions entré 5 à 30 min après l'exécution (witness_window), l'ancien
 gardé (temoin_journee_r) ; WITNESS_DRAWS à 10 ; colonnes descriptives qui ne décident de rien : r_be_tp2, r_ouverture,
 r_20e_deg, r_20e_1s, r_20e_2s (cost_variants), temoin_tirages.
+Déclaration n° 11 (18 octobre 2026, vidéos envoyées par Simão, choix « Les 3 pistes ») : cinq essais, jugés seulement sur
+les jours neufs (SEEN_N11) :
+- A, stop derrière le dernier creux fort (structure_stop) : orb30_structure (actions) et cassure_zone_retest_structure
+  (actions, crypto), mêmes signaux et entrées que leur base, stop = min(stop d'origine, creux fort − 0,1 ATR), objectifs
+  à 1, 2 et 3 R du nouveau risque, sortie r_net seule ; stop_structure dit si le stop a changé ;
+- B, open interest sur 7 jours (crypto) : cassure_zone_retest_oi7, sous-ensemble des lignes de cassure_zone_retest dont
+  l'open interest a gagné moins de 9 % sur 7 jours (strat_stats, derivs.context) ; pas de ligne en plus ;
+- C, profil de volume de la veille (actions) : colonne ouverture_va (dessus, dedans, dessous de la zone de valeur de la
+  veille, open_va) sur chaque ligne ; orb30_va, sous-ensemble des lignes d'orb30 ouvertes « dessus ».
 Objectifs : 1, 2 et 3 R. Fenêtre des signaux : actions de 9 h 45 à 15 h New York (soldé à la
 clôture) ; crypto de 0 h à 20 h UTC (soldé 24 h après le signal).
 v1 est rejouée avec les mêmes sorties et tests, sur ses propres objectifs : c'est la référence.
@@ -147,15 +156,16 @@ from app.trading import confirm as CF
 from app.trading import indicators as I
 from app.trading import signals as S
 
-REGISTERED_ON = "2026-10-10"
+REGISTERED_ON = "2026-10-18"
 # Déclaration qui fixe les lignes du labo v2 (docs/labo-strategies.md). En changer relance le rattrapage de tous les
 # jours déjà traités (progress_job), pour que chaque stratégie soit mesurée sur les mêmes jours. N° 10 : mesures
-# corrigées (simulateur, témoin, prix négociés), aucun essai de plus.
-DECLARATION = 10
+# corrigées (simulateur, témoin, prix négociés), aucun essai de plus. N° 11 : stop structurel (lignes en plus) et
+# ouverture face au profil de la veille (colonne en plus).
+DECLARATION = 11
 # Dernière déclaration (affichée).
-LATEST_DECLARATION = 10
-# Dernière déclaration qui change les lignes crypto : la n° 10 les re-mesure aussi (simulateur, révision 2).
-CRYPTO_DECLARATION = 10
+LATEST_DECLARATION = 11
+# Dernière déclaration qui change les lignes crypto : la n° 11 (stop structurel de la cassure de zone).
+CRYPTO_DECLARATION = 11
 # n° 10 : révision du simulateur des lignes du labo v2 (simulator.simulate, `sim_rev`) ; le Labo 1 reste en 1.
 SIM_REV = 2
 BAR = CO.BASE_TF * 60
@@ -197,6 +207,12 @@ STRATEGIES = {
     "go_confirme_v4": {"label": "GO confirmé + plus fort que SPY depuis l'ouverture (stop d'origine)",
                        "markets": ("stock",), "go": "origine", "arm": "confirme_v4", "filtre": "v4",
                        "exits": ("r_sans_be",)},
+    # Déclaration n° 11, A : mêmes signaux et entrées que la base, stop derrière le dernier creux fort (structure_stop).
+    "orb30_structure": {"label": "Cassure du range d'ouverture (30 min), stop derrière le dernier creux fort",
+                        "markets": ("stock",), "base": "orb30", "stop": "structure", "exits": ("r_net",)},
+    "cassure_zone_retest_structure": {"label": "Cassure d'une zone S/R puis retest, stop derrière le dernier creux fort",
+                                      "markets": ("stock", "crypto"), "base": "cassure_zone_retest",
+                                      "stop": "structure", "exits": ("r_net",)},
 }
 GO_STRATEGIES = tuple(k for k, v in STRATEGIES.items() if "go" in v)  # n° 7
 GO_STATUS = {"confirmé": "confirme", "annulé": "annule"}               # n° 7 : sinon « expire »
@@ -210,7 +226,23 @@ KILL_COMPLETE_TRIALS = ({"market": "stock", "strategy": "killmode_complet", "exi
 # n° 9 : scanner « potentiel +10 » (plus10.py), quatre essais sur ses listes S+10 et Rebond, hors STRATEGIES.
 PLUS10_TRIALS = tuple({"market": "stock", "strategy": name, "exit": "r_net"}
                       for name in ("plus10_orb15", "plus10_kill", "rebond_orb15", "rebond_orb30"))
-LABELS = {REFERENCE: "v1 (achat à heure fixe, référence)", **{k: v["label"] for k, v in STRATEGIES.items()}}
+# n° 11, B et C : sous-ensembles de lignes existantes (strat_stats), jugés comme des stratégies, hors STRATEGIES.
+N11_SUBSETS = {"cassure_zone_retest_oi7": {"market": "crypto", "base": "cassure_zone_retest", "exits": ("r_net",),
+                                           "label": "Cassure d'une zone S/R puis retest, open interest 7 j < +9 %"},
+               "orb30_va": {"market": "stock", "base": "orb30", "exits": ("r_net",),
+                            "label": "Cassure du range d'ouverture (30 min), ouverture au-dessus de la valeur de la veille"}}
+N11_TRIALS = tuple({"market": v["market"], "strategy": k, "exit": "r_net"} for k, v in N11_SUBSETS.items())
+N11_NAMES = ("orb30_structure", "cassure_zone_retest_structure", *N11_SUBSETS)
+# n° 11 : tout l'historique visible était lu ; ses essais ne sont jugés que sur les jours suivants.
+SEEN_N11 = {"stock": "2026-10-16", "crypto": "2026-10-17"}
+OI7_MAX_PCT = 9.0           # n° 11, B : open interest gagné sur 7 jours, au-delà la ligne sort du sous-ensemble
+STRUCT_LOOKBACK = 78        # n° 11, A : bougies (5 min) où chercher le creux fort (une séance d'actions)
+STRUCT_MAX_DAILY_ATR = 1.0  # n° 11, A : au-delà d'un ATR journalier de risque, stop d'origine gardé
+PROFILE_BINS = 50           # n° 11, C : tranches de prix du profil de la veille
+VALUE_AREA = 0.70           # n° 11, C : part du volume dans la zone de valeur
+PROFILE_MIN_BARS = 60       # n° 11, C : séance de la veille complète (78 bougies de 5 min ; jours courts compris)
+LABELS = {REFERENCE: "v1 (achat à heure fixe, référence)", **{k: v["label"] for k, v in STRATEGIES.items()},
+          **{k: v["label"] for k, v in N11_SUBSETS.items()}}
 EXITS = {
     "r_net": "sortie v1 : un tiers à chaque objectif, stop à l'entrée après TP1",
     "r_sans_be": "mêmes objectifs, sans remonter le stop",
@@ -277,6 +309,13 @@ SEEN_UNTIL = {"stock": "2025-01-27", "crypto": "2025-03-03"}
 POST_SEEN = ("killmode", "cassure_zone_retest_15m", "cassure_zone_retest_1h")
 
 
+def seen_until(name: str, market: str) -> str | None:
+    """Dernier jour déjà lu quand la stratégie a été choisie (jugée sur les suivants) ; None : jugée sur tous."""
+    if name in N11_NAMES:
+        return SEEN_N11[market]
+    return SEEN_UNTIL[market] if name in POST_SEEN else None
+
+
 def progress_job(market: str) -> str:
     """Clé de progression du labo v2 (frontière et curseurs du rattrapage) : la dernière déclaration qui change
     les lignes du marché."""
@@ -290,13 +329,13 @@ def exits(market: str) -> dict:
 
 def strategy_exits(market: str, name: str) -> dict:
     """Sorties d'une stratégie : celles du marché, sauf liste propre (n° 7 : la seule sortie déclarée)."""
-    own = STRATEGIES.get(name, {}).get("exits")
+    own = (STRATEGIES.get(name) or N11_SUBSETS.get(name, {})).get("exits")
     return {e: exits(market)[e] for e in own} if own else exits(market)
 
 
 def ref_exit(name: str) -> str:
     """Sortie de référence (classement, règle « candidate ») : r_net, ou la sortie déclarée seule (n° 7)."""
-    own = STRATEGIES.get(name, {}).get("exits")
+    own = (STRATEGIES.get(name) or N11_SUBSETS.get(name, {})).get("exits")
     return own[0] if own else "r_net"
 
 
@@ -306,7 +345,7 @@ def trials() -> list[dict]:
     for market in ("stock", "crypto"):
         names = [REFERENCE] + [k for k, v in STRATEGIES.items() if market in v["markets"]]
         out += [{"market": market, "strategy": n, "exit": e} for n in names for e in strategy_exits(market, n)]
-    return out + list(KILL_COMPLETE_TRIALS) + list(PLUS10_TRIALS)
+    return out + list(KILL_COMPLETE_TRIALS) + list(PLUS10_TRIALS) + list(N11_TRIALS)
 
 
 # --- Indicateurs sur bougies de 5 min ---------------------------------------------------------
@@ -391,6 +430,8 @@ class Day:
         self._zones: list[tuple[float, float, int]] | None = None
         self._exit_signal: dict[int, bool] = {}
         self._swing_highs: list[tuple[int, float]] | None = None
+        self._swing_lows: list[tuple[int, float]] | None = None
+        self._open_va: str | None | bool = False  # n° 11 : False = pas encore calculé
         self._frames: dict[int, "Day"] = {}
         self.index_down: list[int] | None = None  # n° 6 : clôtures des avalements baissiers de SPY (stock_day)
         self.index_move: dict[int, float] | None = None  # n° 8, V4 : variation de SPY depuis l'ouverture, par bougie
@@ -423,6 +464,12 @@ class Day:
         if self._swing_highs is None:
             self._swing_highs = I.swings(self.bars, side=ZONE_SWING_SIDE)[0]
         return self._swing_highs
+
+    def swing_lows(self) -> list[tuple[int, float]]:
+        """Creux de réaction (indice, prix) ; celui en j est connu à la clôture de j + ZONE_SWING_SIDE (n° 11)."""
+        if self._swing_lows is None:
+            self._swing_lows = I.swings(self.bars, side=ZONE_SWING_SIDE)[1]
+        return self._swing_lows
 
     def exit_signal(self, k: int) -> bool:
         """Signe de retournement EmperorBTC (alertes en direct) à la clôture de la bougie k."""
@@ -954,8 +1001,99 @@ def stop_before_entry(d: Day, plan: dict, decided_at: int, m: dict) -> int | Non
     return int(any(low <= plan["stop"] for low in d.l[k0:f]))
 
 
+# --- Déclaration n° 11 : stop derrière le dernier creux fort, profil de la veille ---------------------
+
+def strong_low(d: Day, i: int, entry: float) -> float | None:
+    """Dernier creux fort connu à la clôture de la bougie i : creux de réaction des STRUCT_LOOKBACK dernières
+    bougies, sous `entry`, suivi (bougie i comprise) d'une clôture au-dessus du dernier sommet de réaction qui
+    le précède. None s'il n'y en a pas."""
+    highs = d.swing_highs()
+    hi_idx = [j for j, _ in highs]
+    for j, low in reversed(d.swing_lows()):
+        if j + ZONE_SWING_SIDE > i:
+            continue  # pas encore connu
+        if j < i - STRUCT_LOOKBACK:
+            break
+        if low >= entry:
+            continue
+        k = bisect_left(hi_idx, j)
+        if not k:
+            continue
+        top = highs[k - 1][1]
+        if any(c > top for c in d.c[j + 1:i + 1]):
+            return low
+    return None
+
+
+def structure_stop(d: Day, cand: dict) -> tuple[float, int]:
+    """(stop, appliqué 0/1) : min(stop d'origine, creux fort − 0,1 ATR 5 min) ; stop d'origine sans creux fort,
+    sans ATR ou si le risque dépasse STRUCT_MAX_DAILY_ATR ATR journaliers (14 j, connus la veille)."""
+    i, entry, stop = cand["i"], cand["entry"], cand["stop"]
+    low = strong_low(d, i, entry)
+    a5 = d.atr[i] if i < len(d.atr) else None
+    if low is None or a5 is None or len(d.daily) <= ATR_LEN:
+        return stop, 0
+    new = low - 0.1 * a5
+    daily_atr = atr(d.daily)[-1]
+    if new >= stop or new <= 0 or daily_atr is None or entry - new > STRUCT_MAX_DAILY_ATR * daily_atr:
+        return stop, 0
+    return new, 1
+
+
+def prior_profile(bars: list[dict]) -> tuple[float, float, float] | None:
+    """(POC, VAL, VAH) d'une séance : PROFILE_BINS tranches entre plus bas et plus haut, volume de chaque bougie
+    réparti également sur les tranches qu'elle couvre, zone de valeur étendue depuis le POC vers la tranche voisine
+    au plus gros volume jusqu'à VALUE_AREA. None si moins de PROFILE_MIN_BARS bougies."""
+    if len(bars) < PROFILE_MIN_BARS:
+        return None
+    lo, hi = min(b["l"] for b in bars), max(b["h"] for b in bars)
+    if hi <= lo:
+        return None
+    step = (hi - lo) / PROFILE_BINS
+    vol = [0.0] * PROFILE_BINS
+    for b in bars:
+        a = min(int((b["l"] - lo) / step), PROFILE_BINS - 1)
+        z = min(int((b["h"] - lo) / step), PROFILE_BINS - 1)
+        share = (b.get("v") or 0) / (z - a + 1)
+        for k in range(a, z + 1):
+            vol[k] += share
+    total = sum(vol)
+    if total <= 0:
+        return None
+    poc = max(range(PROFILE_BINS), key=lambda k: vol[k])
+    a = z = poc
+    acc = vol[poc]
+    while acc < VALUE_AREA * total and (a > 0 or z < PROFILE_BINS - 1):
+        below = vol[a - 1] if a > 0 else -1.0
+        above = vol[z + 1] if z < PROFILE_BINS - 1 else -1.0
+        if above >= below:
+            z += 1
+            acc += above
+        else:
+            a -= 1
+            acc += below
+    return lo + (poc + 0.5) * step, lo + a * step, lo + (z + 1) * step
+
+
+def open_va(d: Day) -> str | None:
+    """Ouverture de la séance face à la zone de valeur de la séance régulière précédente : « dessus », « dedans »,
+    « dessous », None si inconnu (actions seulement). Calculé une fois par Day."""
+    if d._open_va is not False:
+        return d._open_va
+    out = None
+    if d.market == "stock" and d.d0 and d.d1 > d.d0 and d.t[d.d0] == d.start_ts:
+        prev_day = datetime.fromtimestamp(d.t[d.d0 - 1], CO.NEW_YORK).date()
+        prev = [b for b in d.bars[:d.d0] if datetime.fromtimestamp(b["t"], CO.NEW_YORK).date() == prev_day]
+        prof = prior_profile(prev)
+        if prof:
+            o = d.o[d.d0]
+            out = "dessus" if o > prof[2] else "dessous" if o < prof[1] else "dedans"
+    d._open_va = out
+    return out
+
+
 def _row(d: Day, symbol: str, strategy: str, slot: int, plan: dict, decided_at: int, m: dict, wit: dict,
-         gap: float | None, rank) -> dict:
+         gap: float | None, rank, stop_structure: int | None = None) -> dict:
     entry, stop = plan["entry"], plan["stop"]
     ctx = kill_context(d) if d.market == "stock" else {}
     # v1 décide à 9 h 10, avant le volume des 15 premières minutes ; la n° 7 rejoue ses GO
@@ -964,7 +1102,8 @@ def _row(d: Day, symbol: str, strategy: str, slot: int, plan: dict, decided_at: 
             "entry": round(entry, 8), "stop": round(stop, 8), "risk_pct": round((entry - stop) / entry * 100, 4),
             **m, **wit, "gap_open_pct": gap, "rank": rank, "sur_vwap": above_vwap(d, decided_at),
             "atr_pct": _round(ctx.get("atr_pct")), "vol15_adv": _round(ctx.get("vol15_adv")) if v2 else None,
-            "stop_avant_entree": stop_before_entry(d, plan, decided_at, m) if v2 else None}
+            "stop_avant_entree": stop_before_entry(d, plan, decided_at, m) if v2 else None,
+            "ouverture_va": open_va(d) if d.market == "stock" else None, "stop_structure": stop_structure}
 
 
 def _round(x: float | None) -> float | None:
@@ -987,6 +1126,9 @@ def strategy_rows(d: Day, symbol: str, rank=None, gap: float | None = None, name
         for cand in SIGNALS[spec.get("base", name)](sd):
             if cand["decided_at"] < busy_until:
                 continue  # un ordre précédent était encore posé
+            if spec.get("stop") == "structure":  # n° 11 : même signal, stop derrière le dernier creux fort
+                stop, applied = structure_stop(sd, cand)
+                cand = {**cand, "stop": stop, "stop_structure": applied}
             plan = _plan(cand["entry"], cand["stop"], _r_targets(cand["entry"], cand["stop"]))
             cost = SIM.costs(d.market, cand["entry"], rank)
             res = _sim(d, plan, cand["decided_at"], cand["entry_until"], d.exit_at(cand["decided_at"]), cost, "stop",
@@ -1007,7 +1149,7 @@ def strategy_rows(d: Day, symbol: str, rank=None, gap: float | None = None, name
         window = (d.first, bisect_left(d.t, cand["entry_until"]) if name == "killmode" else d.last)
         wit = witnesses(d, (d.market, symbol, d.day, name), risk_pct, list(TARGETS_R),
                         lambda p: SIM.costs(d.market, p, rank), m, window)
-        rows.append(_row(d, symbol, name, 0, plan, cand["decided_at"], m, wit, gap, rank))
+        rows.append(_row(d, symbol, name, 0, plan, cand["decided_at"], m, wit, gap, rank, cand.get("stop_structure")))
     return rows
 
 
