@@ -360,7 +360,11 @@ def test_regle_de_lecture(gross):
     done = K.reading(book([1.0, -1.0, 0.2] * 33 + [1.0]), None)
     assert "JARVIS ne voit pas d'avantage démontré" in done[0] and "100 premiers KILL" in done[0]
     assert "seul un écart d'au moins ≈" in done[0]
-    win = K.reading(book([1.2, 0.8, 1.1] * 33 + [1.0]), None)
+    win = K.reading(book([1.2, 0.8, 1.1] * 33 + [1.0]), None)  # 25 jours de septembre : 4 à 5 semaines
+    assert "pas une validation : sur" in win[0] and "seulement (il en faut au moins 8)" in win[0]
+    ten_weeks = [c | {"day": (datetime(2026, 7, 1) + timedelta(days=i % 70)).date().isoformat()}
+                 for i, c in enumerate(book([1.2, 0.8, 1.1] * 33 + [1.0]))]
+    win = K.reading(ten_weeks, None)
     assert "avantage démontré" in win[0] and "semaine par semaine" in win[0]
     one_week = [c | {"day": f"2026-09-0{1 + i % 4}"} for i, c in enumerate(book([1.2, 0.8, 1.1] * 33 + [1.0]))]
     assert "pas une validation : concentré sur 1 semaine" in K.reading(one_week, None)[0]

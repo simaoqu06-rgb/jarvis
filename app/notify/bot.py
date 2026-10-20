@@ -26,6 +26,8 @@ qu'aux comptes listés dans JARVIS_DISCORD_OWNER_ID et ignore tout le reste sans
   !lecons               carnet des leçons du labo (confirmées, à confirmer, démenties)
   !grade                grade de JARVIS (F- à S+), de quoi il est fait et le risque qu'il permet
   !strategies           labo v2 : stratégies à déclencheur contre v1 et leur témoin aléatoire
+  !frais                ta mise de 20 € chez IBKR : un bracket par objectif au plan Fixe contre le Dégressif et un ou
+                        deux brackets, sur les mêmes trades du labo, stratégie par stratégie (mesure, pas un essai)
   !autopsie             où les trades du labo échouent (élan contre le hasard, stops, gagnants qui frôlent le stop) ;
                         `!autopsie crypto` ou `!autopsie actions`
   !rates                chasse aux ratés : les actions à +10 % des 20 dernières séances que JARVIS n'a pas prises,
@@ -297,6 +299,16 @@ def rates_text() -> str:
         conn.close()
 
 
+def frais_text() -> str:
+    conn = lab_db.open_readonly()
+    if conn is None:
+        return "💶 Base du labo absente : le service jarvis-lab n'a pas encore démarré."
+    try:
+        return lab_strategies.costs_text(lab_strategies.cached(conn))
+    finally:
+        conn.close()
+
+
 def potentiel_text() -> str:
     conn = lab_db.open_readonly()
     if conn is None:
@@ -465,6 +477,8 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
             return await asyncio.to_thread(grade_text)
         if cmd in ("strategies", "stratégies", "strats"):
             return await asyncio.to_thread(strategies_text)
+        if cmd in ("frais", "mise"):
+            return await asyncio.to_thread(frais_text)
         if cmd == "autopsie":
             return await asyncio.to_thread(autopsie_text, args)
         if cmd in ("rates", "ratés"):

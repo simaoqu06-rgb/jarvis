@@ -338,8 +338,8 @@ réalité, d'où le journal des appels en direct pour juger le mode complet.
   - au 30e KILL déclenché, un audit : borne haute de l'IC 95 % sous zéro → « JARVIS recommande d'éteindre » ;
     sinon « pas d'alerte », jamais un verdict positif ;
   - au 100e, la lecture finale, toujours faite : avantage démontré seulement si la borne basse tient en grappes
-    par jour, par semaine et avec au moins 3 c de glissement par côté ; si l'alerte du 30e a été écartée, le pari se
-    mesure sur les KILL 31 à 100 ;
+    par jour, par semaine (sur au moins 8 semaines distinctes, décision de Simão du 20 octobre) et avec au moins
+    3 c de glissement par côté ; si l'alerte du 30e a été écartée, le pari se mesure sur les KILL 31 à 100 ;
   - une borne de dégât à chaque bilan dès 10 KILL : IC 99,9 % entièrement sous zéro → « JARVIS recommande
     d'éteindre » (environ 2 % de fausse alerte sur la vie du journal à espérance nulle, simulé) ;
   - IC en t à G − 1 degrés de liberté (G = séances) ; lots figés (les premiers KILL dans l'ordre des appels) ;
@@ -925,6 +925,11 @@ inchangé.**
 `r_20e_1s` et `r_20e_2s` reprennent les sorties de la simulation à trois objectifs : chaque bracket sort comme la
 part du milieu de sa tranche (`killmode._legs`). C'est le coût des ordres, pas une re-simulation avec un seul
 objectif.
+
+`!frais` (20/10/2026, demande de Simão) affiche ces trois colonnes stratégie par stratégie : l'espérance à 20 € de
+chaque variante et son écart apparié à `r_20e` sur les mêmes trades (`couts_20e` dans `/strategies`,
+`couts_20e_ecart_r` dans le brief). Mesure descriptive : elle ne consomme aucun essai et ne décide d'aucune
+« candidate ».
 
 ### Lecture du tableau
 

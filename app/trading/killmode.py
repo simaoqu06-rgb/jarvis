@@ -44,7 +44,8 @@ ordre, glissement d'au moins un demi-pas).
 Règle de lecture, écrite avant le premier appel et revue le 8 octobre avant tout KILL soldé (avis de GPT et
 Gemini, council) : au 30e KILL déclenché, un audit (borne haute de l'IC 95 % sous 0 → JARVIS recommande
 d'éteindre, sinon « pas d'alerte », jamais une validation) ; au 100e, la lecture finale (avantage démontré
-seulement si l'IC tient par jour, par semaine et avec au moins 3 c de glissement par côté, 1 % du prix sous 1 $) ;
+seulement si l'IC tient par jour, par semaine sur au moins 8 semaines et avec au moins 3 c de glissement par
+côté, 1 % du prix sous 1 $) ;
 une borne de dégât (IC 99,9 %) dès 10 KILL. Simão décide toujours. Le journal ne voit qu'une catastrophe ou un
 gros écart ; la valeur prédictive du filtre catalyseur à règle de prix égale (écart au témoin, pas l'effet causal
 d'une actu) se mesure au labo.
@@ -1561,7 +1562,8 @@ def reading(book: list[dict], lab: dict | None) -> list[str]:
       sinon « pas d'alerte », un audit et jamais une validation (un verdict positif à 30 portait le risque de
       faux positif de 2,5 % à 4,5 %) ;
     - au 100e, la lecture finale, toujours faite : borne haute sous 0 → éteindre ; borne basse au-dessus de 0
-      en grappes par jour, par semaine ET avec au moins 3 c de glissement par côté → avantage démontré ; positif
+      en grappes par jour, par semaine (sur au moins MIN_WEEKS semaines distinctes, décision de Simão du
+      20 octobre) ET avec au moins 3 c de glissement par côté → avantage démontré ; positif
       sans les trois → « pas une validation » ; sinon ce que l'intervalle n'exclut pas et le plus petit écart
       visible. Si l'alerte du 30e a été écartée, le pari se mesure sur les KILL 31 à 100, joués après l'alerte ;
     - la borne de dégât (IC 99,9 %) à chaque bilan dès HARM_MIN KILL déclenchés.
@@ -1581,12 +1583,15 @@ def reading(book: list[dict], lab: dict | None) -> list[str]:
             out += [x for x in (_fav_note(final),) if x]
         elif ci[0] > 0:
             weeks, stress = s100["ic95_semaines"], stats(final, "kill", "r_3c")["ic95"]
-            if weeks and weeks[0] > 0 and stress and stress[0] > 0:
+            enough = s100["semaines"] >= MIN_WEEKS
+            if weeks and weeks[0] > 0 and enough and stress and stress[0] > 0:
                 out.append(f"📈 **Lecture finale : espérance positive même en bas de l'intervalle** ({span}), qui "
                            f"tient semaine par semaine ({s100['semaines']} semaines) et avec au moins 3 c de "
                            "glissement par côté (1 % du prix sous 1 $) : avantage démontré.")
             else:
-                why = [f"concentré sur {_n(s100['semaines'], 'semaine')}" if not (weeks and weeks[0] > 0) else None,
+                why = [f"concentré sur {_n(s100['semaines'], 'semaine')}" if not (weeks and weeks[0] > 0)
+                       else f"sur {_n(s100['semaines'], 'semaine')} seulement (il en faut au moins {MIN_WEEKS})"
+                       if not enough else None,
                        "ne tient pas avec au moins 3 c de glissement par côté (1 % du prix sous 1 $)"
                        if not (stress and stress[0] > 0) else None]
                 out.append(f"Lecture finale positive ({span}) mais pas une validation : "
