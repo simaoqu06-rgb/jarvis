@@ -33,6 +33,7 @@ from app.lab import potentiel as lab_potentiel
 from app.lab import audit as lab_audit
 from app.lab import autopsie as lab_autopsie
 from app.lab import rates as lab_rates
+from app.lab import sec8k as lab_sec8k
 from app.lab import filtres as lab_filtres
 from app.lab import strat_stats as lab_strategies
 from app.lab import status as lab_status
@@ -795,6 +796,18 @@ def lab_rates_get():
     conn = _lab_conn()
     try:
         return lab_rates.cached(conn) or lab_rates.report(conn)
+    finally:
+        conn.close()
+
+
+@app.get("/api/lab/sec8k", dependencies=[Depends(lab_key)])
+def lab_sec8k_get():
+    """Mesure 8-K, sans essai : à volume des 15 premières minutes égal, ce qu'un 8-K accepté par la SEC avant 9 h 45 New
+    York change au R d'orb15 et orb30 (brut, à 20 €, témoin, MFE, MAE, stops, fausses cassures), l'effectif requis pour
+    voir +0,1 R, et le taux de base des +8/+10 % par gap et type de 8-K. Cache du worker, sinon calcul direct."""
+    conn = _lab_conn()
+    try:
+        return lab_sec8k.cached(conn) or lab_sec8k.report(conn)
     finally:
         conn.close()
 

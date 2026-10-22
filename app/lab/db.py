@@ -179,6 +179,17 @@ CREATE TABLE IF NOT EXISTS plus10_trades (
     r_manque REAL, r_3c REAL, r_20e REAL,
     PRIMARY KEY (day, symbol, essai)
 );
+-- Mesure 8-K (sec8k.py, 22 octobre 2026) : CIK de chaque action lue et ses dépôts 8-K et 6-K à la SEC, avec l'heure
+-- d'acceptation (app/sources/edgar.py). status : ok, sans_cik ou erreur ; covered_from : dépôts lus depuis ce jour.
+CREATE TABLE IF NOT EXISTS sec_symbols (
+    symbol TEXT PRIMARY KEY, cik INTEGER, status TEXT NOT NULL, covered_from TEXT, fetched_at TEXT,
+    fetched_ts INTEGER, attempts INTEGER NOT NULL DEFAULT 0, note TEXT
+);
+CREATE TABLE IF NOT EXISTS sec_filings (
+    accession TEXT PRIMARY KEY, cik INTEGER NOT NULL, form TEXT NOT NULL, items TEXT, accepted_ts INTEGER,
+    filing_date TEXT, suspect INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS sec_filings_cik ON sec_filings (cik, accepted_ts);
 -- Bloc scellé (seal.py) : mêmes tables, jamais lues par les statistiques, la routine ni le grade.
 {trades_sealed}
 {strat}
