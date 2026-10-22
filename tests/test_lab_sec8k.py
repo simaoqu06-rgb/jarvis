@@ -165,6 +165,15 @@ def test_rapport_groupes_et_exclusions(db):
     assert base["aucun"]["n"] == 1 and base["aucun"]["plus10_pct"] == 0.0
 
 
+def test_heures_new_york_et_valeurs_a_lire(db):
+    data = S.report(db.conn)
+    q = data["qualite"]
+    assert q["heures_ny"][7] == 2 and q["heures_ny"][11] == 1 and sum(q["heures_ny"]) == 3  # 6-K non comptés
+    assert q["heures_ny_meme_jour"][7] == 1 and sum(q["heures_ny_meme_jour"]) == 2  # a0 : déposé un autre jour
+    assert data["valeurs"]["a_lire"] == 1  # GGG : tradé, jamais lu
+    assert "7 h 2 · 11 h 1" in S.text(data) and "1 jamais lues" in S.text(data)
+
+
 def test_step_met_en_cache_puis_attend(db):
     assert S.step(db, NOW, 3600) == 3
     assert S.cached(db.conn)["qualite"]["8k"] == 3
