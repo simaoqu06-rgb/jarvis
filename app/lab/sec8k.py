@@ -29,10 +29,16 @@ Données : app/sources/edgar.py (heure d'acceptation SEC, codes d'item), collect
 « sec8k » du worker dans le budget sec_calls, seulement si SEC_USER_AGENT est défini. Une séance n'est lue que si
 les dépôts de la valeur sont couverts depuis au moins COVER_MARGIN_DAYS jours avant elle et jusqu'après son 9 h 45.
 
+Heure SEC (22 octobre 2026, voir edgar.py) : environ deux tiers des heures du JSON sont en retard de 4 h (5 h l'hiver),
+sans moyen de savoir lesquelles. Lue en UTC, l'heure n'avance jamais un dépôt. Un 8-K lu pendant la séance J
+(après 9 h 45) dont l'heure en retard tomberait avant 9 h 45 (lu vers 10 h-13 h 45, déposé peut-être à 6 h-9 h 45)
+rend la séance J ambiguë : elle est écartée des deux groupes (« heure_ambigue »), au lieu d'aller dans « aucun »
+alors qu'elle a peut-être un 8-K. Un 8-K lu après la clôture de J−1 mais peut-être déposé pendant la séance J−1
+reste dans la fenêtre de J : il était public avant l'ouverture, ce n'est pas de l'information future.
+
 Limites : tickers actuels seulement (une valeur radiée ou renommée n'a pas de CIK, elle est comptée « sans CIK ») ;
-un 8-K reprend souvent un communiqué déjà diffusé, il peut arriver après l'info ; l'heure SEC peut être décalée
-vers plus tard (voir edgar.py), ce qui fait manquer des dépôts, sans jamais en avancer un : les cas visibles sont
-comptés (« heures douteuses »).
+un 8-K reprend souvent un communiqué déjà diffusé, il peut arriver après l'info ; les retards certains de l'heure
+SEC sont comptés (« heures douteuses »).
 """
 import logging
 import math
@@ -319,15 +325,17 @@ def _symbols(conn: sqlite3.Connection) -> dict[str, tuple]:
     return {r[0]: r[1:] for r in conn.execute("SELECT symbol, cik, status, covered_from, fetched_ts FROM sec_symbols")}
 
 
-def _windows(conn: sqlite3.Connection) -> tuple[dict, set, dict]:
-    """Par CIK : séance → codes d'item des 8-K de sa fenêtre ; CIK sans aucun 8-K mais avec des 6-K ; qualité.
+def _windows(conn: sqlite3.Connection) -> tuple[dict, set, dict, dict]:
+    """Par CIK : séance → codes d'item des 8-K de sa fenêtre ; CIK sans aucun 8-K mais avec des 6-K ; qualité ; par CIK,
+    séances ambiguës (un 8-K lu hors fenêtre dont l'heure en retard tomberait dans leur fenêtre).
 
     La qualité compte aussi les 8-K par heure de New York (JSON lu en UTC), tous et ceux dont la date New York est la
     date de dépôt : sert à vérifier la lecture de l'heure SEC (un 8-K se dépose surtout vers 6-9 h et 16-17 h 30 ;
     un creux entre 6 h et 10 h trahirait un JSON en retard de 4 h)."""
     by_cik: dict[int, dict[str, set]] = defaultdict(lambda: defaultdict(set))
+    ambiguous: dict[int, set] = defaultdict(set)
     has_8k, has_6k = set(), set()
-    quality = {"8k": 0, "8k_fenetre": 0, "heures_douteuses": 0, "sans_heure": 0,
+    quality = {"8k": 0, "8k_fenetre": 0, "8k_heure_ambigue": 0, "heures_douteuses": 0, "sans_heure": 0,
                "heures_ny": [0] * 24, "heures_ny_meme_jour": [0] * 24}
     for cik, form, items, ts, filing_date, suspect in conn.execute(
             "SELECT cik, form, items, accepted_ts, filing_date, suspect FROM sec_filings"):
@@ -350,11 +358,18 @@ def _windows(conn: sqlite3.Connection) -> tuple[dict, set, dict]:
         if day:
             quality["8k_fenetre"] += 1
             by_cik[cik][day].update(edgar.items(items) or ["?"])
-    return by_cik, has_6k - has_8k, quality
+            continue
+        alt = edgar.shifted_back(ts)
+        alt_day = window_day(alt) if alt else None
+        if alt_day:
+            quality["8k_heure_ambigue"] += 1
+            ambiguous[cik].add(alt_day)
+    return by_cik, has_6k - has_8k, quality, ambiguous
 
 
-def classify(symbol: str, day: str, syms: dict, windows: dict, foreign: set) -> str:
-    """Groupe de la séance, ou la raison de l'écarter (« sans_donnee », « sans_cik », « etranger », « non_couvert »)."""
+def classify(symbol: str, day: str, syms: dict, windows: dict, foreign: set, ambiguous: dict | None = None) -> str:
+    """Groupe de la séance, ou la raison de l'écarter (« sans_donnee », « sans_cik », « etranger », « non_couvert »,
+    « heure_ambigue »)."""
     row = syms.get(symbol)
     if row is None:
         return "sans_donnee"
@@ -368,14 +383,16 @@ def classify(symbol: str, day: str, syms: dict, windows: dict, foreign: set) -> 
     need = (date.fromisoformat(day) - timedelta(days=COVER_MARGIN_DAYS)).isoformat()
     if not covered or covered > need or (fetched or 0) < _cutoff(day):
         return "non_couvert"
+    if ambiguous and day in ambiguous.get(cik, ()):
+        return "heure_ambigue"
     items = windows.get(cik, {}).get(day)
     return group(items) if items else "aucun"
 
 
-EXCLUSIONS = ("sans_donnee", "sans_cik", "etranger", "non_couvert")
+EXCLUSIONS = ("sans_donnee", "sans_cik", "etranger", "non_couvert", "heure_ambigue")
 
 
-def _tradable(conn, syms, windows, foreign) -> dict:
+def _tradable(conn, syms, windows, foreign, ambiguous) -> dict:
     cells: dict = {s: defaultdict(lambda: defaultdict(Cell)) for s in STRATEGIES}
     excluded: dict = {s: defaultdict(int) for s in STRATEGIES}
     gross_all: dict = {s: [] for s in STRATEGIES}
@@ -384,7 +401,7 @@ def _tradable(conn, syms, windows, foreign) -> dict:
         f"FROM strat_trades WHERE market = 'stock' AND strategy IN ({','.join('?' * len(STRATEGIES))}) "
         "AND triggered = 1 AND r_gross IS NOT NULL", STRATEGIES)
     for strategy, day, symbol, gross, r20, wit, mfe, mae, exit_reason, vol in rows:
-        g = classify(symbol, day, syms, windows, foreign)
+        g = classify(symbol, day, syms, windows, foreign, ambiguous)
         if g in EXCLUSIONS:
             excluded[strategy][g] += 1
             continue
@@ -424,7 +441,7 @@ def _tradable(conn, syms, windows, foreign) -> dict:
     return out
 
 
-def _base_rate(conn, syms, windows, foreign) -> dict:
+def _base_rate(conn, syms, windows, foreign, ambiguous) -> dict:
     clause, params = _sealed_sql()
     cells: dict = defaultdict(lambda: defaultdict(lambda: [0, 0, 0]))
     excluded: dict = defaultdict(int)
@@ -432,7 +449,7 @@ def _base_rate(conn, syms, windows, foreign) -> dict:
             f"SELECT day, symbol, up_pct, gap_pct FROM day_moves WHERE market = 'stock' AND {clause}", params):
         if up is None:
             continue
-        g = classify(symbol, day, syms, windows, foreign)
+        g = classify(symbol, day, syms, windows, foreign, ambiguous)
         if g in EXCLUSIONS:
             excluded[g] += 1
             continue
@@ -450,21 +467,22 @@ def _base_rate(conn, syms, windows, foreign) -> dict:
 
 def report(conn: sqlite3.Connection) -> dict:
     syms = _symbols(conn)
-    windows, foreign, quality = _windows(conn)
+    windows, foreign, quality, ambiguous = _windows(conn)
     status = defaultdict(int)
     for _, st, _, _ in syms.values():
         status[st] += 1
     status["a_lire"] = len(set(wanted(conn)) - set(syms))
     return {"valeurs": dict(status), "qualite": quality, "fenetre": "clôture précédente → 9 h 45",
-            "groupes": GROUPS, "tradable": _tradable(conn, syms, windows, foreign),
-            "taux_de_base": _base_rate(conn, syms, windows, foreign),
+            "groupes": GROUPS, "tradable": _tradable(conn, syms, windows, foreign, ambiguous),
+            "taux_de_base": _base_rate(conn, syms, windows, foreign, ambiguous),
             "limites": ["Mesure sans essai : rien ici ne filtre ni ne change un plan.",
                         "Un écart ne devient une règle que par une déclaration (n° 12), jugée au seuil du labo et sur "
                         "le bloc scellé, après la n° 11 complète.",
                         "z approché, trades supposés indépendants (pas de grappes par jour).",
                         "Tickers actuels seulement (valeurs radiées ou renommées : « sans CIK »).",
-                        "Un 8-K reprend souvent un communiqué déjà diffusé ; l'heure SEC peut être décalée vers plus "
-                        "tard (heures douteuses comptées), jamais vers plus tôt.",
+                        "Un 8-K reprend souvent un communiqué déjà diffusé ; environ deux tiers des heures SEC sont en "
+                        "retard de 4-5 h (jamais en avance) : séances où ce retard changerait la fenêtre écartées "
+                        "(« heure_ambigue »).",
                         "Taux de base : journée entière depuis l'ouverture, 9 h 30-9 h 45 compris, pas tradable.",
                         "Bloc scellé exclu."]}
 
@@ -518,8 +536,9 @@ def text(data: dict | None) -> str:
     v, q = data["valeurs"], data["qualite"]
     lines = [f"📑 **Mesure 8-K** (sans essai) · fenêtre {data['fenetre']} New York",
              f"-# Valeurs : {v.get('ok', 0)} lues, {v.get('sans_cik', 0)} sans CIK, {v.get('erreur', 0)} en erreur, "
-             f"{_n(v.get('a_lire'))} jamais lues · {_n(q['8k'])} 8-K, dont {_n(q['8k_fenetre'])} dans une fenêtre · "
-             f"heures douteuses {_n(q['heures_douteuses'])}"]
+             f"{_n(v.get('a_lire'))} jamais lues · {_n(q['8k'])} 8-K, dont {_n(q['8k_fenetre'])} dans une fenêtre et "
+             f"{_n(q.get('8k_heure_ambigue'))} à heure ambiguë (séance écartée) · heures douteuses "
+             f"{_n(q['heures_douteuses'])}"]
     if not q["8k"]:
         lines.append("Pas encore de 8-K collecté.")
         return "\n".join(lines)
