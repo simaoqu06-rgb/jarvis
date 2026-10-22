@@ -10,8 +10,8 @@ class SourceError(Exception):
     """Une source n'a pas pu fournir de donnée exploitable."""
 
 
-async def get_json(url: str, params: dict | None = None, headers: dict | None = None) -> Any:
-    base_headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+async def _get(url: str, params: dict | None, headers: dict | None, accept: str) -> httpx.Response:
+    base_headers = {"User-Agent": USER_AGENT, "Accept": accept}
     if headers:
         base_headers.update(headers)
     try:
@@ -25,10 +25,20 @@ async def get_json(url: str, params: dict | None = None, headers: dict | None = 
         raise SourceError(f"erreur réseau ({type(exc).__name__})") from exc
     if response.status_code != 200:
         raise SourceError(f"HTTP {response.status_code}")
+    return response
+
+
+async def get_json(url: str, params: dict | None = None, headers: dict | None = None) -> Any:
+    response = await _get(url, params, headers, "application/json")
     try:
         return response.json()
     except ValueError as exc:
         raise SourceError("réponse qui n'est pas du JSON") from exc
+
+
+async def get_text(url: str, params: dict | None = None, headers: dict | None = None) -> str:
+    """Page brute (HTML) : mêmes délai, en-têtes et erreurs que get_json."""
+    return (await _get(url, params, headers, "text/html")).text
 
 
 def to_float(value: Any) -> float | None:

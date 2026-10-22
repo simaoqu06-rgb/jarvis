@@ -190,6 +190,12 @@ CREATE TABLE IF NOT EXISTS sec_filings (
     filing_date TEXT, suspect INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS sec_filings_cik ON sec_filings (cik, accepted_ts);
+-- Heure exacte d'un 8-K (« Accepted » de sa page d'index, sec8k.py) : kind = ambigu, controle_retard ou
+-- controle_juste ; status ok, illisible ou erreur.
+CREATE TABLE IF NOT EXISTS sec_exact (
+    accession TEXT PRIMARY KEY, kind TEXT NOT NULL, accepted_ts INTEGER, status TEXT NOT NULL, fetched_ts INTEGER,
+    attempts INTEGER NOT NULL DEFAULT 0
+);
 -- Bloc scellé (seal.py) : mêmes tables, jamais lues par les statistiques, la routine ni le grade.
 {trades_sealed}
 {strat}

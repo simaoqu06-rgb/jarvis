@@ -35,6 +35,10 @@ sans moyen de savoir lesquelles. Lue en UTC, l'heure n'avance jamais un dépôt.
 rend la séance J ambiguë : elle est écartée des deux groupes (« heure_ambigue »), au lieu d'aller dans « aucun »
 alors qu'elle a peut-être un 8-K. Un 8-K lu après la clôture de J−1 mais peut-être déposé pendant la séance J−1
 reste dans la fenêtre de J : il était public avant l'ouverture, ce n'est pas de l'information future.
+Heure exacte : la collecte lit « Accepted » sur la page d'index de chaque 8-K ambigu (au moins un quart du budget
+SEC), et d'abord sur CALIBRATION_N 8-K de contrôle de chaque sorte : retards certains et heures justes certaines.
+Elle ne sert que si ces contrôles confirment l'heure attendue (CALIBRATION_MIN), et seulement quand elle tombe sur
+l'une des deux heures possibles (à MATCH_S près) : la séance quitte alors les écartées, dans son groupe.
 
 Limites : tickers actuels seulement (une valeur radiée ou renommée n'a pas de CIK, elle est comptée « sans CIK ») ;
 un 8-K reprend souvent un communiqué déjà diffusé, il peut arriver après l'info ; les retards certains de l'heure
@@ -43,8 +47,8 @@ SEC sont comptés (« heures douteuses »).
 import logging
 import math
 import sqlite3
-from collections import defaultdict
-from datetime import date, datetime, timedelta
+from collections import Counter, defaultdict
+from datetime import date, datetime, time, timedelta
 from statistics import median, pstdev
 
 from app.config import secret
@@ -76,6 +80,10 @@ TICKERS_MAX_AGE_DAYS = 7
 REFRESH_DAYS = 7          # une valeur déjà lue est relue au plus une fois par semaine (≈ 6 000 valeurs dans l'univers)
 ATTEMPTS = 3
 SEC_LIMIT = SRC.RateLimiter(4, 1.0)
+EXACT_SHARE = 4           # au moins un quart du budget SEC pour les heures exactes des 8-K ambigus
+CALIBRATION_N = 20        # 8-K de contrôle par sorte (retard certain, heure juste certaine)
+CALIBRATION_MIN = 0.95    # part des contrôles confirmés exigée avant d'utiliser une heure exacte
+MATCH_S = 120             # écart toléré entre l'heure exacte et l'une des deux heures possibles
 
 
 # --- Fonctions pures ------------------------------------------------------------------------
@@ -259,9 +267,57 @@ def _mark(db: LabDB, symbol: str, cik, status: str, covered: str | None, now: da
         (symbol, cik, status, covered, now.isoformat(timespec="seconds"), int(now.timestamp()), attempts, note))
 
 
+def _exact_queue(conn: sqlite3.Connection) -> list[tuple[str, int, str]]:
+    """8-K dont l'heure exacte reste à lire, en (numéro, CIK, sorte) : d'abord les contrôles qui manquent (retards
+    certains, heures justes certaines), puis les 8-K ambigus des séances que la mesure lit, les plus récents d'abord.
+    Rien si le contrôle est complet et raté."""
+    want = wanted(conn)
+    ranges: dict[int, tuple[str, str]] = {}
+    for symbol, cik in conn.execute("SELECT symbol, cik FROM sec_symbols WHERE status = 'ok'"):
+        if symbol in want:
+            lo, hi = want[symbol]
+            a, b = ranges.get(cik, (lo, hi))
+            ranges[cik] = (min(a, lo), max(b, hi))
+    if not ranges:
+        return []
+    done = {r[0]: r[1:] for r in conn.execute("SELECT accession, kind, status, attempts FROM sec_exact")}
+    have = Counter(kind for kind, status, _ in done.values() if status != "erreur")
+    if min(have["controle_retard"], have["controle_juste"]) >= CALIBRATION_N and not _exact(conn)[1]["fiable"]:
+        return []  # contrôle complet et raté : la page d'index ne sert pas, inutile de lire les ambigus
+    controls = {"controle_retard": [], "controle_juste": []}
+    todo = []
+    seal_lo, seal_hi = SEAL.bounds()
+    since = min(lo for lo, _ in ranges.values())
+    since_ts = int(datetime.combine(date.fromisoformat(since), time(0), edgar.NEW_YORK).timestamp()) - 86400
+    for acc, cik, ts, suspect in conn.execute(
+            "SELECT accession, cik, accepted_ts, suspect FROM sec_filings WHERE form = '8-K' AND accepted_ts >= ? "
+            "ORDER BY accepted_ts DESC", (since_ts,)):
+        prev = done.get(acc)
+        if cik not in ranges or (prev and (prev[1] != "erreur" or prev[2] >= ATTEMPTS)):
+            continue
+        at = datetime.fromtimestamp(ts, edgar.NEW_YORK).time()
+        alt = edgar.shifted_back(ts)
+        if suspect or not edgar.EDGAR_OPEN <= at < edgar.EDGAR_CLOSE:
+            if alt is None:  # ni l'heure lue ni l'heure en retard quand EDGAR est ouvert : cas à part, pas un contrôle
+                continue
+            kind = "controle_retard"
+        elif alt is None:
+            kind = "controle_juste"
+        else:
+            day = None if window_day(ts) else window_day(alt)
+            lo, hi = ranges[cik]
+            if day and lo <= day <= hi and not seal_lo <= day <= seal_hi:
+                todo.append((acc, cik, "ambigu"))
+            continue
+        if len(controls[kind]) < CALIBRATION_N - have[kind]:
+            controls[kind].append((acc, cik, kind))
+    return controls["controle_retard"] + controls["controle_juste"] + todo
+
+
 async def fetch(db: LabDB, now: datetime, budget: int) -> dict:
-    """Étape « sec8k » du worker : CIK et dépôts des valeurs dues, `budget` appels SEC au plus."""
-    report = {"appels": 0, "valeurs": 0, "sans_cik": 0, "erreurs": 0}
+    """Étape « sec8k » du worker : CIK et dépôts des valeurs dues, puis heures exactes des 8-K ambigus (au moins un
+    quart du budget), `budget` appels SEC au plus."""
+    report = {"appels": 0, "valeurs": 0, "sans_cik": 0, "erreurs": 0, "heures_exactes": 0}
     if budget <= 0:
         return report
     if not secret(edgar.KEY_NAME):
@@ -280,7 +336,7 @@ async def fetch(db: LabDB, now: datetime, budget: int) -> dict:
         db.set("sec", "tickers_ts", tickers_ts)
     want = wanted(db.conn)
     for symbol in due(db, want, tickers_ts, now):
-        if report["appels"] >= budget:
+        if report["appels"] >= budget - budget // EXACT_SHARE:
             break
         lo = date.fromisoformat(want[symbol][0]) - timedelta(days=COVER_MARGIN_DAYS)
         cik = tickers.get(edgar.ticker(symbol))
@@ -316,6 +372,25 @@ async def fetch(db: LabDB, now: datetime, budget: int) -> dict:
             _mark(db, symbol, cik, "ok", covered, now)
         report["valeurs"] += 1
         heartbeat.beat()
+    for acc, cik, kind in (_exact_queue(db.conn) if report["appels"] < budget else []):
+        if report["appels"] >= budget:
+            break
+        report["appels"] += 1
+        prev = db.conn.execute("SELECT attempts FROM sec_exact WHERE accession = ?", (acc,)).fetchone()
+        try:
+            exact = await _call(edgar.accepted_exact, cik, acc)
+            status, attempts = ("ok" if exact else "illisible"), 0
+        except SourceError as exc:
+            exact, status, attempts = None, "erreur", (prev[0] if prev else 0) + 1
+            log.info("Labo : page d'index SEC de %s indisponible (%s)", acc, exc)
+        with db.transaction():
+            db.conn.execute(
+                "INSERT INTO sec_exact (accession, kind, accepted_ts, status, fetched_ts, attempts) "
+                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (accession) DO UPDATE SET kind = excluded.kind, "
+                "accepted_ts = excluded.accepted_ts, status = excluded.status, fetched_ts = excluded.fetched_ts, "
+                "attempts = excluded.attempts", (acc, kind, exact, status, int(now.timestamp()), attempts))
+        report["heures_exactes"] += 1
+        heartbeat.beat()
     return report
 
 
@@ -325,9 +400,37 @@ def _symbols(conn: sqlite3.Connection) -> dict[str, tuple]:
     return {r[0]: r[1:] for r in conn.execute("SELECT symbol, cik, status, covered_from, fetched_ts FROM sec_symbols")}
 
 
+def _late(ts: int) -> int:
+    """Heure d'acceptation si le JSON est en retard, sans condition d'ouverture d'EDGAR (contrôles)."""
+    return ts + int(datetime.fromtimestamp(ts, edgar.NEW_YORK).utcoffset().total_seconds())
+
+
+def _exact(conn: sqlite3.Connection) -> tuple[dict, dict]:
+    """Heures exactes des 8-K ambigus ({numéro: epoch}) et leur contrôle. Sur des 8-K dont l'heure juste est connue
+    (retard certain, heure juste certaine), part où la page d'index donne l'heure attendue : les heures exactes ne
+    servent que si chaque contrôle a au moins CALIBRATION_N // 2 dépôts et CALIBRATION_MIN de confirmés."""
+    exact, check, status = {}, {"controle_retard": [0, 0], "controle_juste": [0, 0]}, Counter()
+    for acc, kind, true, st, ts in conn.execute(
+            "SELECT e.accession, e.kind, e.accepted_ts, e.status, f.accepted_ts FROM sec_exact e "
+            "JOIN sec_filings f ON f.accession = e.accession"):
+        status[st] += 1
+        if st != "ok" or true is None or ts is None:
+            continue
+        if kind in check:
+            check[kind][0] += 1
+            check[kind][1] += abs(true - (_late(ts) if kind == "controle_retard" else ts)) <= MATCH_S
+        else:
+            exact[acc] = true
+    reliable = all(n >= CALIBRATION_N // 2 and ok >= CALIBRATION_MIN * n for n, ok in check.values())
+    info = {"controles": {k: {"n": n, "confirmes": ok} for k, (n, ok) in check.items()}, "fiable": reliable,
+            "lues": status["ok"], "illisibles": status["illisible"], "erreurs": status["erreur"],
+            "avant_ouverture": 0, "pendant_seance": 0, "incoherentes": 0}
+    return (exact if reliable else {}), info
+
+
 def _windows(conn: sqlite3.Connection) -> tuple[dict, set, dict, dict]:
     """Par CIK : séance → codes d'item des 8-K de sa fenêtre ; CIK sans aucun 8-K mais avec des 6-K ; qualité ; par CIK,
-    séances ambiguës (un 8-K lu hors fenêtre dont l'heure en retard tomberait dans leur fenêtre).
+    séances ambiguës (un 8-K lu hors fenêtre dont l'heure en retard tomberait dans leur fenêtre, sans heure exacte).
 
     La qualité compte aussi les 8-K par heure de New York (JSON lu en UTC), tous et ceux dont la date New York est la
     date de dépôt : sert à vérifier la lecture de l'heure SEC (un 8-K se dépose surtout vers 6-9 h et 16-17 h 30 ;
@@ -337,8 +440,10 @@ def _windows(conn: sqlite3.Connection) -> tuple[dict, set, dict, dict]:
     has_8k, has_6k = set(), set()
     quality = {"8k": 0, "8k_fenetre": 0, "8k_heure_ambigue": 0, "heures_douteuses": 0, "sans_heure": 0,
                "heures_ny": [0] * 24, "heures_ny_meme_jour": [0] * 24}
-    for cik, form, items, ts, filing_date, suspect in conn.execute(
-            "SELECT cik, form, items, accepted_ts, filing_date, suspect FROM sec_filings"):
+    exact, quality["heure_exacte"] = _exact(conn)
+    hx = quality["heure_exacte"]
+    for acc, cik, form, items, ts, filing_date, suspect in conn.execute(
+            "SELECT accession, cik, form, items, accepted_ts, filing_date, suspect FROM sec_filings"):
         if form == "6-K":
             has_6k.add(cik)
             continue
@@ -361,7 +466,17 @@ def _windows(conn: sqlite3.Connection) -> tuple[dict, set, dict, dict]:
             continue
         alt = edgar.shifted_back(ts)
         alt_day = window_day(alt) if alt else None
-        if alt_day:
+        if not alt_day:
+            continue
+        true = exact.get(acc)
+        if true is not None and abs(true - alt) <= MATCH_S:
+            hx["avant_ouverture"] += 1
+            quality["8k_fenetre"] += 1
+            by_cik[cik][alt_day].update(edgar.items(items) or ["?"])
+        elif true is not None and abs(true - ts) <= MATCH_S:
+            hx["pendant_seance"] += 1
+        else:
+            hx["incoherentes"] += true is not None
             quality["8k_heure_ambigue"] += 1
             ambiguous[cik].add(alt_day)
     return by_cik, has_6k - has_8k, quality, ambiguous
@@ -482,16 +597,17 @@ def report(conn: sqlite3.Connection) -> dict:
                         "Tickers actuels seulement (valeurs radiées ou renommées : « sans CIK »).",
                         "Un 8-K reprend souvent un communiqué déjà diffusé ; environ deux tiers des heures SEC sont en "
                         "retard de 4-5 h (jamais en avance) : séances où ce retard changerait la fenêtre écartées "
-                        "(« heure_ambigue »).",
+                        "(« heure_ambigue »), sauf heure exacte lue sur la page EDGAR et contrôlée.",
                         "Taux de base : journée entière depuis l'ouverture, 9 h 30-9 h 45 compris, pas tradable.",
                         "Bloc scellé exclu."]}
 
 
 def signature(conn: sqlite3.Connection) -> list:
     filings = conn.execute("SELECT COUNT(*) FROM sec_filings").fetchone()
+    exact = conn.execute("SELECT COUNT(*), COALESCE(MAX(fetched_ts), 0) FROM sec_exact").fetchone()
     syms = conn.execute("SELECT COUNT(*), COALESCE(MAX(fetched_ts), 0) FROM sec_symbols").fetchone()
     moves = conn.execute("SELECT COUNT(*), COALESCE(MAX(day), '') FROM day_moves WHERE market = 'stock'").fetchone()
-    return [*filings, *syms, *moves, *E.sig(conn, "strat")]
+    return [*filings, *syms, *moves, *exact, *E.sig(conn, "strat")]
 
 
 def cached(conn: sqlite3.Connection) -> dict | None:
@@ -546,6 +662,14 @@ def text(data: dict | None) -> str:
     if hours:
         lines.append("-# 8-K par heure New York (JSON lu en UTC) : "
                      + " · ".join(f"{h} h {_n(c)}" for h, c in enumerate(hours) if c))
+    hx = q.get("heure_exacte")
+    if hx and hx["lues"] + hx["illisibles"] + hx["erreurs"]:
+        c = hx["controles"]
+        lines.append(f"-# Heure exacte (page EDGAR) : contrôles confirmés {c['controle_retard']['confirmes']}/"
+                     f"{c['controle_retard']['n']} retards, {c['controle_juste']['confirmes']}/"
+                     f"{c['controle_juste']['n']} heures justes ({'utilisée' if hx['fiable'] else 'pas encore utilisée'})"
+                     f" · ambigus résolus : {_n(hx['avant_ouverture'])} avant l'ouverture, "
+                     f"{_n(hx['pendant_seance'])} pendant la séance · {_n(hx['illisibles'])} pages illisibles")
     for s, t in data["tradable"].items():
         eq = t["a_volume_egal"]
         rb = eq["r_brut"]

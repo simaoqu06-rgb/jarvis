@@ -1267,6 +1267,18 @@ ferait entrer de l'information future dans la mesure : c'est exclu. Règle reten
   public avant l'ouverture, ce n'est pas de l'information future.
 Le nombre de 8-K à heure ambiguë est affiché dans `!8k`, et les séances écartées dans `exclus`.
 
+**Heure exacte (22 octobre 2026, déclarée avant toute lecture d'un écart)** : après déploiement, 575 trades `orb15`
+sont écartés pour une heure ambiguë, contre 1 423 avec un 8-K, soit environ 29 % des séances qui ont peut-être un
+8-K. La collecte lit donc « Accepted » (heure de New York) sur la page d'index EDGAR de chaque 8-K ambigu des séances
+mesurées, avec au moins un quart du budget `sec_calls`. Garde-fous :
+- **contrôle d'abord** : 20 8-K en retard certain (lus après 17 h 30 le jour de leur dépôt, ou quand EDGAR est fermé)
+  et 20 à heure juste certaine (l'heure en retard tomberait quand EDGAR est fermé) sont lus en premier. Les heures
+  exactes ne servent que si chaque contrôle a au moins 10 dépôts lus et 95 % de dépôts qui donnent l'heure attendue ;
+- **cohérence** : une heure exacte n'est retenue que si elle tombe, à 2 min près, sur l'une des deux heures
+  possibles (lue ou en retard). Sinon, la séance reste écartée et le cas est compté comme « incohérent » ;
+- une séance résolue « avant l'ouverture » rejoint le groupe de son 8-K ; une séance résolue « pendant la séance »
+  rejoint « aucun » (ou le groupe d'un autre 8-K de sa fenêtre).
+
 ## Bloc scellé
 
 Le rejeu du **6 avril au 5 octobre 2026** est calculé mais rangé à part (`trades_sealed`,
