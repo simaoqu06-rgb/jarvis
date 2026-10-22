@@ -52,6 +52,10 @@ Toutes les ~10 min :
    !labo ; le Labo 2, le rattrapage et le grade continuent. Un calcul en échec est retenté à chaque passage.
 18. « recalcul » (recalcul_v1) : séances du direct calculées avant une rupture de comportement (empreinte.V1_RECALCULS,
    la séance d'actions du 06/10/2026), recalculées une fois avec le code actuel en tête de passage, avant le grade.
+19. Mesure 8-K, sans essai (sec8k.py, 22 octobre 2026) : « sec8k_collecte », CIK et dépôts SEC des actions lues par la
+   mesure, hors séance US, dans le budget sec_calls, seulement si SEC_USER_AGENT est défini ; « sec8k », à volume des
+   15 premières minutes égal, ce qu'un 8-K d'avant 9 h 45 change au R d'orb15 et orb30, recalculé quand les dépôts, les
+   mouvements ou les trades du labo v2 changent, au plus toutes les stats_age secondes.
 Le battement (lab.heartbeat) porte l'étape en cours, affichée par /api/lab/status et !labo.
 Le rejeu couvre JARVIS_LAB_REPLAY_DAYS séances (504 ≈ 2 ans) avant le premier lancement du worker ;
 le direct prend le relais à partir de ce jour-là. JARVIS_LAB_ENABLED=off met le worker en veille.
@@ -85,6 +89,7 @@ from app.lab import rates as RATES
 from app.lab import rattrapage as RAT
 from app.lab import regime as REG
 from app.lab import runner as R
+from app.lab import sec8k as SEC8K
 from app.lab import stats as STATS
 from app.lab import strat_stats as SS
 from app.lab import strategies as ST
@@ -108,17 +113,17 @@ RATTRAPAGE_SECONDS = {"nuit": 600, "jour": 120, "seance": 0}
 MAX_LIVE_DAYS_PER_TICK = 5
 KEY_WARNING_SECONDS = 3600
 # Labo 2 : jours de mouvements calculés, appels Finnhub, règles validées et âge maximal des
-# statistiques en cache (secondes), par période.
+# statistiques en cache (secondes), par période ; sec_calls : appels SEC de la mesure 8-K.
 LAB2_BUDGET = {
     "nuit": {"moves_days": 30, "news_calls": 40, "rules": 3, "stats_age": 3600, "derivs_calls": 300,
              "coverage_days": 60, "archive_seconds": 1200, "archive_days": 40, "kill_complet_seconds": 600,
-             "plus10_seconds": 600},
+             "plus10_seconds": 600, "sec_calls": 600},
     "jour": {"moves_days": 5, "news_calls": 10, "rules": 1, "stats_age": 3 * 3600, "derivs_calls": 100,
              "coverage_days": 10, "archive_seconds": 600, "archive_days": 10, "kill_complet_seconds": 120,
-             "plus10_seconds": 120},
+             "plus10_seconds": 120, "sec_calls": 150},
     "seance": {"moves_days": 2, "news_calls": 0, "rules": 0, "stats_age": 6 * 3600, "derivs_calls": 30,
                "coverage_days": 2, "archive_seconds": 0, "archive_days": 2, "kill_complet_seconds": 0,
-               "plus10_seconds": 0},
+               "plus10_seconds": 0, "sec_calls": 0},
 }
 _key_warned_at: float | None = None
 
@@ -648,6 +653,7 @@ async def lab2(db: LabDB, now: datetime, collect: bool = True, hold: bool = Fals
         await step("derives", lambda: DER.collect(db, now, budget["derivs_calls"]))
     if collect and not CO.CAL.session_open(now):
         await step("actus", lambda: CAT.fetch_news(db, now, budget["news_calls"]))
+        await step("sec8k_collecte", lambda: SEC8K.fetch(db, now, budget["sec_calls"]))
     await step("file_regles", lambda: V.ingest_queue(db))
     await step("regles", lambda: len(V.process_pending(db, budget["rules"])))
     await step("methode", lambda: M.step(db, now))
@@ -657,6 +663,7 @@ async def lab2(db: LabDB, now: datetime, collect: bool = True, hold: bool = Fals
     await step("audit", lambda: AUD.refresh(db, now, budget["stats_age"]))  # 2e tour d'avis (C2) : jamais lu pour décider
     await step("autopsie", lambda: AUT.step(db, now, budget["stats_age"]))
     await step("rates", lambda: RATES.step(db, now, budget["stats_age"]))
+    await step("sec8k", lambda: SEC8K.step(db, now, budget["stats_age"]))
     if not CO.CAL.session_open(now):  # un journalier relu par action : pas pendant la séance US
         await step("filtres", lambda: FIL.step(db, now, budget["stats_age"]))
     summary_day = SUM.due(now, db.get("summary", "last_day"))

@@ -1222,6 +1222,31 @@ seulement, une seule sortie chacun. **Critique** : un stop plus large garde le m
 et les sorties à la clôture ; le profil reconstruit depuis des bougies de 5 min est approximatif (pas de ticks). Écrits
 en limites. GO, choix de Simão.
 
+## Mesure 8-K (22 octobre 2026) : sans essai, avant toute déclaration n° 12
+
+Fil « Skills de trading pour JARVIS » : du pack « Trader Skill », une seule idée retenue, lire les 8-K de la SEC
+(code d'item, heure d'acceptation) pour juger le catalyseur. Plan arrêté avec Gemini au deuxième tour
+(/mnt/project-files/trading/debat-gemini-8k-2026-10-22.md). **Aucun essai** : rien ne filtre, rien ne change un plan,
+le compte des essais (157) et le seuil ne bougent pas. Code : `app/sources/edgar.py`, `app/lab/sec8k.py`.
+
+Figé ici, avant le premier chiffre :
+- **Fenêtre** d'un 8-K pour la séance J : accepté par la SEC entre la clôture de la séance précédente et 9 h 45 New York
+  (fermeture du range de 15 min). 8-K seulement (pas les 8-K/A) ; émetteurs qui ne déposent que des 6-K écartés.
+- **Groupes**, par priorité : résultats (2.02), contrat (1.01), communiqué (7.01 ou 8.01), autre 8-K, aucun.
+- **Lecture tradable** : trades déclenchés d'`orb15` et `orb30`, par tranche de `vol15_adv` (bornes de la n° 6 : < 0,25,
+  0,25-0,5, 0,5-1, ≥ 1) et par groupe : R brut, R à 20 €, témoin à la même heure (mouvement restant sans signal), MFE et
+  MAE médians, part au stop, fausses cassures (stop sans +1 R). Écart « avec 8-K − sans » **à volume égal** (moyenne des
+  écarts par tranche, poids n₁n₀/(n₁+n₀)) sur le R brut, le témoin, le MAE et la part au stop, avec un z approché.
+- **Effectif requis** affiché à côté : trades par groupe pour voir +0,1 R à z 1,96 et au seuil du labo (z 3,42),
+  puissance 80 %, sur l'écart type observé (≈ 2 260 et ≈ 5 200 à 1,2 R).
+- **Taux de base** : toutes les séances de `day_moves` (bloc scellé exclu) par tranche de gap et par groupe, part qui
+  touche +8 % et +10 % depuis l'ouverture (journée entière, pas tradable).
+- **Suite** : un écart net à volume égal, avec un effectif suffisant, peut devenir une déclaration n° 12 (après la n° 11
+  complète), jugée au seuil du labo et sur le bloc scellé. Sinon, la piste est abandonnée.
+
+Limites : tickers actuels seulement ; un 8-K suit souvent un communiqué déjà diffusé ; l'heure SEC du JSON peut être
+décalée vers plus tard (jamais plus tôt), les cas visibles sont comptés. Lecture : `!8k`, `GET /api/lab/sec8k`.
+
 ## Bloc scellé
 
 Le rejeu du **6 avril au 5 octobre 2026** est calculé mais rangé à part (`trades_sealed`,
