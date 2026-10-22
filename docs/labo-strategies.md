@@ -1252,6 +1252,21 @@ Contrôle de l'heure SEC (22 octobre 2026, après le premier déploiement : 9 80
 dépôt. Un creux entre 6 h et 10 h avec un pic vers 10-11 h et 20-21 h voudrait dire un JSON en retard de 4 h (5 h en
 hiver) ; la correction serait alors déclarée ici avant toute lecture des écarts. Ce contrôle ne lit aucun écart.
 
+**Résultat et règle (22 octobre 2026, déclarée avant toute lecture d'un écart « avec − sans »)** : sur 66 194 8-K,
+les heures forment deux populations. Une partie est juste (pics à 6-9 h et 16 h New York), l'autre est en retard
+du décalage de New York, 4 h l'été et 5 h l'hiver (pics à 10-13 h et 20-21 h ; 890 8-K lus entre 0 h et 3 h le jour
+même de leur dépôt, alors qu'EDGAR est fermé de 22 h à 6 h ; aucun entre 3 h et 6 h, donc aucune heure en avance).
+Environ deux tiers sont en retard, quel que soit le mois (de 1996 à 2026), la saison ou l'agent de dépôt : rien dans
+le JSON ne dit lequel est juste. Reculer toutes les heures de 4 h ferait passer le tiers juste 4 h trop tôt, ce qui
+ferait entrer de l'information future dans la mesure : c'est exclu. Règle retenue :
+- l'heure reste lue en UTC : elle ne peut que retarder un dépôt ;
+- un 8-K lu pendant la séance J, après 9 h 45, dont l'heure en retard (4 ou 5 h plus tôt, EDGAR ouvert) tomberait
+  avant 9 h 45, rend la séance J **ambiguë** : elle est écartée des deux groupes (`heure_ambigue`), au lieu d'aller
+  dans « aucun » alors qu'elle a peut-être un 8-K d'avant l'ouverture ;
+- un 8-K lu après la clôture de J−1 mais peut-être déposé pendant cette séance reste dans la fenêtre de J : il était
+  public avant l'ouverture, ce n'est pas de l'information future.
+Le nombre de 8-K à heure ambiguë est affiché dans `!8k`, et les séances écartées dans `exclus`.
+
 ## Bloc scellé
 
 Le rejeu du **6 avril au 5 octobre 2026** est calculé mais rangé à part (`trades_sealed`,

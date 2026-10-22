@@ -14,11 +14,16 @@ Sources :
 - https://data.sec.gov/submissions/CIK##########.json : les dépôts de la société (« recent » : au moins un an ou
   1 000 dépôts) et, au-delà, des pages d'archive (« files ») lues par `page()`.
 
-Heure d'acceptation (acceptanceDateTime, suffixée « Z ») : lue telle quelle, en UTC. Sur deux exemples réels
-recoupés avec le flux Atom de la SEC (22 octobre 2026), un 8-K du matin (06:58 New York) concorde et deux 8-K de
-16 h 30 New York sont 4 h plus tard dans le JSON. Un tel décalage ne peut que retarder un dépôt, jamais l'avancer :
-il fait manquer des dépôts d'avant l'ouverture, il ne crée pas d'information future. `suspicious()` repère les cas
-visibles (heure New York après 17 h 30 alors que la date de dépôt est ce même jour) et la mesure les compte.
+Heure d'acceptation (acceptanceDateTime, suffixée « Z ») : lue telle quelle, en UTC. Elle est juste pour une partie
+des dépôts seulement : pour les autres, le JSON est EN RETARD du décalage de New York (4 h l'été, 5 h l'hiver).
+Mesuré le 22 octobre 2026 sur 66 194 8-K du serveur : pics à 16 h New York (heure juste) ET à 20-21 h (les mêmes
+dépôts d'après la clôture, en retard) ; 890 8-K lus entre 0 h et 3 h le jour même de leur date de dépôt, alors
+qu'EDGAR est fermé de 22 h à 6 h ; pas un 8-K lu entre 3 h et 6 h (aucun dépôt en avance). Environ deux tiers en
+retard, sans lien avec le mois (1996-2026), la saison ni l'agent de dépôt : rien dans le JSON ne dit lequel est juste.
+Conséquence : lue en UTC, l'heure ne peut que retarder un dépôt, jamais l'avancer (pas d'information future) ;
+`shifted_back()` donne l'autre heure possible, celle d'un JSON en retard, et la mesure écarte les séances où cette
+autre heure changerait la fenêtre (voir sec8k.py). `suspicious()` repère les retards certains (heure New York après
+17 h 30 alors que la date de dépôt est ce même jour) et la mesure les compte.
 """
 import unicodedata
 from datetime import date, datetime, time, timezone
@@ -33,6 +38,7 @@ SUBMISSIONS = "https://data.sec.gov/submissions"
 FORMS = ("8-K", "8-K/A", "6-K")
 NEW_YORK = ZoneInfo("America/New_York")
 CUTOFF_FILING_DAY = time(17, 30)  # après 17 h 30 New York, un 8-K prend la date du jour ouvré suivant
+EDGAR_OPEN, EDGAR_CLOSE = time(6, 0), time(22, 0)  # heures d'acceptation d'EDGAR (New York, jours ouvrés)
 
 
 def user_agent() -> str:
@@ -87,6 +93,15 @@ def suspicious(ts: int | None, filing_date: str | None) -> bool:
         return False
     ny = datetime.fromtimestamp(ts, NEW_YORK)
     return ny.time() > CUTOFF_FILING_DAY and ny.date().isoformat() == filing_date
+
+
+def shifted_back(ts: int | None) -> int | None:
+    """Heure d'acceptation si le JSON est en retard du décalage de New York (4 h l'été, 5 h l'hiver) : `ts` moins ce
+    décalage. None si cette heure tombe quand EDGAR est fermé (alors `ts` est forcément juste)."""
+    if ts is None:
+        return None
+    alt = ts + int(datetime.fromtimestamp(ts, NEW_YORK).utcoffset().total_seconds())
+    return alt if EDGAR_OPEN <= datetime.fromtimestamp(alt, NEW_YORK).time() < EDGAR_CLOSE else None
 
 
 def items(value) -> list[str]:

@@ -43,6 +43,14 @@ def test_heure_douteuse_apres_17h30_le_jour_meme():
     assert not edgar.suspicious(None, "2026-07-30")
 
 
+def test_autre_heure_si_le_json_est_en_retard():
+    assert edgar.shifted_back(ny(2026, 10, 19, 11, 0)) == ny(2026, 10, 19, 7, 0)  # été : 4 h
+    assert edgar.shifted_back(ny(2026, 1, 12, 12, 0)) == ny(2026, 1, 12, 7, 0)    # hiver : 5 h
+    assert edgar.shifted_back(ny(2026, 10, 19, 9, 0)) is None   # 5 h : EDGAR fermé, l'heure lue est juste
+    assert edgar.shifted_back(ny(2026, 10, 20, 1, 0)) == ny(2026, 10, 19, 21, 0)
+    assert edgar.shifted_back(None) is None
+
+
 def test_tickers_et_pages():
     raw = {"0": {"cik_str": 320193, "ticker": "AAPL"}, "1": {"cik_str": 1067983, "ticker": "BRK-B"},
            "2": {"cik_str": 999, "ticker": "AAPL"}, "3": {"ticker": "XX"}}
@@ -135,16 +143,19 @@ def db():
     _sym(db, "DDD", 4)          # que des 6-K : émetteur étranger
     _sym(db, "EEE", 5, covered="2026-10-18")   # couvert trop tard
     _sym(db, "FFF", 6, fetched=ny(2026, 10, 19, 9, 0))  # lu avant le 9 h 45 de la séance
+    _sym(db, "HHH", 8)          # 8-K lu à 11 h : peut-être déposé à 7 h (JSON en retard), séance ambiguë
     _filing(db, "a1", 1, ny(2026, 10, 19, 7, 0))
-    _filing(db, "b1", 2, ny(2026, 10, 19, 11, 0), items="1.01")
+    _filing(db, "b1", 2, ny(2026, 10, 19, 15, 0), items="1.01")  # même en retard (11 h), pendant la séance
+    _filing(db, "h1", 8, ny(2026, 10, 19, 11, 0))
     _filing(db, "d1", 4, ny(2026, 10, 19, 7, 0), form="6-K", items="")
     for sym, gross, vol, ex, mfe in (("AAA", 2.0, 0.6, "tp2", 2.5), ("BBB", -1.0, 0.6, "stop", 0.4),
                                      ("CCC", 1.0, 0.6, "tp1", 1.2), ("DDD", 1.0, 0.6, "tp1", 1.2),
                                      ("EEE", 1.0, 0.6, "tp1", 1.2), ("FFF", 1.0, 0.6, "tp1", 1.2),
-                                     ("GGG", 1.0, 0.6, "tp1", 1.2)):
+                                     ("GGG", 1.0, 0.6, "tp1", 1.2), ("HHH", 1.0, 0.6, "tp1", 1.2)):
         _trade(db, sym, day, gross, vol, exit_reason=ex, mfe=mfe)
     _move(db, day, "AAA", 12.0, 3.0)
     _move(db, day, "BBB", 2.0, 3.0)
+    _move(db, day, "HHH", 15.0, 3.0)
     lo, _ = SEAL.bounds()
     _move(db, lo, "AAA", 50.0, 3.0)  # bloc scellé : jamais lu
     _filing(db, "a0", 1, int(datetime.fromisoformat(lo + "T07:00:00").replace(tzinfo=NY).timestamp()))
@@ -154,29 +165,32 @@ def db():
 def test_rapport_groupes_et_exclusions(db):
     data = S.report(db.conn)
     t = data["tradable"]["orb15"]
-    assert t["exclus"] == {"sans_cik": 1, "etranger": 1, "non_couvert": 2, "sans_donnee": 1}
+    assert t["exclus"] == {"sans_cik": 1, "etranger": 1, "non_couvert": 2, "sans_donnee": 1, "heure_ambigue": 1}
     cell = t["tranches"]["vol15 0,5-1"]
     assert cell["resultats"]["n"] == 1 and cell["resultats"]["r_brut"] == 2.0 and cell["resultats"]["r_20e"] == 1.8
     assert cell["aucun"]["n"] == 1 and cell["aucun"]["part_stop"] == 1.0 and cell["aucun"]["part_fausse_cassure"] == 1.0
     assert t["par_groupe"]["contrat"]["n"] == 0  # le 1.01 de BBB est pendant la séance
-    assert data["qualite"]["8k"] == 3 and data["qualite"]["8k_fenetre"] == 2
+    assert data["qualite"]["8k"] == 4 and data["qualite"]["8k_fenetre"] == 2 and data["qualite"]["8k_heure_ambigue"] == 1
     base = data["taux_de_base"]["par_gap"]["gap +2 à +5 %"]
     assert base["resultats"] == {"n": 1, "zone_pct": 100.0, "plus10_pct": 100.0}  # la séance scellée n'est pas lue
-    assert base["aucun"]["n"] == 1 and base["aucun"]["plus10_pct"] == 0.0
+    assert base["aucun"]["n"] == 1 and base["aucun"]["plus10_pct"] == 0.0  # HHH (+15 %) écarté, pas dans « aucun »
+    assert data["taux_de_base"]["exclus"]["heure_ambigue"] == 1
 
 
 def test_heures_new_york_et_valeurs_a_lire(db):
     data = S.report(db.conn)
     q = data["qualite"]
-    assert q["heures_ny"][7] == 2 and q["heures_ny"][11] == 1 and sum(q["heures_ny"]) == 3  # 6-K non comptés
-    assert q["heures_ny_meme_jour"][7] == 1 and sum(q["heures_ny_meme_jour"]) == 2  # a0 : déposé un autre jour
+    assert q["heures_ny"][7] == 2 and q["heures_ny"][11] == 1 and q["heures_ny"][15] == 1  # 6-K non comptés
+    assert sum(q["heures_ny"]) == 4
+    assert q["heures_ny_meme_jour"][7] == 1 and sum(q["heures_ny_meme_jour"]) == 3  # a0 : déposé un autre jour
     assert data["valeurs"]["a_lire"] == 1  # GGG : tradé, jamais lu
-    assert "7 h 2 · 11 h 1" in S.text(data) and "1 jamais lues" in S.text(data)
+    txt = S.text(data)
+    assert "7 h 2 · 11 h 1 · 15 h 1" in txt and "1 jamais lues" in txt and "1 à heure ambiguë" in txt
 
 
 def test_step_met_en_cache_puis_attend(db):
-    assert S.step(db, NOW, 3600) == 3
-    assert S.cached(db.conn)["qualite"]["8k"] == 3
+    assert S.step(db, NOW, 3600) == 4
+    assert S.cached(db.conn)["qualite"]["8k"] == 4
     assert S.step(db, NOW, 3600) is None
 
 
