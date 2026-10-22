@@ -320,12 +320,17 @@ def _symbols(conn: sqlite3.Connection) -> dict[str, tuple]:
 
 
 def _windows(conn: sqlite3.Connection) -> tuple[dict, set, dict]:
-    """Par CIK : séance → codes d'item des 8-K de sa fenêtre ; CIK sans aucun 8-K mais avec des 6-K ; qualité."""
+    """Par CIK : séance → codes d'item des 8-K de sa fenêtre ; CIK sans aucun 8-K mais avec des 6-K ; qualité.
+
+    La qualité compte aussi les 8-K par heure de New York (JSON lu en UTC), tous et ceux dont la date New York est la
+    date de dépôt : sert à vérifier la lecture de l'heure SEC (un 8-K se dépose surtout vers 6-9 h et 16-17 h 30 ;
+    un creux entre 6 h et 10 h trahirait un JSON en retard de 4 h)."""
     by_cik: dict[int, dict[str, set]] = defaultdict(lambda: defaultdict(set))
     has_8k, has_6k = set(), set()
-    quality = {"8k": 0, "8k_fenetre": 0, "heures_douteuses": 0, "sans_heure": 0}
-    for cik, form, items, ts, suspect in conn.execute(
-            "SELECT cik, form, items, accepted_ts, suspect FROM sec_filings"):
+    quality = {"8k": 0, "8k_fenetre": 0, "heures_douteuses": 0, "sans_heure": 0,
+               "heures_ny": [0] * 24, "heures_ny_meme_jour": [0] * 24}
+    for cik, form, items, ts, filing_date, suspect in conn.execute(
+            "SELECT cik, form, items, accepted_ts, filing_date, suspect FROM sec_filings"):
         if form == "6-K":
             has_6k.add(cik)
             continue
@@ -337,6 +342,10 @@ def _windows(conn: sqlite3.Connection) -> tuple[dict, set, dict]:
         if ts is None:
             quality["sans_heure"] += 1
             continue
+        at = datetime.fromtimestamp(ts, edgar.NEW_YORK)
+        quality["heures_ny"][at.hour] += 1
+        if at.date().isoformat() == filing_date:
+            quality["heures_ny_meme_jour"][at.hour] += 1
         day = window_day(ts)
         if day:
             quality["8k_fenetre"] += 1
@@ -445,6 +454,7 @@ def report(conn: sqlite3.Connection) -> dict:
     status = defaultdict(int)
     for _, st, _, _ in syms.values():
         status[st] += 1
+    status["a_lire"] = len(set(wanted(conn)) - set(syms))
     return {"valeurs": dict(status), "qualite": quality, "fenetre": "clôture précédente → 9 h 45",
             "groupes": GROUPS, "tradable": _tradable(conn, syms, windows, foreign),
             "taux_de_base": _base_rate(conn, syms, windows, foreign),
@@ -507,12 +517,16 @@ def text(data: dict | None) -> str:
                 "déploiement ; la collecte SEC demande SEC_USER_AGENT dans .env).")
     v, q = data["valeurs"], data["qualite"]
     lines = [f"📑 **Mesure 8-K** (sans essai) · fenêtre {data['fenetre']} New York",
-             f"-# Valeurs : {v.get('ok', 0)} lues, {v.get('sans_cik', 0)} sans CIK, {v.get('erreur', 0)} en erreur · "
-             f"{_n(q['8k'])} 8-K, dont {_n(q['8k_fenetre'])} dans une fenêtre · heures douteuses "
-             f"{_n(q['heures_douteuses'])}"]
+             f"-# Valeurs : {v.get('ok', 0)} lues, {v.get('sans_cik', 0)} sans CIK, {v.get('erreur', 0)} en erreur, "
+             f"{_n(v.get('a_lire'))} jamais lues · {_n(q['8k'])} 8-K, dont {_n(q['8k_fenetre'])} dans une fenêtre · "
+             f"heures douteuses {_n(q['heures_douteuses'])}"]
     if not q["8k"]:
         lines.append("Pas encore de 8-K collecté.")
         return "\n".join(lines)
+    hours = q.get("heures_ny")
+    if hours:
+        lines.append("-# 8-K par heure New York (JSON lu en UTC) : "
+                     + " · ".join(f"{h} h {_n(c)}" for h, c in enumerate(hours) if c))
     for s, t in data["tradable"].items():
         eq = t["a_volume_egal"]
         rb = eq["r_brut"]

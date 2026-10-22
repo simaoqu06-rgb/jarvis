@@ -1247,6 +1247,11 @@ Figé ici, avant le premier chiffre :
 Limites : tickers actuels seulement ; un 8-K suit souvent un communiqué déjà diffusé ; l'heure SEC du JSON peut être
 décalée vers plus tard (jamais plus tôt), les cas visibles sont comptés. Lecture : `!8k`, `GET /api/lab/sec8k`.
 
+Contrôle de l'heure SEC (22 octobre 2026, après le premier déploiement : 9 808 « heures douteuses » sur 22 664 8-K,
+43 %) : la qualité affiche les 8-K par heure de New York (JSON lu en UTC), tous et ceux du même jour que la date de
+dépôt. Un creux entre 6 h et 10 h avec un pic vers 10-11 h et 20-21 h voudrait dire un JSON en retard de 4 h (5 h en
+hiver) ; la correction serait alors déclarée ici avant toute lecture des écarts. Ce contrôle ne lit aucun écart.
+
 ## Bloc scellé
 
 Le rejeu du **6 avril au 5 octobre 2026** est calculé mais rangé à part (`trades_sealed`,
