@@ -51,6 +51,15 @@ def test_autre_heure_si_le_json_est_en_retard():
     assert edgar.shifted_back(None) is None
 
 
+def test_page_index_heure_exacte():
+    assert edgar.index_url(320193, "0000320193-25-000071") == \
+        "https://www.sec.gov/Archives/edgar/data/320193/000032019325000071/0000320193-25-000071-index.htm"
+    html = ('<div class="infoHead">Filing Date</div><div class="info">2025-07-31</div>\n'
+            '<div class="infoHead">Accepted</div>\n<div class="info">2025-07-31 16:30:45</div>')
+    assert edgar.parse_accepted(html) == ny(2025, 7, 31, 16, 30) + 45
+    assert edgar.parse_accepted("<html>rien</html>") is None and edgar.parse_accepted(None) is None
+
+
 def test_tickers_et_pages():
     raw = {"0": {"cik_str": 320193, "ticker": "AAPL"}, "1": {"cik_str": 1067983, "ticker": "BRK-B"},
            "2": {"cik_str": 999, "ticker": "AAPL"}, "3": {"ticker": "XX"}}
@@ -225,7 +234,12 @@ def fake_sec(monkeypatch):
         return [{"accession": "o1", "form": "8-K", "items": ["8.01"], "accepted_ts": ny(2025, 3, 3, 7, 0),
                  "filing_date": "2025-03-03", "suspect": False}]
 
+    async def accepted_exact(cik, accession):
+        calls.append(f"exact:{accession}")
+        return EXACT.get(accession)
+
     monkeypatch.setattr(S, "SEC_LIMIT", None)
+    monkeypatch.setattr(edgar, "accepted_exact", accepted_exact)
     monkeypatch.setattr(edgar, "tickers", tickers)
     monkeypatch.setattr(edgar, "submissions", submissions)
     monkeypatch.setattr(edgar, "page", page)
@@ -239,8 +253,9 @@ async def test_collecte(fake_sec):
         _move(db, "2026-01-05", sym, 1.0, 0.0)
         _move(db, "2026-10-19", sym, 1.0, 0.0)
     rep = await S.fetch(db, NOW, 50)
-    assert rep == {"appels": 4, "valeurs": 1, "sans_cik": 1, "erreurs": 1}
-    assert fake_sec == ["tickers", "sub:1", "page:old.json", "sub:2"]
+    assert rep == {"appels": 5, "valeurs": 1, "sans_cik": 1, "erreurs": 1, "heures_exactes": 1}
+    # r1 (7 h New York) : heure juste certaine, lue comme contrôle ; o1 est d'avant la première séance mesurée.
+    assert fake_sec == ["tickers", "sub:1", "page:old.json", "sub:2", "exact:r1"]
     row = db.conn.execute("SELECT cik, status, covered_from FROM sec_symbols WHERE symbol = 'AAA'").fetchone()
     assert row == (1, "ok", "2025-12-29")  # toutes les pages lues : couvert depuis la marge de 7 jours
     assert db.conn.execute("SELECT COUNT(*) FROM sec_filings").fetchone()[0] == 2
@@ -257,6 +272,96 @@ async def test_collecte(fake_sec):
     fake_sec.clear()
     await S.fetch(db, NOW.replace(day=30), 50)
     assert "sub:1" in fake_sec
+
+
+EXACT: dict[str, int] = {}
+
+
+async def test_heures_exactes_controles_puis_ambigus(fake_sec):
+    db = LabDB(":memory:")
+    _move(db, "2026-10-19", "AAA", 1.0, 0.0)
+    _move(db, "2026-10-20", "AAA", 1.0, 0.0)
+    _sym(db, "AAA", 1)
+    _filing(db, "amb", 1, ny(2026, 10, 19, 11, 0))         # 11 h : peut-être 7 h
+    _filing(db, "ret", 1, ny(2026, 10, 19, 20, 30))        # 20 h 30 le jour du dépôt : retard certain
+    _filing(db, "jus", 1, ny(2026, 10, 19, 8, 0))          # 8 h : heure juste certaine
+    _filing(db, "seance", 1, ny(2026, 10, 19, 15, 0))      # 15 h : pendant la séance de toute façon
+    _filing(db, "nuit", 1, ny(2026, 10, 20, 4, 0))         # 4 h : ni 4 h ni minuit possibles, pas un contrôle
+    db.conn.execute("UPDATE sec_filings SET suspect = 1 WHERE accession = 'ret'")
+    EXACT.update({"amb": ny(2026, 10, 19, 7, 0), "ret": ny(2026, 10, 19, 16, 30), "jus": ny(2026, 10, 19, 8, 0)})
+    fake_sec.clear()
+    rep = await S.fetch(db, NOW, 8)
+    assert fake_sec == ["tickers", "exact:ret", "exact:jus", "exact:amb"] and rep["heures_exactes"] == 3
+    rows = dict(db.conn.execute("SELECT accession, kind FROM sec_exact"))
+    assert rows == {"ret": "controle_retard", "jus": "controle_juste", "amb": "ambigu"}
+    fake_sec.clear()
+    assert (await S.fetch(db, NOW, 8))["heures_exactes"] == 0 and fake_sec == []
+    # Contrôle complet et raté (pages illisibles) : plus aucun ambigu n'est lu.
+    db.conn.execute("DELETE FROM sec_exact WHERE accession = 'amb'")
+    for i in range(S.CALIBRATION_N):
+        for kind in ("controle_retard", "controle_juste"):
+            db.conn.execute("INSERT INTO sec_exact (accession, kind, status) VALUES (?, ?, 'illisible')",
+                            (f"{kind}{i}", kind))
+    assert S._exact_queue(db.conn) == []
+    # Un quart du budget au moins reste aux heures exactes.
+    assert S.EXACT_SHARE == 4
+
+
+def _controls(db, n_late, n_right, bad=0):
+    for i in range(n_late):
+        acc, ts = f"cr{i}", ny(2026, 9, 1 + i, 20, 30)
+        db.conn.execute("DELETE FROM sec_filings WHERE accession = ?", (acc,))
+        _filing(db, acc, 99, ts)
+        true = ts - 4 * 3600 + (3600 if i < bad else 0)
+        db.conn.execute("INSERT INTO sec_exact (accession, kind, accepted_ts, status) VALUES (?, 'controle_retard', ?, "
+                        "'ok')", (acc, true))
+    for i in range(n_right):
+        acc, ts = f"cj{i}", ny(2026, 9, 1 + i, 7, 30)
+        db.conn.execute("DELETE FROM sec_filings WHERE accession = ?", (acc,))
+        _filing(db, acc, 99, ts)
+        db.conn.execute("INSERT INTO sec_exact (accession, kind, accepted_ts, status) VALUES (?, 'controle_juste', ?, "
+                        "'ok')", (acc, ts))
+
+
+def _exact_hhh(db, ts):
+    db.conn.execute("INSERT INTO sec_exact (accession, kind, accepted_ts, status) VALUES ('h1', 'ambigu', ?, 'ok')", (ts,))
+
+
+def test_heure_exacte_avant_ouverture_utilisee(db):
+    _controls(db, 10, 10)
+    _exact_hhh(db, ny(2026, 10, 19, 7, 0))
+    data = S.report(db.conn)
+    hx = data["qualite"]["heure_exacte"]
+    assert hx["fiable"] and hx["avant_ouverture"] == 1 and data["qualite"]["8k_heure_ambigue"] == 0
+    t = data["tradable"]["orb15"]
+    assert "heure_ambigue" not in t["exclus"] and t["par_groupe"]["resultats"]["n"] == 2  # AAA et HHH
+    assert "1 avant l'ouverture" in S.text(data)
+
+
+def test_heure_exacte_pendant_seance(db):
+    _controls(db, 10, 10)
+    _exact_hhh(db, ny(2026, 10, 19, 11, 0) + 30)
+    data = S.report(db.conn)
+    assert data["qualite"]["heure_exacte"]["pendant_seance"] == 1
+    assert data["tradable"]["orb15"]["par_groupe"]["aucun"]["n"] == 2  # BBB et HHH
+
+
+def test_heure_exacte_ignoree_sans_controle_ou_incoherente(db):
+    _controls(db, 9, 10)  # un contrôle de trop peu
+    _exact_hhh(db, ny(2026, 10, 19, 7, 0))
+    data = S.report(db.conn)
+    assert not data["qualite"]["heure_exacte"]["fiable"]
+    assert data["tradable"]["orb15"]["exclus"]["heure_ambigue"] == 1 and "pas encore utilisée" in S.text(data)
+    db.conn.execute("DELETE FROM sec_exact")
+    _controls(db, 10, 10, bad=1)  # 9 retards confirmés sur 10 : sous les 95 %
+    _exact_hhh(db, ny(2026, 10, 19, 7, 0))
+    assert not S.report(db.conn)["qualite"]["heure_exacte"]["fiable"]
+    db.conn.execute("DELETE FROM sec_exact")
+    _controls(db, 10, 10)
+    _exact_hhh(db, ny(2026, 10, 19, 8, 0))  # ni 11 h ni 7 h
+    data = S.report(db.conn)
+    assert data["qualite"]["heure_exacte"]["incoherentes"] == 1
+    assert data["tradable"]["orb15"]["exclus"]["heure_ambigue"] == 1
 
 
 async def test_collecte_sans_user_agent(monkeypatch):

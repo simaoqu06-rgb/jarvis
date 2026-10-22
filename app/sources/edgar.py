@@ -24,17 +24,24 @@ Conséquence : lue en UTC, l'heure ne peut que retarder un dépôt, jamais l'ava
 `shifted_back()` donne l'autre heure possible, celle d'un JSON en retard, et la mesure écarte les séances où cette
 autre heure changerait la fenêtre (voir sec8k.py). `suspicious()` repère les retards certains (heure New York après
 17 h 30 alors que la date de dépôt est ce même jour) et la mesure les compte.
+
+Heure exacte : la page d'index d'un dépôt (…/Archives/edgar/data/CIK/NUMERO/NUMERO-index.htm) affiche « Accepted »
+en heure de New York. `accepted_exact()` la lit, un appel par dépôt : réservé aux 8-K ambigus des séances mesurées.
+La mesure ne s'en sert qu'après un contrôle sur des dépôts dont l'heure juste est connue (sec8k.py).
 """
+import re
 import unicodedata
 from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
 
 from app.config import secret
-from app.core.http import SourceError, get_json
+from app.core.http import SourceError, get_json, get_text
 
 KEY_NAME = "SEC_USER_AGENT"
 TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SUBMISSIONS = "https://data.sec.gov/submissions"
+ARCHIVES = "https://www.sec.gov/Archives/edgar/data"
+ACCEPTED_RE = re.compile(r"Accepted\s*</div>\s*<div[^>]*>\s*(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
 FORMS = ("8-K", "8-K/A", "6-K")
 NEW_YORK = ZoneInfo("America/New_York")
 CUTOFF_FILING_DAY = time(17, 30)  # après 17 h 30 New York, un 8-K prend la date du jour ouvré suivant
@@ -51,6 +58,10 @@ def user_agent() -> str:
 
 async def _get(url: str):
     return await get_json(url, headers={"User-Agent": user_agent(), "Accept-Encoding": "gzip, deflate"})
+
+
+async def _get_page(url: str) -> str:
+    return await get_text(url, headers={"User-Agent": user_agent(), "Accept-Encoding": "gzip, deflate"})
 
 
 def ticker(symbol: str) -> str:
@@ -102,6 +113,23 @@ def shifted_back(ts: int | None) -> int | None:
         return None
     alt = ts + int(datetime.fromtimestamp(ts, NEW_YORK).utcoffset().total_seconds())
     return alt if EDGAR_OPEN <= datetime.fromtimestamp(alt, NEW_YORK).time() < EDGAR_CLOSE else None
+
+
+def index_url(cik: int, accession: str) -> str:
+    return f"{ARCHIVES}/{cik}/{accession.replace('-', '')}/{accession}-index.htm"
+
+
+def parse_accepted(html: str | None) -> int | None:
+    """« Accepted » de la page d'index d'un dépôt (heure de New York) → epoch (s). None si absent ou illisible."""
+    m = ACCEPTED_RE.search(html or "")
+    if not m:
+        return None
+    return int(datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").replace(tzinfo=NEW_YORK).timestamp())
+
+
+async def accepted_exact(cik: int, accession: str) -> int | None:
+    """Heure d'acceptation exacte d'un dépôt, lue sur sa page d'index (un appel)."""
+    return parse_accepted(await _get_page(index_url(cik, accession)))
 
 
 def items(value) -> list[str]:
