@@ -54,6 +54,13 @@ def test_tickers_et_pages():
     assert edgar.accepted_ts("pas une date") is None
 
 
+def test_user_agent_sans_accent(monkeypatch):
+    import httpx
+    monkeypatch.setenv(edgar.KEY_NAME, "João Test test@example.com")
+    assert edgar.user_agent() == "Joao Test test@example.com"
+    httpx.Request("GET", edgar.TICKERS_URL, headers={"User-Agent": edgar.user_agent()})  # ne lève plus
+
+
 def test_sans_user_agent_aucun_appel(monkeypatch):
     monkeypatch.delenv(edgar.KEY_NAME, raising=False)
     with pytest.raises(SourceError):

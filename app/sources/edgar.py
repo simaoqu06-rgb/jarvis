@@ -20,6 +20,7 @@ recoupés avec le flux Atom de la SEC (22 octobre 2026), un 8-K du matin (06:58 
 il fait manquer des dépôts d'avant l'ouverture, il ne crée pas d'information future. `suspicious()` repère les cas
 visibles (heure New York après 17 h 30 alors que la date de dépôt est ce même jour) et la mesure les compte.
 """
+import unicodedata
 from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
 
@@ -35,10 +36,11 @@ CUTOFF_FILING_DAY = time(17, 30)  # après 17 h 30 New York, un 8-K prend la dat
 
 
 def user_agent() -> str:
+    """SEC_USER_AGENT en ASCII : un en-tête HTTP refuse « Simão » (httpx lève UnicodeEncodeError), il part en « Simao »."""
     ua = secret(KEY_NAME)
     if not ua:
         raise SourceError(f"{KEY_NAME} absent (nom et e-mail exigés par la SEC)")
-    return ua
+    return unicodedata.normalize("NFKD", ua).encode("ascii", "ignore").decode()
 
 
 async def _get(url: str):
