@@ -855,10 +855,12 @@ async def lab_grade_avis(request: Request):
     l'accord de Simão ; un avis par marché et par soirée."""
     raw = await _lab_rule_body(request)
     try:
-        return await asyncio.to_thread(lab_grade.enqueue_avis, lab_db.db_path(), raw,
-                                       lab_brief.soiree(datetime.now(timezone.utc)))
+        out = await asyncio.to_thread(lab_grade.enqueue_avis, lab_db.db_path(), raw,
+                                      lab_brief.soiree(datetime.now(timezone.utc)))
     except lab_grade.AvisError as exc:
         raise HTTPException(422, str(exc))
+    scheduler.routine_seen("soir", out["soiree"])  # veille des routines (25/10/2026)
+    return out
 
 
 @app.get("/api/lab/brief", dependencies=[Depends(lab_key)])

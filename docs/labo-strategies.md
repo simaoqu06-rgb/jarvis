@@ -923,13 +923,22 @@ inchangé.**
 | `temoin_tirages` | le R de chaque tirage du témoin | la dispersion entre tirages |
 
 `r_20e_1s` et `r_20e_2s` reprennent les sorties de la simulation à trois objectifs : chaque bracket sort comme la
-part du milieu de sa tranche (`killmode._legs`). C'est le coût des ordres, pas une re-simulation avec un seul
-objectif.
+part du milieu de sa tranche (`killmode._legs`). Ce n'est pas une re-simulation avec un seul objectif, et l'écart
+mêle le coût des ordres et le changement de sortie (avocat du hasard, 23/10/2026).
 
 `!frais` (20/10/2026, demande de Simão) affiche ces trois colonnes stratégie par stratégie : l'espérance à 20 € de
 chaque variante et son écart apparié à `r_20e` sur les mêmes trades (`couts_20e` dans `/strategies`,
 `couts_20e_ecart_r` dans le brief). Mesure descriptive : elle ne consomme aucun essai et ne décide d'aucune
 « candidate ».
+
+**Un bracket au Dégressif** (25/10/2026, audits de GPT et Gemini, décision n° 1) : `couts_20e_degressif` dans
+`/strategies` (`un_bracket_degressif` dans le brief, ligne de `!frais`) compare un seul bracket sur TP2 et trois
+brackets, **tous deux au barème Dégressif** du compte, sur les mêmes trades. La variante est déduite de `r_20e_1s`
+(plan Fixe) en recomptant au Dégressif la commission de ses deux ordres (`strat_stats.one_bracket_degressif`), sans
+nouvelle colonne ni rattrapage. Règle fixée avant de lire le chiffre : JARVIS propose une seule sortie par défaut si
+l'écart vaut au moins +0,02 R par trade (`ONE_EXIT_MIN_R`) avec un IC au-dessus de 0 ; sinon les trois objectifs
+restent. Comme `r_20e_1s`, l'écart mêle le coût des ordres et une autre sortie (un bracket sur TP2 sort toute la
+position comme la part du milieu).
 
 ### Lecture du tableau
 

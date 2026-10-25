@@ -280,6 +280,9 @@ Tout tourne dans le worker, sans jeton d'IA ; rien ici ne change la méthode en 
 Le serveur n'écrit jamais dans `data/lab.db` : ce qu'il reçoit (règles, décisions, types de
 catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque passage.
 
+- **Veille des routines** (`app/lab/routines_watch.py`, 25/10/2026) : alerte Discord, une fois, si l'équipe du
+  soir n'a déposé aucun avis du council pour la soirée de la veille (vérifié à 9 h Paris, du mardi au samedi), ou
+  si la recherche avant l'ouverture n'a rendu aucun verdict sur le scan du jour (vérifié à 10 h 30 New York).
 - **Le soir (23 h)** : une routine Claude planifiée (hors de ce dépôt) lit `GET /api/lab/brief` (tout
   en un appel, < 20 Ko : résumé, statistiques, fiches à classer des 2 derniers jours, règles récentes,
   méthode en place et challenger), fait débattre ses analystes, puis envoie au plus **3 règles par
@@ -370,8 +373,9 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
     sans effet sur le grade (un taux de réussite se gonfle en rapprochant le TP1).
   - Risque proposé par plan (`!plan`, cockpit) : F, E, non noté 0 % (plan en observation), D 0,25 %,
     puis ¼ de Kelly (borne basse de l'espérance / variance des R, corrigé de la corrélation des
-    trades d'un même jour) plafonné à C 1 %, B 1,5 %, A 3 %, S 5 % (4 % en pratique). Plus un
-    budget : risque ouvert sur les trades pris ≤ 4 % (un trade pris compte ses euros sur le capital,
+    trades d'un même jour) plafonné à C 0,5 %, B 0,75 %, A 1 %, S 1,5 % (abaissé le 25/10/2026 après les
+    audits de GPT et Gemini ; avant : C 1 %, B 1,5 %, A 3 %, S 5 %). Plus un
+    budget : risque ouvert sur les trades pris ≤ 3 % (un trade pris compte ses euros sur le capital,
     1 % sans capital connu), arrêt de la journée à −3 R (nets de frais estimés). Grade illisible ou que le labo n'a pas
     revérifié depuis 6 h (`JARVIS_GRADE_MAX_AGE_H`) : 0 %.
   - Taille, une seule règle : risque = min(`JARVIS_CAPITAL` (€) × % proposé, `JARVIS_RISK_EUR` = 20 €),

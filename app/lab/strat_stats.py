@@ -119,6 +119,12 @@ WITH_COMMISSION = ("r_3c", "r_20e")  # colonnes qui comptent déjà la commissio
 # Demande de Simão (20/10/2026, fil « Bilan d'avancement de JARVIS ») : ce que coûte sa mise de 20 € selon le barème
 # et le nombre de brackets, en écart apparié à r_20e sur les mêmes trades. Descriptif : aucun essai, aucun verdict.
 COSTS_20E = (("r_20e_deg", "degressif"), ("r_20e_1s", "un_objectif_tp2"), ("r_20e_2s", "deux_objectifs_tp1_tp3"))
+# Audits de GPT et Gemini (25/10/2026, décision n° 1) : un seul bracket sur TP2 au barème Dégressif du compte, en
+# écart apparié à trois brackets au Dégressif (r_20e_deg) sur les mêmes trades. Déduit de r_20e_1s (plan Fixe) en
+# changeant la commission de ses deux ordres (`one_bracket_degressif`), sans nouvelle colonne ni rattrapage.
+# Descriptif : aucun essai. JARVIS propose une seule sortie si l'écart vaut au moins ONE_EXIT_MIN_R, IC au-dessus de 0.
+COSTS_20E_DEG = (("r_20e_1s_deg", "un_objectif_tp2"),)
+ONE_EXIT_MIN_R = 0.02
 # n° 10 : la politique que mesure le tableau, en une ligne (X1, point 4).
 POLICY = ("entrée au signal (ordre stop ou limite ; v1 limitée au dernier cours connu ; GO brut au marché à "
           "l'ouverture, GO confirmé par ordre stop au déclencheur jusqu'à 11 h 30 New York) · stop à l'entrée après "
@@ -277,6 +283,26 @@ class Mean:
 VA_BUCKETS = ("dessus", "dedans", "dessous", "inconnu")  # n° 11 : ouverture face à la valeur de la veille
 
 
+def one_bracket_degressif(entry: float | None, stop: float | None, r_fixe: float | None) -> float | None:
+    """r_20e_1s (un bracket sur TP2, plan Fixe) recompté au barème Dégressif : même sortie, même glissement, seule la
+    commission de ses deux ordres (achat et vente de toutes les actions) change. Les deux sont comptées au prix
+    d'entrée : le prix ne joue que par le plafond de 1 % de la valeur de l'ordre, atteint seulement quand la position
+    vaut moins de 100 $ (35 $ au Dégressif). Même change et même nombre d'actions que strategies.cost_variants."""
+    if r_fixe is None or entry is None or stop is None:
+        return None
+    from app.lab import simulator as SIM
+    from app.trading import killmode as K  # import tardif : killmode importe ce module
+
+    entry, stop = SIM.round_stock(entry), SIM.round_stock(stop)
+    risk = entry - stop
+    if risk <= 0:
+        return None
+    q = K.shares(risk, K.EURUSD_DEFAULT)
+    saved = 2 * (K.order_commission(q, entry, K.IBKR_PLANS["fixe"])
+                 - K.order_commission(q, entry, K.IBKR_PLANS["degressif"]))
+    return round(r_fixe + saved / (q * risk), 4)
+
+
 def _acc(market: str | None = None) -> dict:
     key = _week if market == "crypto" else None  # n° 10 (L5) : semaines ISO en crypto
 
@@ -289,7 +315,8 @@ def _acc(market: str | None = None) -> dict:
             "ecarts": defaultdict(mean), "vwap": defaultdict(mean), "robuste": defaultdict(mean),
             "tranches": defaultdict(lambda: defaultdict(mean)), "ecart_journee": mean(), "effet_heure": mean(),
             "tirages": defaultdict(lambda: [0.0, 0]), "sans_temoin": 0, "oi7": defaultdict(mean),
-            "va": defaultdict(mean), "structure": [0, 0], "couts20": defaultdict(mean)}
+            "va": defaultdict(mean), "structure": [0, 0], "couts20": defaultdict(mean),
+            "couts20deg": defaultdict(mean)}
 
 
 def _feed(a: dict, r: dict) -> None:
@@ -313,6 +340,11 @@ def _feed(a: dict, r: dict) -> None:
         for c, _ in COSTS_20E:  # un ou deux brackets : plans à trois objectifs seulement (None ailleurs)
             x = values.get(c)
             a["couts20"][c].add(day, x - base if x is not None and base is not None else None)
+        base = values.get("r_20e_deg")
+        for c, _ in COSTS_20E_DEG:  # 25/10/2026 : au barème Dégressif, contre trois brackets au Dégressif
+            x = values.get(c)
+            a["sorties"][c].add(day, x)
+            a["couts20deg"][c].add(day, x - base if x is not None and base is not None else None)
     a["frais"][r["frais"]].add(day, ref)
     for c in r["ecarts"]:
         a["ecarts"][c].add(day, r["ecarts"][c])
@@ -405,6 +437,8 @@ def _item(market: str, name: str, a: dict, trials: int) -> dict:
         "mise_20e": a["sorties"]["r_20e"].result() if market == "stock" else None,  # n° 8, D2
         "couts_20e": {key: {"variante": a["sorties"][c].result(), "ecart": a["couts20"][c].result()}
                       for c, key in COSTS_20E} if market == "stock" else None,  # 20/10/2026, descriptif
+        "couts_20e_degressif": {key: {"variante": a["sorties"][c].result(), "ecart": a["couts20deg"][c].result()}
+                                for c, key in COSTS_20E_DEG} if market == "stock" else None,  # 25/10/2026
         "robuste": {**rob, "moitie_1": halves[0], "moitie_2": halves[1], "tient": holds},
         "ordres_limites_retires": a["manques"],
         "temoin": {"esperance_r": a["temoin"].result()["esperance_r"], "ecart_r": ecart["esperance_r"],
@@ -479,6 +513,8 @@ def _strategies(conn: sqlite3.Connection) -> dict:
         (market, name, day, trig, tp1, wit, wit_trig, rank, entry, stop, symbol, signal_at, above, gap, atr_pct,
          vol15, stop_before, risk_pct, status) = row[:19]
         values = dict(zip(COLUMNS, row[19:19 + len(COLUMNS)]))
+        if market == "stock":  # 25/10/2026 : un bracket au Dégressif, déduit du même trade au Fixe
+            values["r_20e_1s_deg"] = one_bracket_degressif(entry, stop, values["r_20e_1s"])
         day_wit, day_wit_trig, draws, open_va, struct = row[19 + len(COLUMNS):-1]  # n° 10, n° 11
         refc = ST.ref_exit(name)
         oi7 = DER.oi7(derivs, symbol, signal_at) if market == "crypto" else None
@@ -1228,6 +1264,11 @@ def costs_text(rep: dict | None) -> str:
             if gap.get("n"):
                 parts.append(f"{label} {_r(own.get('esperance_r'))} R (écart {_r(gap['esperance_r'])}, t {_z(gap['z'])}"
                              + (f", {gap['n']} trades" if gap["n"] != m20["n"] else "") + ")")
+        deg = ((it.get("couts_20e_degressif") or {}).get("un_objectif_tp2") or {})
+        gap, own = deg.get("ecart") or {}, deg.get("variante") or {}
+        if gap.get("n"):
+            parts.append(f"un bracket (TP2) au Dégressif {_r(own.get('esperance_r'))} R (écart à trois brackets au "
+                         f"Dégressif {_r(gap['esperance_r'])}, t {_z(gap['z'])})")
         variants = variants or bool(parts)
         rows.append(f"{it['nom']} : trois brackets Fixe {_r(m20.get('esperance_r'))} R ({m20['n']} trades)"
                     + "".join(f" · {p}" for p in parts))
@@ -1236,8 +1277,10 @@ def costs_text(rep: dict | None) -> str:
     lines = ["💶 **Ta mise de 20 € chez IBKR** (mesure, pas un essai) · espérance nette par trade avec un bracket par "
              "objectif au plan Fixe, puis chaque variante et son écart sur les mêmes trades (+ = mieux) · le Dégressif "
              "ne change que le barème ; un ou deux brackets reprennent les sorties simulées (chaque bracket sort comme "
-             "la sortie qui couvre le milieu de sa tranche) : c'est le coût des ordres, pas une autre sortie, compté "
-             "sur les plans à trois objectifs seulement"]
+             "la sortie qui couvre le milieu de sa tranche), donc l'écart mêle le coût des ordres et une autre sortie, "
+             "compté sur les plans à trois objectifs seulement ; un bracket au Dégressif : la même sortie, commission "
+             f"recomptée au Dégressif (JARVIS propose une seule sortie si elle fait gagner au moins {_r(ONE_EXIT_MIN_R)} R "
+             "contre trois brackets au Dégressif, IC au-dessus de 0)"]
     part = ((rep or {}).get("partiel") or {}).get("stock")
     if part:
         lines.append(f"⏳ Tableau partiel : {part['jours_rattrapage']} jours en rattrapage (n° {part['declaration']} "
