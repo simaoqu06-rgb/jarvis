@@ -89,8 +89,9 @@ RISQUE_INCONNU = 1.0
 ARRET_JOUR_R = -3.0
 TROU_JOURS = 10        # écart calendaire entre deux jours de la fenêtre au-delà duquel elle est coupée
 # Version du calcul (2 : R des actions après commission IBKR à 20 €, Kelly corrigé ; 3 : après une promotion, seuls
-# les jours journalisés après elle comptent, sur les seuls marchés dont elle change les filtres ; barème IBKR du compte).
-GRADE_CALC = 3
+# les jours journalisés après elle comptent, sur les seuls marchés dont elle change les filtres ; barème IBKR du compte ;
+# 4 : brackets des plans, sortie unique sur TP2 par défaut depuis le 25/10/2026).
+GRADE_CALC = 4
 MAX_AGE_H = env_float("JARVIS_GRADE_MAX_AGE_H", 6.0)  # au-delà, le grade est périmé : risque 0 %
 MOTIFS_MAX, VOIX_MAX = 1500, 1000
 SOURCES_FR = {"calcul": "calcul", "council": "council du soir", "simao": "accord de Simão",
@@ -265,16 +266,29 @@ def ibkr_plan() -> str:
 
 
 def cost_r(market: str, r_net: float, result: str | None) -> float:
-    """R d'un trade pour le grade : actions, après commission IBKR à la mise de Simão (RISK_EUR, un bracket par
-    objectif, minimum par ordre : strategies.cost_variants), au barème du compte (r_20e au Fixe, r_20e_deg au
-    Dégressif : l'écart change de signe selon le nombre d'actions), r_net s'il manque le détail ; crypto : r_net
-    (frais OKX déjà comptés)."""
+    """R d'un trade pour le grade : actions, après commission IBKR à la mise de Simão (RISK_EUR, minimum par ordre),
+    au barème du compte, avec les brackets des plans (ibkr.single_target) : une sortie unique sur TP2 pour un plan
+    à trois objectifs (défaut depuis le 25/10/2026, la part du milieu du solde comme strategies.cost_variants
+    r_20e_1s), sinon un bracket par objectif (r_20e au Fixe, r_20e_deg au Dégressif : l'écart change de signe selon
+    le nombre d'actions) ; r_net s'il manque le détail ; crypto : r_net (frais OKX déjà comptés)."""
     if market != "stock" or not result:
         return r_net
     from app.lab import strategies as ST  # import tardif, comme strategies le fait pour killmode
+    from app.trading import ibkr as IB
+    from app.trading import killmode as K
 
     try:
-        r = ST.cost_variants("stock", json.loads(result))["r_20e_deg" if ibkr_plan() == "degressif" else "r_20e"]
+        res = json.loads(result)
+        tps = (res.get("order_prices") or {}).get("targets") or []
+        k = IB.single_target({"targets": tps})
+        if k is not None and res.get("triggered") and res.get("exits"):
+            o = res["order_prices"]
+            done = {"declenche": True, "remplissage": res["fill_price"], "eurusd": K.EURUSD_DEFAULT,
+                    "plan_ibkr": ibkr_plan(),
+                    "sorties": [{"part": e["part"], "prix": e["price"], "raison": e["reason"]} for e in res["exits"]]}
+            r = K.real_r({"entry": o["entry"], "stop": o["stop"], "targets": tps[k:k + 1]}, done)
+        else:
+            r = ST.cost_variants("stock", res)["r_20e_deg" if ibkr_plan() == "degressif" else "r_20e"]
     except (ValueError, KeyError, TypeError, ZeroDivisionError):
         return r_net
     return r_net if r is None else r
@@ -654,9 +668,11 @@ class Grader:
 def signature(db: LabDB) -> list:
     from app.lab import method as M
     from app.lab import empreinte as E  # I3 : trades réécrits sur place, code des stats
+    from app.trading import ibkr as IB
 
     row = db.conn.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM trades").fetchone()
-    return [row[0], row[1], M.champion(db.conn)["version"], GRADE_CALC, ibkr_plan(), *E.sig(db.conn, "trades")]
+    return [row[0], row[1], M.champion(db.conn)["version"], GRADE_CALC, ibkr_plan(),
+            "1 bracket" if IB.single_exit() else "3 brackets", *E.sig(db.conn, "trades")]
 
 
 def step(db: LabDB, now: datetime | None = None) -> dict:
@@ -783,7 +799,8 @@ def taken_pct(t: dict, capital: float | None = None) -> float:
 
 def open_risk(trades: list[dict]) -> float:
     """Risque encore en jeu sur les trades ouverts (% du capital) : risque pris (taken_pct) × part de la position
-    restante × part du stop encore sous l'entrée (0 une fois le stop remonté à l'entrée). Un trade mal formé
+    restante (toute, jusqu'à son objectif, pour une sortie unique) × part du stop encore sous l'entrée (0 une fois le
+    stop remonté à l'entrée). Un trade mal formé
     compte pour tout son risque (jamais d'exception ici : elle ferait sauter le budget)."""
     total = 0.0
     capital = env_float("JARVIS_CAPITAL", 0.0) or None
@@ -799,7 +816,10 @@ def open_risk(trades: list[dict]) -> float:
             sign = 1 if t["side"] == "long" else -1
             left = max(0.0, sign * (t["entry"] - t.get("stop_current", t["stop"]))) / risk
             legs = len(t.get("targets") or []) or 1
-            total += pct * left * (legs - min(t.get("targets_hit", 0), legs)) / legs
+            hit, single = t.get("targets_hit", 0), t.get("sortie_unique")
+            # Sortie unique : toute la position reste en jeu jusqu'à son objectif.
+            kept = (legs - min(hit, legs)) / legs if single is None else 0.0 if hit > single else 1.0
+            total += pct * left * kept
         except (KeyError, TypeError, ValueError, ZeroDivisionError) as exc:
             log.warning("Grade : trade suivi %s mal formé (%s: %s), compté pour %g %% de risque ouvert",
                         t.get("id"), type(exc).__name__, exc, pct)

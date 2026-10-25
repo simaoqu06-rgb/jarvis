@@ -155,8 +155,9 @@ def test_grade_sur_les_r_a_20_euros(db):
 
 def test_signature_du_calcul(db):
     synthetic_trades(db, n_days=2, per_day=2)
-    assert GR.signature(db)[3] == GR.GRADE_CALC == 3  # version du calcul : changer de calcul force un recalcul
+    assert GR.signature(db)[3] == GR.GRADE_CALC == 4  # version du calcul : changer de calcul force un recalcul
     assert GR.signature(db)[4] == "fixe"  # barème IBKR du compte : en changer recalcule aussi le grade
+    assert GR.signature(db)[5] == "3 brackets"  # brackets des plans (JARVIS_IBKR_BRACKETS=3 dans les tests), idem
 
 
 def test_grade_au_bareme_ibkr_du_compte(db, monkeypatch):

@@ -41,3 +41,10 @@ def labo_sans_autonomie_du_council(monkeypatch):
     """Les tests du Labo 3 suivent l'ancien circuit (Simão approuve) ; ceux de l'autonomie du council
     (test_lab_council.py) la remettent."""
     monkeypatch.setenv("JARVIS_LAB_AUTONOMIE", "off")
+
+
+@pytest.fixture(autouse=True)
+def un_bracket_par_objectif(monkeypatch):
+    """Les tests d'origine décrivent un bracket par objectif (JARVIS_IBKR_BRACKETS=3) ; ceux de la sortie unique sur
+    TP2, défaut depuis le 25/10/2026 (test_ibkr.py, test_sortie_unique.py), retirent la variable."""
+    monkeypatch.setenv("JARVIS_IBKR_BRACKETS", "3")

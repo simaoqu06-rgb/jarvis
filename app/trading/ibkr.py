@@ -15,14 +15,36 @@ JARVIS_IBKR_PLAN ; comparatif : /mnt/project-files/trading/plateforme-actions-us
 - Dégressif : 0,0035 $ par action, minimum 0,35 $, plafond 1 %, plus frais de place (≈ 0,003 $ par
   action en prenant la liquidité) et de compensation (0,0002 $), estimation haute.
 Frais réglementaires à la vente (SEC, FINRA) négligés : quelques centimes.
+
+Une seule sortie par défaut depuis le 25/10/2026 (single_exit, choix de Simão) : un seul bracket de toute la position
+sur TP2 (l'objectif du milieu), TP1 et TP3 restant des repères sans ordre. Critère fixé avant la mesure avec GPT et
+Gemini (au moins +0,02 R par trade au Dégressif contre un bracket par objectif, IC au-dessus de zéro), tenu sur les GO
+confirmés de l'export qu'ils ont recalculé : go_confirme_v2 +0,036 R [+0,021 ; +0,051], go_confirme +0,032 R
+[+0,020 ; +0,043] (1 078 et 2 380 trades). JARVIS_IBKR_BRACKETS=3 rend un bracket par objectif.
 """
 from __future__ import annotations
 
 import logging
+import os
 
 log = logging.getLogger(__name__)
 
 LABELS = {"fixe": "Fixe", "degressif": "Dégressif"}
+
+
+def single_exit() -> bool:
+    """Un seul bracket sur TP2 (défaut) ; JARVIS_IBKR_BRACKETS=3 : un bracket par objectif."""
+    return (os.getenv("JARVIS_IBKR_BRACKETS") or "1").strip() != "3"
+
+
+def single_target(p: dict) -> int | None:
+    """Indice de l'objectif de la sortie unique d'un plan (1 : TP2), None pour un bracket par objectif : sortie
+    unique désactivée, plan sans trois objectifs (la mesure ne porte que sur eux), crypto, ou KILL (son journal
+    mesure un bracket par objectif)."""
+    if (not single_exit() or p.get("killmode") or p.get("market", "stock") != "stock"
+            or len(p.get("targets") or []) != 3):
+        return None
+    return 1
 
 
 def trade_commission(sizes: list[int], entry: float, exits: list[float], plan: dict) -> float:
@@ -54,23 +76,30 @@ def brackets(p: dict) -> dict | None:
     # killmode.bracket_orders et la mesure du labo à 20 € (r_20e, `!frais`).
     parts = [{"prix": x, "part": 1 / len(tps), "raison": i} for i, x in enumerate(tps)]
     legs = K._legs(quantity, len(tps), parts)
-    sizes = [n for n, _ in legs]
-    rows = [{"name": names[e["raison"]], "quantity": n, "take_profit": e["prix"]} for n, e in legs]
+    per_target = [{"name": names[e["raison"]], "quantity": n, "take_profit": e["prix"]} for n, e in legs]
+    k = single_target(p)
+    rows = per_target if k is None else [{"name": names[k], "quantity": quantity, "take_profit": tps[k]}]
     real_risk = quantity * per_share
+
+    def cost(rws: list[dict], plan: dict) -> float:
+        # Pire cas pour les frais : tous les brackets sortent (au TP ou au SL), 2 ordres chacun.
+        sizes = [r["quantity"] for r in rws]
+        return max(trade_commission(sizes, entry, [stop] * len(sizes), plan),
+                   trade_commission(sizes, entry, [r["take_profit"] for r in rws], plan))
+
     fees = {}
     for key, plan in K.IBKR_PLANS.items():
-        # Pire cas pour les frais : tous les brackets sortent (au TP ou au SL), 2 ordres chacun.
-        worst = trade_commission(sizes, entry, [stop] * len(sizes), plan)
-        best = trade_commission(sizes, entry, [r["take_profit"] for r in rows], plan)
-        single = trade_commission([quantity], entry, [stop], plan)
-        cost = max(worst, best)
-        fees[key] = {"usd": round(cost, 2), "r": round(cost / real_risk, 3),
-                     "un_bracket_usd": round(single, 2), "un_bracket_r": round(single / real_risk, 3)}
+        mine, one = cost(rows, plan), trade_commission([quantity], entry, [stop], plan)
+        split = cost(per_target, plan)
+        fees[key] = {"usd": round(mine, 2), "r": round(mine / real_risk, 3),
+                     "un_bracket_usd": round(one, 2), "un_bracket_r": round(one / real_risk, 3),
+                     "par_objectif_usd": round(split, 2), "par_objectif_r": round(split / real_risk, 3)}
     cheapest = min(fees, key=lambda k: fees[k]["usd"])
     return {
         "risk_eur": risk_eur, "risk_usd": risk_usd, "eurusd": eurusd,
         "quantity": quantity, "notional_usd": round(quantity * entry, 2), "real_risk_usd": round(real_risk, 2),
         "entry": entry, "stop": stop, "side": p["side"], "brackets": rows, "hors_avis": rule,
+        "sortie_unique": k is not None, "reperes": [] if k is None else [n for i, n in enumerate(names) if i != k],
         "fees": fees, "plan": K.IBKR_PLAN if K.IBKR_PLAN in K.IBKR_PLANS else "fixe", "cheapest": cheapest,
     }
 
@@ -110,6 +139,13 @@ def lines(p: dict) -> list[str]:
     other = "degressif" if mine == "fixe" else "fixe"
     tip = (f" · en {LABELS[other]} : {f[other]['usd']:.2f} $ ({f[other]['r']:.2f} R)"
            if f[other]["usd"] < f[mine]["usd"] else "")
+    if b.get("sortie_unique"):
+        out.append(f"-# Sortie unique sur {b['brackets'][0]['name']} ({' et '.join(b['reperes'])} : repères, sans ordre) : "
+                   "+0,03 à +0,04 R par trade au labo contre un bracket par objectif (mesure faite avec le stop remonté "
+                   "à l'entrée dès TP1)")
+        out.append(f"-# Commissions estimées ({LABELS[mine]}, 1 bracket) : {f[mine]['usd']:.2f} $ = {f[mine]['r']:.2f} R"
+                   f"{tip} · un bracket par objectif : {f[mine]['par_objectif_usd']:.2f} $")
+        return out
     out.append(f"-# Commissions estimées ({LABELS[mine]}, {len(b['brackets'])} brackets) : "
                f"{f[mine]['usd']:.2f} $ = {f[mine]['r']:.2f} R{tip} · 1 seul bracket : {f[mine]['un_bracket_usd']:.2f} $")
     return out

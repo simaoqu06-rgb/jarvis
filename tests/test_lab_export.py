@@ -38,12 +38,19 @@ def test_export_csv_et_manifeste():
     m = out["manifest"]
     assert m["lignes"] == 19 and m["declenchees"] == 18 and m["jours"] == 6
     assert m["sha256_csv"] == hashlib.sha256(out["csv"].encode("utf-8")).hexdigest()
+    # 5e tour : empreinte du coût des lignes du labo v2 (pas celle de v1) et révisions présentes dans les lignes
+    from app.lab import empreinte as E
+    assert m["cout_rev_actuel"] == E.strat_cost_rev("stock") and "cout_rev" not in m
+    assert m["revisions_lignes"] == [{"code_rev": "inconnue", "cout_rev": "inconnue", "lignes": 19,
+                                      "du": "2025-01-06", "au": "2025-01-11"}]
+    assert {x["temoin_absent"] for x in lines} == {""}
     first = next(x for x in lines if x["triggered"] == "1")
     comm = SS.ibkr_commission_r(10.0, 9.8)
     assert float(first["commission_ibkr_fixe_r"]) == pytest.approx(comm)
     assert float(first["r_ref_ibkr"]) == pytest.approx(float(first["r_ref"]) - comm)
     assert float(first["r_20e_deg_1s"]) == pytest.approx(SS.one_bracket_degressif(10.0, 9.8,
                                                                                   float(first["r_20e_fixe_1s"])))
+    assert float(first["frais_3s_moins_1s_deg_r"]) > 0  # trois brackets : quatre ordres de plus qu'un seul
 
 
 def test_le_controle_se_retrouve_depuis_le_csv():
@@ -57,8 +64,16 @@ def test_le_controle_se_retrouve_depuis_le_csv():
         gap.add(x["day"], float(x["r_ref"]) - float(x["temoin_r"]))
     ctl = out["manifest"]["controle"]["go_confirme_v2"]
     assert ctl["esperance_ibkr"]["esperance_r"] == esp.result()["esperance_r"]
-    assert ctl["ecart_temoin"]["z"] == gap.result()["z"] and ctl["ecart_temoin"]["n"] == 18
+    assert ctl["ecart_temoin"]["t"] == gap.result()["z"] and ctl["ecart_temoin"]["n"] == 18
     assert ctl["ecart_temoin"]["ic95"] == gap.result()["ic95"]
+    assert ctl["par_origine"]["replay"]["esperance_ibkr"]["esperance_r"] == esp.result()["esperance_r"]
+    # Sous la nulle imposée : u_g = somme des écarts du jour g, sans retirer m × n_g
+    sums: dict = {}
+    for x in lines:
+        sums[x["day"]] = sums.get(x["day"], 0.0) + float(x["r_ref"]) - float(x["temoin_r"])
+    n, g = len(lines), len(sums)
+    se0 = (sum(v * v for v in sums.values()) * g / (g - 1)) ** 0.5 / n
+    assert ctl["ecart_temoin"]["t_nulle_imposee"] == pytest.approx(sum(sums.values()) / n / se0, abs=0.01)
     table = SS.report(db.conn)["strategies"]["stock"]["go_confirme_v2"]
     assert table["temoin"]["ecart_r"] == ctl["ecart_temoin"]["esperance_r"]
 
