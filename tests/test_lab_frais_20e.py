@@ -122,3 +122,21 @@ def test_brief_un_bracket_au_degressif(rep, monkeypatch):
     got = BRIEF._strategies(None)["marches"]["stock"]["pullback"]["un_bracket_degressif"]
     assert got["n"] == 60 and got["ecart_r"] == pytest.approx(0.2001, abs=1e-3)
     assert BRIEF._strategies(None)["marches"]["crypto"]["pullback"]["un_bracket_degressif"] is None
+
+
+def test_par_rang_a_20_euros_au_degressif():
+    """4e échange avec GPT (Q3) : par tranche de rang, l'espérance après toutes les commissions à 20 €."""
+    db = LabDB(":memory:")
+    rows = []
+    for k in range(4):
+        day = f"2025-02-{3 + k:02d}"
+        rows += [("replay", "stock", "A", day, "orb15", 0, 1, 0.1, 0.1, 0.0, 1, 10, -0.2),
+                 ("replay", "stock", "B", day, "orb15", 0, 1, 0.1, 0.1, 0.0, 1, 200, 0.05 * k)]
+    db.conn.executemany("INSERT INTO strat_trades (origin, market, symbol, day, strategy, slot, triggered, r_net, "
+                        "r_sans_be, temoin_r, temoin_triggered, rank, r_20e_deg) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                        "?, ?, ?)", rows)
+    item = SS.report(db.conn)["strategies"]["stock"]["orb15"]
+    tiers = item["par_rang_20e_degressif"]
+    assert tiers["rang 1-50"]["esperance_r"] == -0.2 and tiers["rang 1-50"]["n"] == 4
+    assert tiers["rang 151+"]["esperance_r"] == pytest.approx(0.075)
+    assert "rang 51-150" not in tiers

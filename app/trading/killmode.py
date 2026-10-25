@@ -77,6 +77,7 @@ from app.lab import strategies as ST
 from app.sources import alpaca, finnhub, frankfurter
 from app.trading import catalyst as C
 from app.trading import scanner as SC
+from app.trading import score as SCORE
 from app.trading import service as T
 from app.trading.settings import settings
 
@@ -1909,7 +1910,9 @@ def text(a: dict, lab: str | None = None) -> str:
         res = " · ".join(f"{_fr(r['price'])} ({r['source']})" for r in j["resistances"])
         sc = j.get("score") or {}
         lines.append(f"📐 Lecture JARVIS : {ch['verdict']} · checklist {ch['score']}/{ch['max_score']}"
-                     + (f" · note v1 {_fr(sc['composite'], 1)}/10 {sc['decision']}, {SCORE_NOTE}" if sc else "")
+                     + ((f" · note v1 {_fr(sc['composite'], 1)}/10 {sc['decision']}, {SCORE_NOTE}"
+                         if SCORE.show_note("stock") else f" · v1 {sc['decision']} (note masquée : {SCORE_NOTE})")
+                        if sc else "")
                      + (f" · résistances au-dessus : {res}" if res else ""))
     lines.append("-# Killmode : actions US, achat seulement. Règle de prix = stratégie `killmode` du labo "
                  "(déclaration n° 5) ; chaque 🔪 est noté et soldé par `!kill bilan`.")

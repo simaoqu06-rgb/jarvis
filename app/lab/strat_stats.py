@@ -15,7 +15,9 @@ que si la borne basse de son intervalle est au-dessus de zéro ET si elle bat so
 du nombre d'essais déclarés (Bonferroni, candidate_z() : ≈ 3,1 pour 60 essais ; déclaration n° 2,
 council du 7 octobre : avec z ≥ 2 et 60 essais, on attendrait une fausse candidate par hasard).
 Frais (brut − net) et espérance par tranche de rang de volume, sans rien filtrer : les ordres stop sur
-cassure des petites valeurs glissent plus.
+cassure des petites valeurs glissent plus. par_rang est net de la commission IBKR par action (sans le minimum par
+ordre) ; par_rang_20e_degressif (4e échange avec GPT, 25/10/2026) donne la même tranche à 20 €, Dégressif, trois
+brackets, minimum par ordre compris.
 Déclaration n° 3 (avis de GPT et Gemini) : le simulateur ne compte aucune commission en actions (Alpaca),
 alors que Simão passe ses ordres chez IBKR Pro (plan Fixe : 0,005 $ par action, plafonné à 1 % de l'ordre).
 Pour les actions, l'espérance de référence (classement et règle « candidate ») est donc l'espérance nette
@@ -316,7 +318,7 @@ def _acc(market: str | None = None) -> dict:
             "tranches": defaultdict(lambda: defaultdict(mean)), "ecart_journee": mean(), "effet_heure": mean(),
             "tirages": defaultdict(lambda: [0.0, 0]), "sans_temoin": 0, "oi7": defaultdict(mean),
             "va": defaultdict(mean), "structure": [0, 0], "couts20": defaultdict(mean),
-            "couts20deg": defaultdict(mean)}
+            "couts20deg": defaultdict(mean), "rangs20deg": defaultdict(mean)}
 
 
 def _feed(a: dict, r: dict) -> None:
@@ -341,6 +343,9 @@ def _feed(a: dict, r: dict) -> None:
             x = values.get(c)
             a["couts20"][c].add(day, x - base if x is not None and base is not None else None)
         base = values.get("r_20e_deg")
+        # 4e échange avec GPT (Q3) : par tranche de rang, l'espérance après toutes les commissions IBKR (20 €,
+        # minimum par ordre, Dégressif, trois brackets), à côté de par_rang (commission par action seulement)
+        a["rangs20deg"][_rank_bucket(r["rank"])].add(day, base)
         for c, _ in COSTS_20E_DEG:  # 25/10/2026 : au barème Dégressif, contre trois brackets au Dégressif
             x = values.get(c)
             a["sorties"][c].add(day, x)
@@ -413,6 +418,9 @@ def _item(market: str, name: str, a: dict, trials: int) -> dict:
         else None,
         "par_rang": {k: a["rangs"][k].result() for _, _, k in (*RANK_BUCKETS, (0, 0, "rang inconnu"))
                      if k in a["rangs"]},
+        "par_rang_20e_degressif": {k: a["rangs20deg"][k].result()
+                                   for _, _, k in (*RANK_BUCKETS, (0, 0, "rang inconnu"))
+                                   if a["rangs20deg"][k].n} if market == "stock" else None,
         "commission_ibkr_r": a["commission"].result()["esperance_r"] if market == "stock" else None,
         "esperance_ibkr_r": ibkr["esperance_r"] if ibkr else None,
         "ic95_ibkr": ibkr["ic95"] if ibkr else None,

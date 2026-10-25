@@ -287,6 +287,10 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
   les lignes de `strat_trades` (par défaut les GO, hors bloc scellé) en CSV, avec un manifeste (définition de chaque
   colonne, empreintes du code et du modèle de coût, SHA-256 du CSV, recette d'agrégation et chiffres de contrôle),
   pour que GPT et Gemini recalculent eux-mêmes espérance, IC en grappes par jour et écart au témoin.
+- **Note composite masquée** (audits de GPT et Gemini, 25/10/2026) : tant que la pente mesurée de la note est ≤ 0 au
+  labo (`score.show_note`), les plans, le scanner, `!avis` et Killmode n'affichent plus la note ni ses sous-notes,
+  seulement le verdict GO / NO GO (règle de sélection figée). Sous les objectifs du plan, la calibration mesurée des
+  délais (`grade.delay_line` : part des objectifs touchés au plus tard au délai médian prévu, cible 40-65 %).
 - **Le soir (23 h)** : une routine Claude planifiée (hors de ce dépôt) lit `GET /api/lab/brief` (tout
   en un appel, < 20 Ko : résumé, statistiques, fiches à classer des 2 derniers jours, règles récentes,
   méthode en place et challenger), fait débattre ses analystes, puis envoie au plus **3 règles par

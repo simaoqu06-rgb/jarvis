@@ -877,7 +877,7 @@ def risk_now(market: str, trades: list[dict], now: datetime | None = None, data:
                 "observation": True}
     base = g["risque_grade"]
     out = {"grade": g["grade"], "risque_grade": base, "risque_max": g["risque_max"], "mode_survie": g["mode_survie"],
-           "non_note": g["non_note"]}
+           "non_note": g["non_note"], "delais_tenus": (g.get("mesure") or {}).get("delais_tenus")}
     age = age_h(data, now)
     if age is None or age > MAX_AGE_H:
         return out | {"risque_propose": 0.0, "observation": True, "perime": True,
@@ -921,6 +921,20 @@ def plan_line(g: dict) -> str:
                     f", alors que JARVIS ne propose aucun risque ({g['risque_propose']:g} %)")
                  + " : ton choix, gardé tel quel")
     return line
+
+
+def delay_line(g: dict) -> str | None:
+    """Audits de GPT et Gemini (25/10/2026) : la calibration mesurée des délais, à côté des délais du plan. Part des
+    objectifs touchés au plus tard au délai médian prévu (fenêtre du grade), contre la cible DELAIS ; None sans mesure."""
+    d = g.get("delais_tenus")
+    if d is None:
+        return None
+    target = f"cible {DELAIS[0] * 100:.0f}-{DELAIS[1] * 100:.0f} %"
+    if DELAIS[0] <= d <= DELAIS[1]:
+        return f"-# Délais calibrés au labo : {d * 100:.0f} % des objectifs touchés au plus tard au délai médian prévu ({target})."
+    late = "arrivent plus tard que prévu" if d < DELAIS[0] else "arrivent plus tôt que prévu"
+    return (f"-# ⚠️ Délais non calibrés au labo : {d * 100:.0f} % des objectifs touchés au plus tard au délai médian prévu "
+            f"({target}) ; les objectifs {late}. Un ordre de grandeur, pas une échéance.")
 
 
 def _pct(x) -> str:

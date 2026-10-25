@@ -858,3 +858,16 @@ def test_api_risque_explicite(monkeypatch):
     r = client.post("/api/trading/plan", json=body | {"risk_pct": 0})
     assert r.status_code == 422 and r.json()["detail"] == "plan de test"
     assert seen[0]["risk_pct"] == 0.0 and seen[0]["capital"] == 10000.0  # 0 transmis tel quel (plus de « or 3 % »)
+
+
+def test_calibration_des_delais_sous_le_plan():
+    """Audits du 25/10/2026 : la calibration mesurée des délais s'affiche à côté des délais du plan."""
+    assert GR.delay_line({}) is None and GR.delay_line({"delais_tenus": None}) is None
+    assert GR.delay_line({"delais_tenus": 0.52}) == ("-# Délais calibrés au labo : 52 % des objectifs touchés au plus "
+                                                     "tard au délai médian prévu (cible 40-65 %).")
+    late = GR.delay_line({"delais_tenus": 0.31})
+    assert late.startswith("-# ⚠️ Délais non calibrés au labo : 31 %") and "plus tard que prévu" in late
+    assert "plus tôt que prévu" in GR.delay_line({"delais_tenus": 0.8})
+    data = {"marches": {"stock": DATA["marches"]["stock"] | {"mesure": {"delais_tenus": 0.31}}},
+            "verifie_le": NOW.isoformat()}
+    assert GR.risk_now("stock", [], NOW, data)["delais_tenus"] == 0.31
