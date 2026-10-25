@@ -23,6 +23,7 @@ from app import alerts, config, needs, scheduler
 from app.lab import brief as lab_brief
 from app.lab import catalysts as lab_catalysts
 from app.lab import db as lab_db
+from app.lab import export as lab_export
 from app.lab import grade as lab_grade
 from app.lab import lessons as lab_lessons
 from app.lab import method as lab_method
@@ -759,6 +760,21 @@ def lab_strategies_get():
     conn = _lab_conn()
     try:
         return lab_strategies.cached(conn) or lab_strategies.report(conn)
+    finally:
+        conn.close()
+
+
+@app.get("/api/lab/export/trades", dependencies=[Depends(lab_key)])
+def lab_export_trades_get(strategies: str = Query(",".join(lab_export.GO_STRATEGIES), max_length=500)):
+    """3e tour d'avis : lignes de strat_trades des `strategies` (séparées par des virgules ; par défaut les GO) en CSV,
+    hors bloc scellé, avec leur manifeste (définitions, empreintes, SHA-256, recette et chiffres de contrôle), pour
+    que GPT et Gemini recalculent eux-mêmes. Calcul direct, lecture seule."""
+    names = tuple(n.strip() for n in strategies.split(",") if n.strip())
+    if not names:
+        raise HTTPException(422, "Aucune stratégie demandée")
+    conn = _lab_conn()
+    try:
+        return lab_export.export(conn, names)
     finally:
         conn.close()
 

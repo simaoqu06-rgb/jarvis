@@ -283,6 +283,10 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
 - **Veille des routines** (`app/lab/routines_watch.py`, 25/10/2026) : alerte Discord, une fois, si l'équipe du
   soir n'a déposé aucun avis du council pour la soirée de la veille (vérifié à 9 h Paris, du mardi au samedi), ou
   si la recherche avant l'ouverture n'a rendu aucun verdict sur le scan du jour (vérifié à 10 h 30 New York).
+- **Export pour un recalcul externe** (`app/lab/export.py`, `GET /api/lab/export/trades?strategies=…`, 25/10/2026) :
+  les lignes de `strat_trades` (par défaut les GO, hors bloc scellé) en CSV, avec un manifeste (définition de chaque
+  colonne, empreintes du code et du modèle de coût, SHA-256 du CSV, recette d'agrégation et chiffres de contrôle),
+  pour que GPT et Gemini recalculent eux-mêmes espérance, IC en grappes par jour et écart au témoin.
 - **Le soir (23 h)** : une routine Claude planifiée (hors de ce dépôt) lit `GET /api/lab/brief` (tout
   en un appel, < 20 Ko : résumé, statistiques, fiches à classer des 2 derniers jours, règles récentes,
   méthode en place et challenger), fait débattre ses analystes, puis envoie au plus **3 règles par
