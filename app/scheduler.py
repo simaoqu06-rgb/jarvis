@@ -12,7 +12,6 @@ from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from app import alerts, config
-from app.config import env_float
 from app.core.outbox import Outbox
 from app.lab import grade as lab_grade
 from app.lab import method as lab_method

@@ -94,7 +94,6 @@ SCAN_DEEP = 6          # valeurs analysées à fond par `!kill scan` (les plus f
 SCAN_CONCURRENCY = 2
 BAR = CO.BASE_TF * 60
 DAILY_DAYS = 100
-FIVE_MIN_DAYS = 6      # ≥ 2 séances d'échauffement (EMA, ATR de 5 min), comme le labo
 SETTLE_DELAY = timedelta(minutes=20)  # Alpaca gratuit : bougies SIP avec 16 min de retard
 PILLARS = (("volatilite", "Volatilité"), ("catalyseur", "Catalyseur"), ("graphique", "Graphique"),
            ("donnees", "Données complètes"))

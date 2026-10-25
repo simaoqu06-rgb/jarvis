@@ -34,11 +34,10 @@ Le bloc scellé n'est ni lu ni calculé.
 import json
 import logging
 import os
-import random
 import sqlite3
 import time
 from collections import defaultdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from app.lab import collector as CO
