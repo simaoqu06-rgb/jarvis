@@ -280,6 +280,17 @@ Tout tourne dans le worker, sans jeton d'IA ; rien ici ne change la méthode en 
 Le serveur n'écrit jamais dans `data/lab.db` : ce qu'il reçoit (règles, décisions, types de
 catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque passage.
 
+- **Veille des routines** (`app/lab/routines_watch.py`, 25/10/2026) : alerte Discord, une fois, si l'équipe du
+  soir n'a déposé aucun avis du council pour la soirée de la veille (vérifié à 9 h Paris, du mardi au samedi), ou
+  si la recherche avant l'ouverture n'a rendu aucun verdict sur le scan du jour (vérifié à 10 h 30 New York).
+- **Export pour un recalcul externe** (`app/lab/export.py`, `GET /api/lab/export/trades?strategies=…`, 25/10/2026) :
+  les lignes de `strat_trades` (par défaut les GO, hors bloc scellé) en CSV, avec un manifeste (définition de chaque
+  colonne, empreintes du code et du modèle de coût, SHA-256 du CSV, recette d'agrégation et chiffres de contrôle),
+  pour que GPT et Gemini recalculent eux-mêmes espérance, IC en grappes par jour et écart au témoin.
+- **Note composite masquée** (audits de GPT et Gemini, 25/10/2026) : tant que la pente mesurée de la note est ≤ 0 au
+  labo (`score.show_note`), les plans, le scanner, `!avis` et Killmode n'affichent plus la note ni ses sous-notes,
+  seulement le verdict GO / NO GO (règle de sélection figée). Sous les objectifs du plan, la calibration mesurée des
+  délais (`grade.delay_line` : part des objectifs touchés au plus tard au délai médian prévu, cible 40-65 %).
 - **Le soir (23 h)** : une routine Claude planifiée (hors de ce dépôt) lit `GET /api/lab/brief` (tout
   en un appel, < 20 Ko : résumé, statistiques, fiches à classer des 2 derniers jours, règles récentes,
   méthode en place et challenger), fait débattre ses analystes, puis envoie au plus **3 règles par
@@ -370,8 +381,9 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
     sans effet sur le grade (un taux de réussite se gonfle en rapprochant le TP1).
   - Risque proposé par plan (`!plan`, cockpit) : F, E, non noté 0 % (plan en observation), D 0,25 %,
     puis ¼ de Kelly (borne basse de l'espérance / variance des R, corrigé de la corrélation des
-    trades d'un même jour) plafonné à C 1 %, B 1,5 %, A 3 %, S 5 % (4 % en pratique). Plus un
-    budget : risque ouvert sur les trades pris ≤ 4 % (un trade pris compte ses euros sur le capital,
+    trades d'un même jour) plafonné à C 0,5 %, B 0,75 %, A 1 %, S 1,5 % (abaissé le 25/10/2026 après les
+    audits de GPT et Gemini ; avant : C 1 %, B 1,5 %, A 3 %, S 5 %). Plus un
+    budget : risque ouvert sur les trades pris ≤ 3 % (un trade pris compte ses euros sur le capital,
     1 % sans capital connu), arrêt de la journée à −3 R (nets de frais estimés). Grade illisible ou que le labo n'a pas
     revérifié depuis 6 h (`JARVIS_GRADE_MAX_AGE_H`) : 0 %.
   - Taille, une seule règle : risque = min(`JARVIS_CAPITAL` (€) × % proposé, `JARVIS_RISK_EUR` = 20 €),
@@ -526,6 +538,7 @@ de titres (S-1, S-3, 424B) sur 30 jours, actus de la semaine et ce qui, dans tou
 | `!lecons` | carnet des leçons du labo : confirmées, à confirmer, démenties, avec leur preuve chiffrée |
 | `!grade` | grade de JARVIS (F- à S+) par marché, de quoi il est fait, risque permis, derniers changements |
 | `!strategies` | labo v2 : stratégies à déclencheur contre v1, sorties, témoin aléatoire, diagnostic de v1 |
+| `!gemini` | **Challenger « méthode Gemini »** (forward-test, 25 oct. 2026) : plans A (cassure des 5 premières minutes, 15 h 36 Paris), B (drapeau de mi-séance, 18 h 36) et C (reprise du VWAP quelques jours après des résultats, 21 h 31) sur le salon et en MP ; soldés le lendemain sur les bougies SIP d'1 min, sortie le jour même, le lendemain et selon la règle de nuit de la fiche (décidée à 15 h 45 : garder si TP1 touché, au-dessus du VWAP et ETF du secteur pas à −1,5 % ; le lendemain sortie au TP2, à l'entrée ou à 10 h 30), à 20 € de risque, frais IBKR et glissement compris, contre un témoin tiré au hasard dans la même population. `!gemini bilan` : le bilan seul ; lecture à 100 plans déclenchés. Seul Simão décide d'une déclaration au labo ou d'une promotion. Détail : `app/trading/gemini.py` |
 | `!kill …` | **JARVIS Killmode**, éteint par défaut : `!kill on` / `!kill off`, `!kill NVDA` (analyse complète : volatilité, catalyseur, graphique, données, fiche société), `!kill scan` (plus forts gaps, setups complets seulement), `!kill bilan` (setups proposés soldés après la clôture + stratégie `killmode` du labo). Hors de toute routine, aucun ordre passé. Détail : `app/trading/killmode.py`, déclaration n° 5 de [docs/labo-strategies.md](docs/labo-strategies.md) |
 | `!aide` | liste des commandes |
 

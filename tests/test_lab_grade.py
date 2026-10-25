@@ -67,9 +67,10 @@ def test_risque_du_grade():
     assert GR.grade_risk(None, 5.0) == 0.0
     assert GR.grade_risk(rank("F", 2), 5.0) == 0.0 and GR.grade_risk(rank("E", 1), 5.0) == 0.0
     assert GR.grade_risk(rank("D", 0), 0.0) == 0.25  # micro-exposition fixe
-    assert GR.grade_risk(rank("C", 1), 0.4) == 0.4 and GR.grade_risk(rank("C", 1), 9.0) == 1.0
-    assert GR.grade_risk(rank("B", 2), 9.0) == 1.5
-    assert GR.grade_risk(rank("A", 0), 9.0) == 3.0 and GR.grade_risk(rank("S", 2), 9.0) == 5.0  # plafond EmperorBTC
+    assert GR.grade_risk(rank("C", 1), 0.4) == 0.4 and GR.grade_risk(rank("C", 1), 9.0) == 0.5
+    assert GR.grade_risk(rank("B", 2), 9.0) == 0.75
+    # Plafonds abaissés le 25/10/2026 (audits de GPT et Gemini) : A 1 %, S 1,5 % (avant : 3 % et 5 %).
+    assert GR.grade_risk(rank("A", 0), 9.0) == 1.0 and GR.grade_risk(rank("S", 2), 9.0) == 1.5
 
 
 def rows(rs, per_day=10, delay=1):
@@ -106,17 +107,17 @@ def test_ic_en_student_c_devient_d():
 
 
 def test_kelly_corrige_de_la_correlation_du_jour():
-    # Tous les trades d'un jour ont le même R (ρ ≈ 1) : un A (3 %) laisse 2 positions sous le budget de 4 %,
-    # le Kelly est divisé par ≈ 2.
+    # Tous les trades d'un jour ont le même R (ρ ≈ 1) : un A (1 %) laisse 3 positions sous le budget de 3 %,
+    # le Kelly est divisé par ≈ 3.
     days = [0.8, -0.2, 0.6, 0.0]
     m = GR.evaluate(rows([days[(i // 10) % 4] for i in range(400)], per_day=10))
-    assert m["lettre"] == "A" and m["positions_max"] == 2 and m["rho_jour"] > 0.95
-    assert m["kelly_pct"] == pytest.approx(m["kelly_brut_pct"] / (1 + m["rho_jour"]), abs=1e-3)
-    assert m["kelly_pct"] < 0.52 * m["kelly_brut_pct"]
+    assert m["lettre"] == "A" and m["positions_max"] == 3 and m["rho_jour"] > 0.95
+    assert m["kelly_pct"] == pytest.approx(m["kelly_brut_pct"] / (1 + 2 * m["rho_jour"]), abs=1e-3)
+    assert m["kelly_pct"] < 0.35 * m["kelly_brut_pct"]
     # Trades indépendants (ρ ≈ 0) : Kelly presque inchangé.
     rnd = random.Random(3)
     m = GR.evaluate(rows([round(rnd.gauss(0.3, 1.0), 4) for _ in range(600)], per_day=20))
-    assert m["lettre"] == "B" and m["positions_max"] == 3 and m["rho_jour"] < 0.05
+    assert m["lettre"] == "B" and m["positions_max"] == 4 and m["rho_jour"] < 0.05
     assert m["kelly_pct"] > 0.9 * m["kelly_brut_pct"] > 0
 
 
@@ -481,12 +482,12 @@ def test_risque_now():
     g = GR.risk_now("crypto", [], NOW, DATA)
     assert g["risque_propose"] == 0.0 and g["observation"] and "pas de capital réel" in g["raison"]
     assert GR.risk_now("stock", [], NOW, {"marches": {}})["risque_propose"] == 0.0
-    # Risque déjà ouvert : 2 trades à 1,5 % ; le stop remonté à l'entrée ne compte plus.
-    opened = [trade(risk=1.5), trade(risk=1.5), trade(risk=3.0, stop_current=100.0, hit=2)]
-    assert GR.open_risk(opened) == 3.0
+    # Risque déjà ouvert : 2 trades à 1 % ; le stop remonté à l'entrée ne compte plus.
+    opened = [trade(risk=1.0), trade(risk=1.0), trade(risk=3.0, stop_current=100.0, hit=2)]
+    assert GR.open_risk(opened) == 2.0
     g = GR.risk_now("stock", opened, NOW, DATA)
     assert g["risque_propose"] == 1.0
-    assert "plafonné par le budget de 4 % ouvert au total (3 % déjà ouverts)" in g["raison"]
+    assert "plafonné par le budget de 3 % ouvert au total (2 % déjà ouverts)" in g["raison"]
     # Arrêt de la journée à −3 R (date de Paris de la clôture).
     stopped = [trade(status="closed", events=[{"kind": "stop", "price": 95.0, "at": NOW.isoformat()}])
                for _ in range(3)]
@@ -573,8 +574,8 @@ def test_risque_demande_hors_budget(monkeypatch):
     p = plan(10.0, 9.5)
     T.apply_grade(p, None, 5.0, NOW, trades=[], usd_per_eur=1.15)
     assert p["sizing"]["risk_amount_eur"] == 20.0 and not p["grade"].get("hors_budget")
-    # Budget déjà pris (3 trades à 1 % ouverts) : JARVIS propose 1 % = 10 € ; 3 % demandés = 20 €, hors budget.
-    opened = [trade(risk=1.0) for _ in range(3)]
+    # Budget déjà pris (2 trades à 1 % ouverts) : JARVIS propose 1 % = 10 € ; 3 % demandés = 20 €, hors budget.
+    opened = [trade(risk=1.0) for _ in range(2)]
     p = plan(10.0, 9.5)
     T.apply_grade(p, None, 3.0, NOW, trades=opened, usd_per_eur=1.15)
     assert p["grade"]["risque_propose"] == 1.0 and p["grade"]["hors_budget"]
@@ -719,7 +720,7 @@ def test_trade_mal_forme_ne_fait_pas_sauter_le_budget(monkeypatch, caplog):
     assert GR.open_risk([bad, "pas un trade"]) == 1.0  # compté pour tout son risque, sans exception
     assert "mal formé" in caplog.text
     g = GR.risk_now("stock", [bad], NOW)
-    assert g["risque_propose"] == 3.0 and "grade illisible" not in g["raison"]
+    assert g["risque_propose"] == 2.0 and "grade illisible" not in g["raison"]
 
 
 def test_risque_zero_explicite(monkeypatch):
@@ -770,8 +771,8 @@ def test_page_du_labo_fenetre_et_peremption():
     data["marches"]["stock"]["mesure"]["fenetre"] = GR.span(["2026-04-01", "2026-10-06"], {"2026-10-06"}) | {
         "discontinue": True}
     html = PG._grade_card(data)  # vérifié à NOW, il y a plus de 6 h
-    assert "⚠️ Grade périmé (dernier passage du labo il y a" in html and "5 % permis, 4 % en pratique" in html
-    assert "risque 5 % permis, 4 % en pratique" in html and "permis 5 % permis" not in html
+    assert "⚠️ Grade périmé (dernier passage du labo il y a" in html and "5 % permis, 3 % en pratique" in html
+    assert "risque 5 % permis, 3 % en pratique" in html and "permis 5 % permis" not in html
     assert "fenêtre : rejeu du 01/04/2026 au 01/04/2026, direct depuis le 06/10/2026" in html
     fresh = data | {"verifie_le": datetime.now(timezone.utc).isoformat()}
     assert "périmé" not in PG._grade_card(fresh)
@@ -783,10 +784,10 @@ def test_plafond_s_et_budget_total():
     data = {"marches": {"stock": DATA["marches"]["stock"] | {"grade": "S", "risque_grade": 5.0, "risque_max": 5.0}},
             "verifie_le": NOW.isoformat()}
     g = GR.risk_now("stock", [], NOW, data)
-    assert g["risque_propose"] == 4.0 and "budget de 4 % ouvert au total" in g["raison"] and "déjà" not in g["raison"]
-    assert GR.practical(5.0) == "5 % permis, 4 % en pratique (budget total)" and GR.practical(3.0) == "3 %"
+    assert g["risque_propose"] == 3.0 and "budget de 3 % ouvert au total" in g["raison"] and "déjà" not in g["raison"]
+    assert GR.practical(5.0) == "5 % permis, 3 % en pratique (budget total)" and GR.practical(3.0) == "3 %"
     text = GR.text(full_data(data["marches"]["stock"]), now=NOW)
-    assert "risque 5 % permis, 4 % en pratique (budget total) (plafond 5 %)" in text and "périmé" not in text
+    assert "risque 5 % permis, 3 % en pratique (budget total) (plafond 5 %)" in text and "périmé" not in text
     assert "permis 5 % permis" not in text  # relecture d'intégration : « permis » n'est plus doublé
     assert GR.allowed(3.0) == "risque permis 3 %"
     assert "espérance +0.250 R par trade après commission IBKR à 20 €" in text
@@ -857,3 +858,16 @@ def test_api_risque_explicite(monkeypatch):
     r = client.post("/api/trading/plan", json=body | {"risk_pct": 0})
     assert r.status_code == 422 and r.json()["detail"] == "plan de test"
     assert seen[0]["risk_pct"] == 0.0 and seen[0]["capital"] == 10000.0  # 0 transmis tel quel (plus de « or 3 % »)
+
+
+def test_calibration_des_delais_sous_le_plan():
+    """Audits du 25/10/2026 : la calibration mesurée des délais s'affiche à côté des délais du plan."""
+    assert GR.delay_line({}) is None and GR.delay_line({"delais_tenus": None}) is None
+    assert GR.delay_line({"delais_tenus": 0.52}) == ("-# Délais calibrés au labo : 52 % des objectifs touchés au plus "
+                                                     "tard au délai médian prévu (cible 40-65 %).")
+    late = GR.delay_line({"delais_tenus": 0.31})
+    assert late.startswith("-# ⚠️ Délais non calibrés au labo : 31 %") and "plus tard que prévu" in late
+    assert "plus tôt que prévu" in GR.delay_line({"delais_tenus": 0.8})
+    data = {"marches": {"stock": DATA["marches"]["stock"] | {"mesure": {"delais_tenus": 0.31}}},
+            "verifie_le": NOW.isoformat()}
+    assert GR.risk_now("stock", [], NOW, data)["delais_tenus"] == 0.31

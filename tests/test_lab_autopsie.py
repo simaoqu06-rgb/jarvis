@@ -181,8 +181,8 @@ def test_strategies_triees_par_trades_avec_esperance_a_20_euros():
     assert orb30["esperance_20e_r"] == pytest.approx(-0.4) and orb30["trades_20e"] == 40
     txt = AUT.text(rep)
     lines = [x for x in txt.splitlines() if x.startswith("-# orb")]
-    assert lines[0].startswith("-# orb15 · 60 trades · +0.200 R à 20 € (sur 50 trades)")
-    assert lines[1].startswith("-# orb30 · 40 trades · -0.400 R à 20 € · +1 R avant stop 100%")
+    assert lines[0].startswith("-# orb15 · 60 trades · +0.200 R à 20 € (Fixe) (sur 50 trades)")
+    assert lines[1].startswith("-# orb30 · 40 trades · -0.400 R à 20 € (Fixe) · +1 R avant stop 100%")
     assert "**v1 actions** (R du labo, avant commission IBKR à 20 €)" in txt
     assert AUT._esp(rep["strategies"]["crypto"]["pullback"], "crypto") == "-0.050 R (frais OKX compris)"
     assert AUT._esp({"esperance_r": 0.1, "trades": 40}, "stock") == "+0.100 R du labo (avant commission IBKR à 20 €)"
@@ -194,6 +194,23 @@ def test_grade_indicatif_dit_son_esperance_a_20_euros():
     _go_rows(db)
     db.conn.execute("UPDATE strat_trades SET r_20e = r_sans_be - 0.25 WHERE triggered = 1")
     gi = AUT.go_indicatif(db.conn)
-    assert gi["go_confirme"]["par_trade_20e"] == {"trades": 2 * GRADE.FENETRE_JOURS, "esperance_r": pytest.approx(-0.15)}
+    assert gi["go_confirme"]["par_trade_20e"] == {"trades": 2 * GRADE.FENETRE_JOURS, "esperance_r": pytest.approx(-0.15),
+                                                  "bareme": "Fixe"}
     lines = AUT.indicatif_lines(gi)
-    assert any("R par trade (IC95" in x and "· à 20 € : -0.150 R par trade ·" in x for x in lines)
+    assert any("R par trade (IC95" in x and "· à 20 € (Fixe) : -0.150 R par trade ·" in x for x in lines)
+
+
+def test_a_20_euros_suit_le_bareme_du_compte(monkeypatch):
+    """25/10/2026 : au Dégressif (JARVIS_IBKR_PLAN), le grade indicatif et l'autopsie lisent r_20e_deg, comme le
+    grade officiel ; ils lisaient r_20e (Fixe) en dur."""
+    from app.trading import killmode as K
+
+    db = LabDB(":memory:")
+    _go_rows(db)
+    db.conn.execute("UPDATE strat_trades SET r_20e = r_sans_be - 0.25, r_20e_deg = r_sans_be - 0.12 "
+                    "WHERE triggered = 1")
+    monkeypatch.setattr(K, "IBKR_PLAN", "degressif")
+    gi = AUT.go_indicatif(db.conn)
+    assert gi["go_confirme"]["par_trade_20e"]["esperance_r"] == pytest.approx(-0.02)
+    assert gi["go_confirme"]["par_trade_20e"]["bareme"] == "Dégressif"
+    assert any("· à 20 € (Dégressif) : -0.020 R par trade ·" in x for x in AUT.indicatif_lines(gi))

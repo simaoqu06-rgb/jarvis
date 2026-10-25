@@ -82,3 +82,61 @@ async def test_commande_frais(rep, monkeypatch, tmp_path):
     monkeypatch.setenv("JARVIS_LAB_DB", str(tmp_path / "lab.db"))
     monkeypatch.setattr(SS, "cached", lambda conn: rep)
     assert (await bot.handle("!mise")).startswith("💶 **Ta mise de 20 € chez IBKR**")
+
+
+# --- 25/10/2026 : un seul bracket au barème Dégressif (audits de GPT et Gemini, décision n° 1) -----------------
+
+def test_un_bracket_au_degressif_egal_au_calcul_direct():
+    """La variante déduite de r_20e_1s (Fixe) en changeant la commission de ses deux ordres donne le même R que
+    killmode.real_r rejoué au Dégressif sur le même trade à un bracket."""
+    from app.trading import killmode as K
+
+    call = {"entry": 10.0, "stop": 9.0, "targets": [11.5]}
+    for exits in ([{"part": 1.0, "prix": 11.5, "raison": "tp2"}], [{"part": 1.0, "prix": 9.0, "raison": "stop"}],
+                  [{"part": 1.0, "prix": 10.37, "raison": "cloture"}]):
+        done = {"declenche": True, "remplissage": 10.0, "eurusd": K.EURUSD_DEFAULT, "plan_ibkr": "fixe",
+                "sorties": exits}
+        fixe = K.real_r(call, done)
+        deg = K.real_r(call, done | {"plan_ibkr": "degressif"})
+        assert SS.one_bracket_degressif(10.0, 9.0, fixe) == pytest.approx(deg, abs=2e-4)
+    # 23 actions à 1 $ de risque : deux ordres à 1 $ (Fixe) contre 0,35 $ + 0,0032 $ par action (Dégressif).
+    assert SS.one_bracket_degressif(10.0, 9.0, -0.1) == pytest.approx(-0.1 + 2 * (1 - 0.35 - 0.0032 * 23) / 23,
+                                                                       abs=1e-4)
+    assert SS.one_bracket_degressif(10.0, 9.0, None) is None and SS.one_bracket_degressif(9.0, 9.0, 0.1) is None
+
+
+def test_un_bracket_contre_trois_au_degressif(rep):
+    item = rep["strategies"]["stock"]["pullback"]
+    deg = item["couts_20e_degressif"]["un_objectif_tp2"]
+    gain = 2 * (1 - 0.35 - 0.0032 * 23) / 23   # entrée 10 $, stop 9 $ : 23 actions
+    # Apparié à trois brackets au Dégressif sur les mêmes 60 trades : (r_20e_1s + gain) − r_20e_deg = 0,15 + gain.
+    assert deg["ecart"]["n"] == 60 and deg["ecart"]["esperance_r"] == pytest.approx(0.15 + gain, abs=1e-4)
+    assert rep["strategies"]["crypto"]["pullback"]["couts_20e_degressif"] is None
+    assert "un bracket (TP2) au Dégressif -0,04 R (écart à trois brackets au Dégressif +0,20, t " in SS.costs_text(rep)
+    assert "au moins +0,02 R" in SS.costs_text(rep)
+    assert not item["candidate"]
+
+
+def test_brief_un_bracket_au_degressif(rep, monkeypatch):
+    monkeypatch.setattr(SS, "cached", lambda conn: rep)
+    got = BRIEF._strategies(None)["marches"]["stock"]["pullback"]["un_bracket_degressif"]
+    assert got["n"] == 60 and got["ecart_r"] == pytest.approx(0.2001, abs=1e-3)
+    assert BRIEF._strategies(None)["marches"]["crypto"]["pullback"]["un_bracket_degressif"] is None
+
+
+def test_par_rang_a_20_euros_au_degressif():
+    """4e échange avec GPT (Q3) : par tranche de rang, l'espérance après toutes les commissions à 20 €."""
+    db = LabDB(":memory:")
+    rows = []
+    for k in range(4):
+        day = f"2025-02-{3 + k:02d}"
+        rows += [("replay", "stock", "A", day, "orb15", 0, 1, 0.1, 0.1, 0.0, 1, 10, -0.2),
+                 ("replay", "stock", "B", day, "orb15", 0, 1, 0.1, 0.1, 0.0, 1, 200, 0.05 * k)]
+    db.conn.executemany("INSERT INTO strat_trades (origin, market, symbol, day, strategy, slot, triggered, r_net, "
+                        "r_sans_be, temoin_r, temoin_triggered, rank, r_20e_deg) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                        "?, ?, ?)", rows)
+    item = SS.report(db.conn)["strategies"]["stock"]["orb15"]
+    tiers = item["par_rang_20e_degressif"]
+    assert tiers["rang 1-50"]["esperance_r"] == -0.2 and tiers["rang 1-50"]["n"] == 4
+    assert tiers["rang 151+"]["esperance_r"] == pytest.approx(0.075)
+    assert "rang 51-150" not in tiers

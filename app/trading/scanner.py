@@ -35,6 +35,7 @@ from app.sources import alpaca
 from app.trading import catalyst as C
 from app.trading import indicators as I
 from app.trading import plan as P
+from app.trading import score as SC
 from app.trading import service as T
 from app.trading.settings import settings
 
@@ -237,8 +238,9 @@ def text(result: dict) -> str:
                          (("technique", "tech"), ("catalyst", "cata"), ("risk", "risque")) if parts[k]["score"] is not None)
         lines.append(f"\n**{i}. {p['symbol']}** {f['gap_pct']:+.1f} % en pré-ouverture · volume veille {_rvol(f['rvol'])} · "
                      f"RSI {f['rsi']:.0f} · ATR {f['atr_pct']:.1f} %")
-        lines.append(f"{'✅' if sc['go'] else '⛔'} **{sc['decision']} · {sc['composite']:g}/10** ({sub})"
-                     + (f" · {' ; '.join(sc['reasons'])}" if sc["reasons"] else ""))
+        head = (f"**{sc['decision']} · {sc['composite']:g}/10** ({sub})" if SC.show_note(plan.get("market", "stock"))
+                else f"**{sc['decision']}**")  # note masquée tant qu'elle ne prédit rien au labo (score.show_note)
+        lines.append(f"{'✅' if sc['go'] else '⛔'} {head}" + (f" · {' ; '.join(sc['reasons'])}" if sc["reasons"] else ""))
         tps = " · ".join(
             f"{t['name']} {T._num(t['price'])} ({t['pct']:+.1f} %"
             + (f", ~{T.duration_fr(t['minutes_median'])})" if t["minutes_median"] else ")")

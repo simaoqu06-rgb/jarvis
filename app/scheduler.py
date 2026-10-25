@@ -16,14 +16,17 @@ from app.core.outbox import Outbox
 from app.lab import grade as lab_grade
 from app.lab import method as lab_method
 from app.lab import morning as lab_morning
+from app.lab import routines_watch as RW
 from app.notify import bot, discord
 from app.sources import alpaca, twelvedata
 from app.trading import calendar as CAL
 from app.trading import advice, paper, scanner
+from app.trading import gemini as GEMINI
 from app.trading import plus10 as PLUS10
 from app.trading import visibilite as VIS
 from app.trading import confirm as CONFIRM
 from app.trading import proposals as PR
+from app.trading import research
 from app.trading.proposals import proposals
 from app.trading import service as trading
 from app.trading.settings import settings
@@ -144,6 +147,38 @@ async def tick_news() -> None:
 
 async def tick_disk() -> None:
     await _post_all(alerts.check_disk(state, datetime.now(timezone.utc)), "disque")
+
+
+def routine_seen(kind: str, value: str) -> None:
+    """Dépôt d'une routine Claude vu par le serveur (`soir` : soirée de l'avis du council), pour tick_routines."""
+    seen = state.data.setdefault("routines", {})
+    if (seen.get(kind) or "") < value:
+        seen[kind] = value
+
+
+async def tick_routines(now: datetime | None = None) -> None:
+    """Prévient une fois sur Discord quand l'équipe du soir ou la recherche avant l'ouverture n'a rien déposé
+    (routines_watch ; audits de GPT et Gemini, 25/10/2026)."""
+    now = now or datetime.now(timezone.utc)
+    seen = state.data.setdefault("routines", {})
+    if "soir" not in seen:  # mise en service : la soirée d'hier est supposée vue (pas de fausse alerte)
+        seen["soir"] = (now.astimezone(RW.PARIS).date() - timedelta(days=1)).isoformat()
+    messages = []
+    hit = RW.soir_alert(now, seen.get("soir"), seen.get("alerte_soir"))
+    if hit:
+        seen["alerte_soir"] = hit[0]
+        messages.append(hit[1])
+    view = research.scan_view(research.last_scan(), now)
+    scan = view.get("scan") or {}
+    verdicts = len(research.ResearchBook().day(view["jour"]))
+    hit = RW.recherche_alert(now, scan.get("jour"), len(scan.get("picks") or []), verdicts,
+                             seen.get("alerte_recherche"))
+    if hit:
+        seen["alerte_recherche"] = hit[0]
+        messages.append(hit[1])
+    if messages:
+        _queue(messages, "alerte")
+        _kick_outbox()
 
 
 async def tick_trades() -> None:
@@ -371,6 +406,36 @@ async def tick_plus10(now: datetime | None = None) -> None:
         _kick_outbox()
 
 
+async def tick_gemini(now: datetime | None = None) -> None:
+    """Challenger « méthode Gemini » (25 octobre 2026) : passages A (9 h 36), B (12 h 36) et C (15 h 31) New York,
+    plans sur le salon et en MP ; solde après la clôture du lendemain contre le témoin aléatoire (rien n'est envoyé)."""
+    now = now or datetime.now(timezone.utc)
+    st = GEMINI.load()
+    kind = GEMINI.due(now, st)
+    if kind:
+        try:
+            result = await GEMINI.scan(kind, now)
+        except Exception as exc:
+            log.warning("Challenger Gemini : passage %s en échec : %s", kind, exc)
+            return  # nouvelle tentative à la minute suivante, dans la fenêtre du passage
+        st = GEMINI.load()
+        GEMINI.mark_done(st, kind, now)
+        st.setdefault("plans", []).extend(result["plans"])
+        GEMINI.save(st)
+        if result["plans"]:
+            rate = await _usd_per_eur()
+            _, risk_eur = _size_rule(now)
+            texts = [GEMINI.plan_text(p, rate, risk_eur) for p in result["plans"]]
+            bounds = CAL.session_bounds(now.astimezone(NEW_YORK).date())
+            async with _lock:
+                _queue(texts, "scanner", expires_at=bounds[1] if bounds else None)
+                _dm_trades(texts)
+                _kick_outbox()
+        return
+    if time(16, 20) <= now.astimezone(NEW_YORK).time() < time(18, 0):
+        await GEMINI.settle_due(now, st)
+
+
 async def tick_visibilite(now: datetime | None = None) -> None:
     """Audit anti-fuite : actus Finnhub des gappers vues à 9 h 46 New York, relues à 11 h (rien n'est envoyé)."""
     now = now or datetime.now(timezone.utc)
@@ -461,6 +526,7 @@ CORE_JOBS = [
     ("forward-test sur le compte fictif", tick_paper, 2 * MINUTE, True),
     ("contrôle des GO après l'ouverture", tick_confirm, MINUTE, False),  # prend le verrou lui-même pour écrire
     ("potentiel +10 confirmé", tick_plus10, MINUTE, False),  # n° 9 ; prend le verrou lui-même pour envoyer
+    ("challenger Gemini", tick_gemini, MINUTE, False),  # prend le verrou lui-même pour envoyer
     ("visibilité des actus Finnhub", tick_visibilite, MINUTE, False),  # mesure seule, rien n'est envoyé
 ]
 # Seulement avec les notifications actives.
@@ -471,6 +537,7 @@ JOBS = [
     ("séismes", tick_quakes, 5 * MINUTE, True),
     ("actus", tick_news, 15 * MINUTE, True),
     ("disque du serveur", tick_disk, 30 * MINUTE, True),
+    ("veille des routines Claude", tick_routines, 5 * MINUTE, True),
 ]
 
 
