@@ -135,6 +135,16 @@ def _detail(conn) -> dict | None:
     return out
 
 
+def _one_exit(s: dict) -> dict | None:
+    """Un bracket au Dégressif contre trois au Dégressif (strat_stats.COSTS_20E_DEG) : variante, écart et son IC."""
+    v = (s.get("couts_20e_degressif") or {}).get("un_objectif_tp2") or {}
+    gap = v.get("ecart") or {}
+    if not gap.get("n"):
+        return None
+    return {"variante_r": (v.get("variante") or {}).get("esperance_r"), "ecart_r": gap.get("esperance_r"),
+            "ic95": gap.get("ic95"), "n": gap["n"]}
+
+
 def _strategies(conn) -> dict | None:
     """Labo v2 en bref : par stratégie, espérance de référence, avant frais, frais, témoin aléatoire."""
     rep = SS.cached(conn)
@@ -151,7 +161,8 @@ def _strategies(conn) -> dict | None:
                    "rentable_20e": s.get("rentable_20e"), "mise_20e_r": (s.get("mise_20e") or {}).get("esperance_r"),
                    "temoin_ecart_r": (s.get("temoin") or {}).get("ecart_r"), "temoin_z": (s.get("temoin") or {}).get("z"),
                    "couts_20e_ecart_r": {k: (v.get("ecart") or {}).get("esperance_r") for k, v in s["couts_20e"].items()}
-                   if s.get("couts_20e") else None}  # 20/10/2026 : `!frais`, écart apparié à mise_20e_r
+                   if s.get("couts_20e") else None,  # 20/10/2026 : `!frais`, écart apparié à mise_20e_r
+                   "un_bracket_degressif": _one_exit(s)}  # 25/10/2026 : décision n° 1 des audits
             for name, s in strats.items()}
     conf = (rep.get("confirmation_go") or {})
     out["confirmation_go"] = {v: {"go": r.get("go"), "confirme_ou_rien_moins_brut": r.get("ecart_par_go")}

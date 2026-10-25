@@ -23,6 +23,7 @@ from app import alerts, config, needs, scheduler
 from app.lab import brief as lab_brief
 from app.lab import catalysts as lab_catalysts
 from app.lab import db as lab_db
+from app.lab import export as lab_export
 from app.lab import grade as lab_grade
 from app.lab import lessons as lab_lessons
 from app.lab import method as lab_method
@@ -763,6 +764,21 @@ def lab_strategies_get():
         conn.close()
 
 
+@app.get("/api/lab/export/trades", dependencies=[Depends(lab_key)])
+def lab_export_trades_get(strategies: str = Query(",".join(lab_export.GO_STRATEGIES), max_length=500)):
+    """3e tour d'avis : lignes de strat_trades des `strategies` (séparées par des virgules ; par défaut les GO) en CSV,
+    hors bloc scellé, avec leur manifeste (définitions, empreintes, SHA-256, recette et chiffres de contrôle), pour
+    que GPT et Gemini recalculent eux-mêmes. Calcul direct, lecture seule."""
+    names = tuple(n.strip() for n in strategies.split(",") if n.strip())
+    if not names:
+        raise HTTPException(422, "Aucune stratégie demandée")
+    conn = _lab_conn()
+    try:
+        return lab_export.export(conn, names)
+    finally:
+        conn.close()
+
+
 @app.get("/api/lab/strategies/audit", dependencies=[Depends(lab_key)])
 def lab_strategies_audit_get():
     """2e tour d'avis (C2) : audit de la déclaration en vigueur, lignes archivées avant réécriture (data/archives/) appariées aux
@@ -855,10 +871,12 @@ async def lab_grade_avis(request: Request):
     l'accord de Simão ; un avis par marché et par soirée."""
     raw = await _lab_rule_body(request)
     try:
-        return await asyncio.to_thread(lab_grade.enqueue_avis, lab_db.db_path(), raw,
-                                       lab_brief.soiree(datetime.now(timezone.utc)))
+        out = await asyncio.to_thread(lab_grade.enqueue_avis, lab_db.db_path(), raw,
+                                      lab_brief.soiree(datetime.now(timezone.utc)))
     except lab_grade.AvisError as exc:
         raise HTTPException(422, str(exc))
+    scheduler.routine_seen("soir", out["soiree"])  # veille des routines (25/10/2026)
+    return out
 
 
 @app.get("/api/lab/brief", dependencies=[Depends(lab_key)])

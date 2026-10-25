@@ -34,7 +34,7 @@ quand aucun ordre ne part). Indicatif : il ne change ni le grade officiel ni le 
 elle peut enjamber le trou entre la fin du rejeu et le direct.
 
 Scénario 3 de GPT (10 octobre 2026) : une stratégie perdante paraissait bonne, triée par élan à côté d'un repère
-« 50 % ». Chaque ligne de stratégie dit son espérance (actions : à la mise de Simão, colonne r_20e de la ligne,
+« 50 % ». Chaque ligne de stratégie dit son espérance (actions : à la mise de Simão, au barème du compte, col_20e,
 commission IBKR comprise ; sinon l'unité est dite) et les stratégies sont triées par nombre de trades ; le grade
 indicatif des GO confirmés dit aussi son espérance à 20 € par trade.
 """
@@ -109,7 +109,7 @@ class Autopsy:
         self.no_tp1 = 0
         self.no_tp1_near = 0
         self.no_tp1_known = 0
-        self.r20 = [0.0, 0]  # actions : Σ et nombre des R à la mise de Simão (r_20e de la ligne)
+        self.r20 = [0.0, 0]  # actions : Σ et nombre des R à la mise de Simão (barème du compte, col_20e)
 
     def add(self, day: str, r: float, exit_reason: str | None, mfe: float, mae: float, tp1_hit,
             tp1_r: float | None, r20: float | None = None) -> None:
@@ -194,7 +194,7 @@ WHERE triggered = 1 AND r_net IS NOT NULL AND mfe_r IS NOT NULL AND mae_r IS NOT
   AND day NOT BETWEEN ? AND ?{version}
 """
 STRAT_QUERY = """
-SELECT market, strategy, day, r_net, exit_reason, mfe_r, mae_r, tp1_hit, r_20e
+SELECT market, strategy, day, r_net, exit_reason, mfe_r, mae_r, tp1_hit, {col20}
 FROM strat_trades
 WHERE triggered = 1 AND r_net IS NOT NULL AND mfe_r IS NOT NULL AND mae_r IS NOT NULL
   AND day NOT BETWEEN ? AND ?
@@ -217,9 +217,22 @@ def v1_report(conn: sqlite3.Connection, version: str | None) -> dict:
     return out
 
 
+def col_20e() -> str:
+    """Colonne « à 20 € » au barème IBKR du compte (JARVIS_IBKR_PLAN, comme le grade officiel) : r_20e_deg au
+    Dégressif, r_20e au Fixe. Avant le 25/10/2026, l'autopsie et le grade indicatif lisaient r_20e (Fixe) en dur."""
+    from app.lab import grade as GRADE
+
+    return "r_20e_deg" if GRADE.ibkr_plan() == "degressif" else "r_20e"
+
+
+def bareme_fr() -> str:
+    return "Dégressif" if col_20e() == "r_20e_deg" else "Fixe"
+
+
 def strat_report(conn: sqlite3.Connection) -> dict:
     groups: dict = defaultdict(Autopsy)
-    for market, strat, day, r, why, mfe, mae, tp1, r20 in conn.execute(STRAT_QUERY, SEAL.bounds()):
+    for market, strat, day, r, why, mfe, mae, tp1, r20 in conn.execute(STRAT_QUERY.format(col20=col_20e()),
+                                                                        SEAL.bounds()):
         tp1_r = None if strat.startswith("go_") else 1.0  # GO : objectif du plan v1, absent de la ligne
         groups[(market, strat)].add(day, r, why, mfe, mae, tp1, tp1_r, r20 if market == "stock" else None)
     out: dict = {}
@@ -248,8 +261,9 @@ def go_indicatif(conn: sqlite3.Connection) -> dict:
             f"AND triggered = 1 AND {col} IS NOT NULL AND day >= ? AND day NOT BETWEEN ? AND ? "
             f"ORDER BY COALESCE(filled_at, signal_at), id", (strat, cutoff, lo, hi))]
         m = GRADE.evaluate(rows)
-        n20, r20 = conn.execute(  # mêmes trades, à la mise de Simão (r_20e de la ligne, commission IBKR comprise)
-            f"SELECT COUNT(r_20e), AVG(r_20e) FROM strat_trades WHERE market = 'stock' AND strategy = ? "
+        c20 = col_20e()
+        n20, r20 = conn.execute(  # mêmes trades, à la mise de Simão (barème du compte, commission IBKR comprise)
+            f"SELECT COUNT({c20}), AVG({c20}) FROM strat_trades WHERE market = 'stock' AND strategy = ? "
             f"AND triggered = 1 AND {col} IS NOT NULL AND day >= ? AND day NOT BETWEEN ? AND ?",
             (strat, cutoff, lo, hi)).fetchone()
         day_sums: dict = {}
@@ -268,7 +282,8 @@ def go_indicatif(conn: sqlite3.Connection) -> dict:
                       "par_trade": {k: m.get(k) for k in ("grade", "trades", "jours", "esperance_r", "ic95",
                                                           "moities_r", "serie_pertes", "serie_attendue",
                                                           "reussite", "tp1", "raison")},
-                      "par_trade_20e": {"trades": n20, "esperance_r": round(r20, 4) if r20 is not None else None},
+                      "par_trade_20e": {"trades": n20, "esperance_r": round(r20, 4) if r20 is not None else None,
+                                          "bareme": bareme_fr()},
                       "par_go": {"go": n, "jours": len(day_sums),
                                  "esperance_r": round(mean, 4) if mean is not None else None, "ic95": ci},
                       "fenetre": STATS.span(days)}
@@ -393,7 +408,8 @@ def _at_20(r20: dict | None, trades: int) -> str:
     if not r20 or r20.get("esperance_r") is None:
         return " · à 20 € : n/d"
     part = f" (sur {r20['trades']})" if r20["trades"] < trades else ""
-    return f" · à 20 € : {r20['esperance_r']:+.3f} R par trade{part}"
+    tariff = f" ({r20['bareme']})" if r20.get("bareme") else ""
+    return f" · à 20 €{tariff} : {r20['esperance_r']:+.3f} R par trade{part}"
 
 
 def _esp(m: dict, market: str) -> str:
@@ -403,7 +419,7 @@ def _esp(m: dict, market: str) -> str:
     if m.get("esperance_20e_r") is None:
         return f"{m['esperance_r']:+.3f} R du labo (avant commission IBKR à 20 €)"
     part = f" (sur {m['trades_20e']} trades)" if (m.get("trades_20e") or 0) < m["trades"] else ""
-    return f"{m['esperance_20e_r']:+.3f} R à 20 €{part}"
+    return f"{m['esperance_20e_r']:+.3f} R à 20 € ({bareme_fr()}){part}"
 
 
 def _partial_text(part: dict) -> str:

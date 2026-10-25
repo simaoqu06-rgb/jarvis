@@ -46,6 +46,7 @@ from app.trading import calendar as CAL
 from app.trading import catalyst as C
 from app.trading import levels as L
 from app.trading import plan as P
+from app.trading import score as SC
 from app.trading import service as S
 from app.trading import signals as SIG
 from app.trading.settings import settings
@@ -180,7 +181,8 @@ def decide(plans: list[dict]) -> dict:
         if now and now["ok"] and p["score"]["go"]:
             return {"decision": f"ENTRER {p['side'].upper()}", "plan": p, "orders": [now], "reasons": reasons + [
                 f"{p['checklist']['verdict']} (checklist EmperorBTC {p['checklist']['score']}/{p['checklist']['max_score']}), "
-                f"note {p['score']['composite']:g}/10 GO, R/R {now['rr'][1]:g} sur le 2e objectif"]}
+                + (f"note {p['score']['composite']:g}/10 GO" if SC.show_note(p["market"]) else "GO du scanner")
+                + f", R/R {now['rr'][1]:g} sur le 2e objectif"]}
     for p in allowed:
         now = next((e for e in p["entries"] if e["kind"] == "maintenant"), None)
         if now and not now["ok"]:
@@ -400,8 +402,9 @@ def opinion_text(o: dict) -> str:
         lines.append(GRADE.plan_line(grade))
     for p in o["plans"]:
         lines.append(f"-# Checklist EmperorBTC {_side(p['side'])} : {p['checklist']['verdict']} "
-                     f"({p['checklist']['score']}/{p['checklist']['max_score']}) · note {p['score']['composite']:g}/10 "
-                     f"{p['score']['decision']}")
+                     f"({p['checklist']['score']}/{p['checklist']['max_score']}) · "
+                     + (f"note {p['score']['composite']:g}/10 " if SC.show_note(p["market"]) else "")
+                     + p["score"]["decision"])
     lines += [f"-# Plan impossible côté {err}" for err in o["errors"]]
     company = company_line(o.get("catalyst"), datetime.fromisoformat(o["created_at"]))
     if company:

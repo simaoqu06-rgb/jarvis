@@ -168,14 +168,17 @@ def test_note_non_predictive_affichee_partout_ou_le_go_s_affiche(lab_slope):
     assert SC.slope_note("stock") == "note non prédictive au labo (pente −0,020 R/pt, actions)"
     assert SC.slope_note("crypto") is None  # pente positive : pas de mention
     lines = "\n".join(T.score_lines(scored()))
-    assert ("-# Note non prédictive au labo (pente −0,020 R/pt, actions) : GO = règle de sélection figée, "
-            "pas une prédiction") in lines
-    assert "non prédictive" not in "\n".join(T.score_lines(scored("crypto")))
+    assert ("-# Note non prédictive au labo (pente −0,020 R/pt, actions) : note et sous-notes masquées, GO = règle "
+            "de sélection figée, pas une prédiction") in lines
+    assert "/10" not in lines and lines.startswith("✅ **GO**")  # audits du 25/10 : note masquée
+    crypto = "\n".join(T.score_lines(scored("crypto")))
+    assert "non prédictive" not in crypto and "/10" in crypto  # pente positive : la note reste
     result = {"at": "2026-10-07T13:10:00+00:00", "examined": 3, "passed": 1, "skipped": [], "rejected": {},
               "picks": [{"symbol": "AAA", "features": {"gap_pct": 3.0, "rvol": 2.0, "rsi": 60, "atr_pct": 4.0},
                          "plan": fake_plan("AAA")}]}
     assert "-# Note non prédictive au labo (pente −0,020 R/pt, actions) : le GO est une règle de sélection figée" \
         in scanner.text(result)
+    assert "/10" not in scanner.text(result)
     assert "non prédictive" not in scanner.text(result | {"picks": []})
 
 

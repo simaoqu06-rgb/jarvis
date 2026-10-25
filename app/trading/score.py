@@ -203,6 +203,13 @@ def lab_slopes() -> dict:
     return data
 
 
+def show_note(market: str) -> bool:
+    """Audits de GPT et Gemini (25/10/2026) : la note et ses sous-notes ne s'affichent que si elles prédisent quelque
+    chose au labo (pente mesurée > 0, ou pas encore mesurée) ; sinon le verdict GO / NO GO seul, avec slope_note. Le
+    verdict, lui, ne change pas : c'est la règle de sélection figée du scanner."""
+    return slope_note(market) is None
+
+
 def slope_note(market: str) -> str | None:
     """« note non prédictive au labo (pente −0,020 R/pt, actions) » quand la pente mesurée est ≤ 0 ;
     None si elle est positive ou pas encore mesurée."""

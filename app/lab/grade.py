@@ -20,9 +20,9 @@ Barème v2 validé par Simão le 2026-10-07 (après avis de GPT et Gemini) :
 
 Le grade donne le DROIT de risquer ; la taille se calcule à part (¼ de Kelly sur la borne basse de
 l'espérance, variance des R, corrigé de la corrélation des trades d'un même jour), plafonnée par la
-lettre : F, E, non noté 0 % (plans en observation, forward-test papier seulement), D 0,25 %, C 1 %,
-B 1,5 %, A 3 %, S 5 % (plafond EmperorBTC choisi par Simão ; JARVIS recommandait 2 %, pari noté ; le
-budget total de 4 % le ramène à 4 % en pratique). En direct s'y ajoutent le risque ouvert total (≤ 4 %)
+lettre : F, E, non noté 0 % (plans en observation, forward-test papier seulement), D 0,25 %, C 0,5 %,
+B 0,75 %, A 1 %, S 1,5 % (depuis le 25/10/2026, après les audits de GPT et Gemini ; avant : C 1 %, B 1,5 %,
+A 3 %, S 5 %, plafond EmperorBTC). En direct s'y ajoutent le risque ouvert total (≤ 3 %)
 et l'arrêt de la journée à −3 R sur les trades pris (risk_now) ; un grade que le labo n'a pas revérifié
 depuis MAX_AGE_H heures ne donne plus aucun droit (périmé : 0 %).
 
@@ -78,9 +78,14 @@ SERIE_TOLERANCE = 1.25
 REGULARITE_R = 0.15
 DELAIS = (0.40, 0.65)
 # Plafond de risque réel par trade (% du capital) selon la lettre ; D : micro-exposition fixe.
-RISQUE_MAX = {"F": 0.0, "E": 0.0, "D": 0.25, "C": 1.0, "B": 1.5, "A": 3.0, "S": 5.0}
+# Abaissé le 25/10/2026 (audits de GPT et Gemini, décision n° 2 confiée à JARVIS par Simão) : avant, C 1 %, B 1,5 %,
+# A 3 %, S 5 % (plafond EmperorBTC) et 4 % de risque ouvert. Changé à froid, le grade étant F (0 %) partout.
+RISQUE_MAX = {"F": 0.0, "E": 0.0, "D": 0.25, "C": 0.5, "B": 0.75, "A": 1.0, "S": 1.5}
 KELLY_PART = 0.25
-RISQUE_OUVERT_MAX = 4.0
+RISQUE_OUVERT_MAX = 3.0
+# Risque compté pour un trade réellement pris dont la taille est illisible : 1 % (l'ancien plafond de C), plus que
+# tout plafond de C ou B : en cas de doute, le budget se remplit plus vite, jamais moins vite.
+RISQUE_INCONNU = 1.0
 ARRET_JOUR_R = -3.0
 TROU_JOURS = 10        # écart calendaire entre deux jours de la fenêtre au-delà duquel elle est coupée
 # Version du calcul (2 : R des actions après commission IBKR à 20 €, Kelly corrigé ; 3 : après une promotion, seuls
@@ -187,7 +192,7 @@ def evaluate(rows: list[tuple]) -> dict:
     kelly = KELLY_PART * low / var * 100 if low is not None and low > 0 and var > 0 else 0.0
     # Les trades d'un même jour ne sont pas indépendants : corrélation intra-jour estimée par l'effet de grappe
     # (DEFF = se² × n / var, ρ = (DEFF − 1) / (k̄ − 1), k̄ trades par jour du labo), appliquée aux positions que
-    # Simão peut tenir ensemble sous le budget (⌈4 % / plafond de la lettre⌉), pas aux dizaines du labo.
+    # Simão peut tenir ensemble sous le budget (⌈RISQUE_OUVERT_MAX / plafond de la lettre⌉), pas aux dizaines du labo.
     k_bar = n / len(day_sums)
     rho = (min(1.0, max(0.0, (se * se * n / var - 1) / (k_bar - 1)))
            if se is not None and var > 0 and k_bar > 1 else 0.0)
@@ -764,7 +769,7 @@ def market_grade(market: str, data: dict | None = None) -> dict | None:
 def taken_pct(t: dict, capital: float | None = None) -> float:
     """Risque pris sur un trade suivi (% du capital, en euros) : ses euros de risque (`risk_amount_eur` de sa taille,
     ou de la règle de 20 € quand JARVIS n'en proposait pas) rapportés au capital s'il est connu, sinon son % ; à
-    défaut le plafond de C (1 %) : jamais 0 pour un trade réellement pris."""
+    défaut RISQUE_INCONNU (1 %) : jamais 0 pour un trade réellement pris."""
     for s in (t.get("sizing"), t.get("sizing_regle")):
         if not isinstance(s, dict):
             continue
@@ -773,7 +778,7 @@ def taken_pct(t: dict, capital: float | None = None) -> float:
             return s["risk_amount_eur"] / cap * 100
         if s.get("risk_pct"):
             return s["risk_pct"]
-    return RISQUE_MAX["C"]
+    return RISQUE_INCONNU
 
 
 def open_risk(trades: list[dict]) -> float:
@@ -788,7 +793,7 @@ def open_risk(trades: list[dict]) -> float:
         try:
             pct = taken_pct(t, capital)
         except (TypeError, ValueError, ZeroDivisionError):
-            pct = RISQUE_MAX["C"]
+            pct = RISQUE_INCONNU
         try:
             risk = abs(t["entry"] - t["stop"])
             sign = 1 if t["side"] == "long" else -1
@@ -872,7 +877,7 @@ def risk_now(market: str, trades: list[dict], now: datetime | None = None, data:
                 "observation": True}
     base = g["risque_grade"]
     out = {"grade": g["grade"], "risque_grade": base, "risque_max": g["risque_max"], "mode_survie": g["mode_survie"],
-           "non_note": g["non_note"]}
+           "non_note": g["non_note"], "delais_tenus": (g.get("mesure") or {}).get("delais_tenus")}
     age = age_h(data, now)
     if age is None or age > MAX_AGE_H:
         return out | {"risque_propose": 0.0, "observation": True, "perime": True,
@@ -916,6 +921,20 @@ def plan_line(g: dict) -> str:
                     f", alors que JARVIS ne propose aucun risque ({g['risque_propose']:g} %)")
                  + " : ton choix, gardé tel quel")
     return line
+
+
+def delay_line(g: dict) -> str | None:
+    """Audits de GPT et Gemini (25/10/2026) : la calibration mesurée des délais, à côté des délais du plan. Part des
+    objectifs touchés au plus tard au délai médian prévu (fenêtre du grade), contre la cible DELAIS ; None sans mesure."""
+    d = g.get("delais_tenus")
+    if d is None:
+        return None
+    target = f"cible {DELAIS[0] * 100:.0f}-{DELAIS[1] * 100:.0f} %"
+    if DELAIS[0] <= d <= DELAIS[1]:
+        return f"-# Délais calibrés au labo : {d * 100:.0f} % des objectifs touchés au plus tard au délai médian prévu ({target})."
+    late = "arrivent plus tard que prévu" if d < DELAIS[0] else "arrivent plus tôt que prévu"
+    return (f"-# ⚠️ Délais non calibrés au labo : {d * 100:.0f} % des objectifs touchés au plus tard au délai médian prévu "
+            f"({target}) ; les objectifs {late}. Un ordre de grandeur, pas une échéance.")
 
 
 def _pct(x) -> str:

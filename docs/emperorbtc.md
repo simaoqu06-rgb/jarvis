@@ -35,7 +35,7 @@ sont tous validés ; **attendre** si le déclencheur est incomplet ; **contre la
 
 | Règle du manuel | Ce que fait JARVIS | Code |
 |---|---|---|
-| Risquer 3 % du capital par trade (5 % = agressif) | plafond du grade de JARVIS : A 3 %, S 5 % (4 % en pratique : budget total), moins en dessous, 0 % en F/E ; en euros, jamais plus de `JARVIS_RISK_EUR` (20 €, ta règle) : risque = min(capital × % du grade, 20 €) ; `JARVIS_RISK_PCT=3` reste le défaut du labo | `lab.grade.risk_now`, `service.apply_grade` |
+| Risquer 3 % du capital par trade (5 % = agressif) | plafond du grade de JARVIS : A 1 %, S 1,5 % (depuis le 25/10/2026 ; avant A 3 %, S 5 %), budget total 3 %, moins en dessous, 0 % en F/E ; en euros, jamais plus de `JARVIS_RISK_EUR` (20 €, ta règle) : risque = min(capital × % du grade, 20 €) ; `JARVIS_RISK_PCT=3` reste le défaut du labo | `lab.grade.risk_now`, `service.apply_grade` |
 | La taille découle du stop, le levier découle de la taille | Taille = risque (€ convertis au change BCE du jour) ÷ distance au stop, en actions entières (crypto : fractionnaire), levier = taille ÷ capital ; grade à 0 % : pas de taille de JARVIS, ta règle de 20 € affichée à part | `service.euro_sizing` |
 | « Ne soyez pas pressé de passer votre SL au seuil de rentabilité » | Stop inchangé après le TP1, remonté à l'entrée après le TP2 | `service.apply_bars` |
 

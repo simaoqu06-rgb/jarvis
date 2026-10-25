@@ -470,18 +470,21 @@ def score_lines(p: dict) -> list[str]:
     sub = " · ".join(f"{label} {parts[k]['score']:g}" for k, label in
                      (("technique", "technique"), ("catalyst", "catalyseur"), ("risk", "risque"))
                      if parts[k]["score"] is not None)
-    lines = [f"{icon} **{sc['decision']} · note {sc['composite']:g}/10** ({sub})"
-             + (f" · {' ; '.join(sc['reasons'])}" if sc["reasons"] else "")]
-    note = SC.slope_note(p.get("market", "stock"))
+    market = p.get("market", "stock")
+    shown = SC.show_note(market)
+    head = f"{icon} **{sc['decision']} · note {sc['composite']:g}/10** ({sub})" if shown else f"{icon} **{sc['decision']}**"
+    lines = [head + (f" · {' ; '.join(sc['reasons'])}" if sc["reasons"] else "")]
+    note = SC.slope_note(market)
     if note:
-        lines.append(f"-# {note[0].upper()}{note[1:]} : GO = règle de sélection figée, pas une prédiction")
+        lines.append(f"-# {note[0].upper()}{note[1:]} : note et sous-notes masquées, GO = règle de sélection figée, "
+                     "pas une prédiction")
     for k, label in (("technique", "Technique"), ("catalyst", "Catalyseur"), ("risk", "Risque")):
         lines.append(f"-# {label} : {' ; '.join(parts[k]['reasons'])}")
     if sc.get("lecons"):
         les = sc["lecons"]
         with_lessons = sc.get("composite_lecons")
         lines.append(f"-# Leçons du labo (affichées, sans effet sur le verdict) : {' ; '.join(les['lignes'])}"
-                     + (f" · note avec leçons {with_lessons:g}" if with_lessons is not None else ""))
+                     + (f" · note avec leçons {with_lessons:g}" if with_lessons is not None and shown else ""))
     cat = p.get("catalyst") or {}
     marks = {"positive": "🟢", "negative": "🔴", "dilution": "🟠", "neutre": "⚪"}
     for n in cat.get("news", [])[:3]:
@@ -606,6 +609,12 @@ def plan_text(p: dict) -> str:
             f"{t['eta_text']} · touché avant le stop {t['hit_rate'] * 100:.0f} %{ci_text}, "
             f"espérance {t['expectancy_r']:+.2f} R"
         )
+    if p.get("grade"):
+        from app.lab import grade as GRADE  # import tardif : le labo importe le moteur de plans
+
+        delay = GRADE.delay_line(p["grade"])
+        if delay:
+            lines.append(delay)
     lines += confirmation_lines(p)
     marks = {True: "✅", False: "❌", None: "➖"}
     lines.append(" · ".join(f"{marks[i['ok']]} {i['label']}" for i in check["items"]))
