@@ -21,6 +21,7 @@ from app.notify import bot, discord
 from app.sources import alpaca, twelvedata
 from app.trading import calendar as CAL
 from app.trading import advice, paper, scanner
+from app.trading import gemini as GEMINI
 from app.trading import plus10 as PLUS10
 from app.trading import visibilite as VIS
 from app.trading import confirm as CONFIRM
@@ -405,6 +406,36 @@ async def tick_plus10(now: datetime | None = None) -> None:
         _kick_outbox()
 
 
+async def tick_gemini(now: datetime | None = None) -> None:
+    """Challenger « méthode Gemini » (25 octobre 2026) : passages A (9 h 36), B (12 h 36) et C (15 h 31) New York,
+    plans sur le salon et en MP ; solde après la clôture du lendemain contre le témoin aléatoire (rien n'est envoyé)."""
+    now = now or datetime.now(timezone.utc)
+    st = GEMINI.load()
+    kind = GEMINI.due(now, st)
+    if kind:
+        try:
+            result = await GEMINI.scan(kind, now)
+        except Exception as exc:
+            log.warning("Challenger Gemini : passage %s en échec : %s", kind, exc)
+            return  # nouvelle tentative à la minute suivante, dans la fenêtre du passage
+        st = GEMINI.load()
+        GEMINI.mark_done(st, kind, now)
+        st.setdefault("plans", []).extend(result["plans"])
+        GEMINI.save(st)
+        if result["plans"]:
+            rate = await _usd_per_eur()
+            _, risk_eur = _size_rule(now)
+            texts = [GEMINI.plan_text(p, rate, risk_eur) for p in result["plans"]]
+            bounds = CAL.session_bounds(now.astimezone(NEW_YORK).date())
+            async with _lock:
+                _queue(texts, "scanner", expires_at=bounds[1] if bounds else None)
+                _dm_trades(texts)
+                _kick_outbox()
+        return
+    if time(16, 20) <= now.astimezone(NEW_YORK).time() < time(18, 0):
+        await GEMINI.settle_due(now, st)
+
+
 async def tick_visibilite(now: datetime | None = None) -> None:
     """Audit anti-fuite : actus Finnhub des gappers vues à 9 h 46 New York, relues à 11 h (rien n'est envoyé)."""
     now = now or datetime.now(timezone.utc)
@@ -495,6 +526,7 @@ CORE_JOBS = [
     ("forward-test sur le compte fictif", tick_paper, 2 * MINUTE, True),
     ("contrôle des GO après l'ouverture", tick_confirm, MINUTE, False),  # prend le verrou lui-même pour écrire
     ("potentiel +10 confirmé", tick_plus10, MINUTE, False),  # n° 9 ; prend le verrou lui-même pour envoyer
+    ("challenger Gemini", tick_gemini, MINUTE, False),  # prend le verrou lui-même pour envoyer
     ("visibilité des actus Finnhub", tick_visibilite, MINUTE, False),  # mesure seule, rien n'est envoyé
 ]
 # Seulement avec les notifications actives.

@@ -40,6 +40,8 @@ qu'aux comptes listés dans JARVIS_DISCORD_OWNER_ID et ignore tout le reste sans
   !fed                  mesure Polymarket (sans essai) : par séance, ce que le repricing de la Fed pendant la nuit
                         change au R des ORB (aussi `!polymarket`)
   !potentiel            potentiel +10 : part des séances qui touchent +8 % selon le gap, types de catalyseurs
+  !gemini               challenger « méthode Gemini » (forward-test) : plans du jour et bilan contre le témoin
+                        aléatoire, frais IBKR compris ; `!gemini bilan` pour le bilan seul
   !kill                 JARVIS Killmode, désactivé par défaut : `!kill on`, `!kill NVDA`, `!kill scan`, `!kill bilan`
   !aide                 cette liste
 
@@ -75,6 +77,7 @@ from app.trading import advice, company, paper, scanner
 from app.trading import proposals as PR
 from app.trading import service as trading
 from app.trading.settings import settings
+from app.trading import gemini  # challenger « méthode Gemini »
 from app.trading import killmode  # JARVIS Killmode (!kill), éteint par défaut
 
 log = logging.getLogger(__name__)
@@ -530,6 +533,8 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
             return await asyncio.to_thread(polyfed_text)
         if cmd in ("potentiel", "potentiel10", "plus10"):
             return await asyncio.to_thread(potentiel_text)
+        if cmd == "gemini":
+            return await gemini.command(args)
         if cmd == "kill":
             if args and args[0].upper().removesuffix("USD") in CRYPTO:
                 return "🔪 Killmode ne traite que les actions US (la fiche société et le catalyseur en font partie)."
