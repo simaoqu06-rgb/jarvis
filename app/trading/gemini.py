@@ -740,7 +740,8 @@ def plan_text(p: dict, rate: float | None = None, risk_eur: float | None = KM.RI
         lines.append(_size(p["ref"], p["stop"], rate, risk_eur))
     lines.append(f"Nuit : garder la moitié restante seulement si TP1 est touché, le prix au-dessus du VWAP à 15 h 45 NY "
                  f"et {p.get('etf') or MARKET} pas à −1,5 % ou pire ; le lendemain, sortie au TP2, à l'entrée ou à "
-                 f"10 h 30 NY au plus tard.")
+                 f"10 h 30 NY au plus tard. Non vérifié par JARVIS : dépêche négative sur le secteur, poids lourd qui "
+                 f"publie avant l'ouverture.")
     lines.append("-# Méthode de Gemini en forward-test contre un témoin aléatoire, pas un GO de JARVIS. `!gemini` : bilan.")
     return "\n".join(x for x in lines if x)
 
