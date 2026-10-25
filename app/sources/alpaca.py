@@ -89,8 +89,11 @@ async def bars(symbols: list[str], interval_min: int, days: int, now: datetime |
 
 async def bars_range(symbols: list[str], interval_min: int, start: datetime, end: datetime, feed: str = "sip",
                      adjustment: str = "split", transport: httpx.AsyncBaseTransport | None = None,
-                     max_pages: int = 500, call=None) -> dict[str, list[dict]]:
+                     max_pages: int = 500, call=None, asof: str | None = None) -> dict[str, list[dict]]:
     """Bougies de plusieurs actions entre deux instants (pagination page_token / next_page_token).
+
+    `asof` (AAAA-MM-JJ) : date à laquelle le symbole désigne la société voulue (par défaut aujourd'hui : l'historique
+    d'une société renommée suit son symbole actuel). Sert à l'étude des 8-K pour les sociétés radiées.
 
     Pour l'historique (labo) : `end` doit être antérieur à maintenant - 16 min avec le flux SIP gratuit.
     `call(fn, *args, **kwargs)` enveloppe chaque requête (limite de débit, nouvelles tentatives).
@@ -103,6 +106,8 @@ async def bars_range(symbols: list[str], interval_min: int, start: datetime, end
               "start": start.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
               "end": end.astimezone(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
               "adjustment": adjustment, "feed": feed, "sort": "asc"}
+    if asof:
+        params["asof"] = asof
     out: dict[str, list[dict]] = {s: [] for s in symbols}
     for _ in range(max_pages):
         payload = await call(_request, "GET", f"{DATA}/v2/stocks/bars", dict(params), transport=transport) or {}

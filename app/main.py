@@ -35,6 +35,7 @@ from app.lab import potentiel as lab_potentiel
 from app.lab import audit as lab_audit
 from app.lab import autopsie as lab_autopsie
 from app.lab import rates as lab_rates
+from app.lab import etude8k as lab_etude8k
 from app.lab import polyfed as lab_polyfed
 from app.lab import sec8k as lab_sec8k
 from app.lab import filtres as lab_filtres
@@ -865,6 +866,18 @@ def lab_sec8k_get():
     conn = _lab_conn()
     try:
         return lab_sec8k.cached(conn) or lab_sec8k.report(conn)
+    finally:
+        conn.close()
+
+
+@app.get("/api/lab/etude8k", dependencies=[Depends(lab_key)])
+def lab_etude8k_get():
+    """Étude des 8-K sur plusieurs jours, collecte seulement (protocole v2.1) : trimestres de l'index EDGAR lus, CIK,
+    8-K 2.02 et 1.01 par année, tickers à la date, en-têtes des heures ambiguës et leur contrôle, séries de bougies.
+    Aucun rendement. État écrit par le worker à chaque passage de la collecte."""
+    conn = _lab_conn()
+    try:
+        return lab_etude8k.cached(conn) or {"etat": "collecte pas encore commencée"}
     finally:
         conn.close()
 
