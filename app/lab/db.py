@@ -196,6 +196,40 @@ CREATE TABLE IF NOT EXISTS sec_exact (
     accession TEXT PRIMARY KEY, kind TEXT NOT NULL, accepted_ts INTEGER, status TEXT NOT NULL, fetched_ts INTEGER,
     attempts INTEGER NOT NULL DEFAULT 0
 );
+-- Étude des 8-K sur plusieurs jours (etude8k.py, protocole v2.1 du 25 octobre 2026), collecte seulement : 8-K, 8-K/A
+-- et avis de radiation (25, 25-NSE, 15) de l'index complet d'EDGAR, radiées comprises ; déposants lus (dépôts depuis
+-- covered_from, tickers actuels, SIC) ; leurs 8-K avec items, heure JSON et document principal ; heure de l'en-tête
+-- (kind : ambigu, controle_retard, controle_juste ; status ok, illisible ou erreur) ; ticker à la date (source
+-- sec_actuel ou couverture, asof = date du 8-K lu) ; séries de bougies journalières (serie = symbole, ou
+-- symbole@asof), copie figée lue une fois, d = date de New York en jours (date.toordinal()).
+CREATE TABLE IF NOT EXISTS e8k_index (
+    accession TEXT PRIMARY KEY, cik INTEGER NOT NULL, form TEXT NOT NULL, date_filed TEXT NOT NULL, company TEXT
+);
+CREATE INDEX IF NOT EXISTS e8k_index_cik ON e8k_index (cik, date_filed);
+CREATE TABLE IF NOT EXISTS e8k_ciks (
+    cik INTEGER PRIMARY KEY, status TEXT NOT NULL, covered_from TEXT, fetched_ts INTEGER, fetched_day TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0, name TEXT, tickers TEXT, exchanges TEXT, sic TEXT, note TEXT
+);
+CREATE TABLE IF NOT EXISTS e8k_filings (
+    accession TEXT PRIMARY KEY, cik INTEGER NOT NULL, form TEXT NOT NULL, items TEXT, accepted_ts INTEGER,
+    filing_date TEXT, suspect INTEGER NOT NULL DEFAULT 0, primary_doc TEXT
+);
+CREATE INDEX IF NOT EXISTS e8k_filings_cik ON e8k_filings (cik, filing_date);
+CREATE TABLE IF NOT EXISTS e8k_exact (
+    accession TEXT PRIMARY KEY, kind TEXT NOT NULL, accepted_ts INTEGER, status TEXT NOT NULL, fetched_ts INTEGER,
+    attempts INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS e8k_tickers (
+    cik INTEGER NOT NULL, symbol TEXT NOT NULL, source TEXT NOT NULL, asof TEXT NOT NULL DEFAULT '', accession TEXT,
+    PRIMARY KEY (cik, symbol, asof)
+);
+CREATE TABLE IF NOT EXISTS e8k_series (
+    serie TEXT PRIMARY KEY, symbol TEXT NOT NULL, asof TEXT, status TEXT, n INTEGER, first_day TEXT, last_day TEXT,
+    fetched_ts INTEGER, attempts INTEGER NOT NULL DEFAULT 0, note TEXT
+);
+CREATE TABLE IF NOT EXISTS e8k_bars (
+    serie TEXT NOT NULL, d INTEGER NOT NULL, o REAL, h REAL, l REAL, c REAL, v REAL, PRIMARY KEY (serie, d)
+) WITHOUT ROWID;
 -- Mesure Polymarket Fed (polyfed.py, 25 octobre 2026) : issues des marchés « Fed decision » (jeton du « Yes », réunion,
 -- points de base signés) et leurs cotes horaires (app/sources/polymarket.py). status : ok ou erreur.
 CREATE TABLE IF NOT EXISTS pm_markets (
