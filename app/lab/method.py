@@ -16,6 +16,12 @@
 - Une promotion note la frontière de ce qui était journalisé (« vu_a_la_promotion », comme les leçons) :
   le grade des marchés touchés repart des jours d'après (grade._scope), jamais des jours de l'essai.
 - Une règle refusée est rangée dans la mémoire des échecs (« refusée par Simão ») : jamais reproposée.
+- Autonomie totale du council (choix de Simão du 25 octobre 2026, carte « Laisser le council déclarer et lancer seul
+  ses tests au labo ? ») : une règle validée part en essai sans attendre Simão (auto_approve), et un challenger
+  promouvable est mis en place au regard qui le juge (judge_challenger), annoncé sur Discord. Simão garde un veto
+  (`!veto`, apply_veto) : il remet l'ancienne méthode en place, ou retire le challenger en essai, et range ses règles
+  dans la mémoire des échecs. JARVIS_LAB_AUTONOMIE=off rend les deux décisions à Simão (ancien circuit). Les hausses
+  du grade, qui augmentent le risque en argent réel, restent à Simão dans tous les cas.
 - Le champion est écrit dans un petit fichier JSON (lab_champion.json, à côté de la base) que JARVIS
   en direct lit : ses filtres s'y appliquent avec EXACTEMENT le même code SQL que le labo (kept_sql,
   évalué en direct sur une base SQLite en mémoire, voir evaluate_rows).
@@ -41,11 +47,18 @@ log = logging.getLogger(__name__)
 CHAMPION_FILE = "lab_champion.json"
 DECISIONS = ("approuvee", "refusee")
 REFUSED_REASON = "refusée par Simão"
+VETO_REASON = "veto de Simão"
+COUNCIL = "council"
 TYPES_MAX = 500
 MARKET_FR = {"stock": "actions", "crypto": "crypto"}
 
 
 # --- Filtres : le même SQL au labo et en direct ----------------------------------------------
+
+def autonomous() -> bool:
+    """Autonomie totale du council (défaut depuis le 25/10/2026) ; JARVIS_LAB_AUTONOMIE=off la coupe."""
+    return os.getenv("JARVIS_LAB_AUTONOMIE", "totale").strip().lower() not in ("off", "0", "non", "false", "simao")
+
 
 def concrete(rule: dict) -> dict | None:
     """Règle applicable (seuil « auto » figé) depuis une ligne de validator.get_rule. Le seuil « auto »
@@ -560,6 +573,11 @@ def ingest_decisions(db: LabDB, now: datetime | None = None) -> int:
     for f in sorted(q.glob("*.json")):
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
+            if data.get("veto"):
+                apply_veto(db, now)
+                n += 1
+                f.unlink(missing_ok=True)
+                continue
             rule = None if "promotion" in data else V.get_rule(db.conn, data["empreinte"])
             if "promotion" in data:
                 n += decide_promotion(db, data, now)
@@ -745,7 +763,7 @@ def _noted(cmp: dict, cfg: dict) -> dict:
     return cmp | {"seuil_z": round(z_min(cmp, cfg), 3), "rang_challenger": cfg.get("challenger_rang", 1)}
 
 
-def _promote(db: LabDB, champ: dict, chall: dict, cmp: dict, now: datetime) -> str:
+def _promote(db: LabDB, champ: dict, chall: dict, cmp: dict, now: datetime, by: str = "simao") -> str:
     from app.lab import lessons as L  # import tardif, comme validator.frontier_sql
 
     new, (c, h) = new_rules(champ, chall), (cmp["champion"], cmp["challenger"])
@@ -754,15 +772,18 @@ def _promote(db: LabDB, champ: dict, chall: dict, cmp: dict, now: datetime) -> s
                     (stamp, champ["version"]))
     # Frontière de ce qui est journalisé à la promotion (comme les leçons) : le grade des marchés touchés ne
     # compte que les jours d'après, jamais ceux de l'essai qui ont décidé la promotion.
-    settings = version_settings(db.conn, chall["version"]) | {"vu_a_la_promotion": L.seen_until(db.conn)}
+    settings = version_settings(db.conn, chall["version"]) | {"vu_a_la_promotion": L.seen_until(db.conn),
+                                                              "promu_par": by}
     db.conn.execute("UPDATE method_versions SET role = 'champion', decided_at = ?, note = ?, settings = ? "
                     "WHERE version = ?", (stamp, json.dumps(cmp, ensure_ascii=False),
                                           json.dumps(settings, ensure_ascii=False), chall["version"]))
     for r in new:
         db.conn.execute("UPDATE rules SET decision = 'adoptee' WHERE hash = ?", (r["empreinte"],))
     db.set("methode", "promotion", None)
+    who = (f"promue par le council, autonomie totale ; `!veto` remet {champ['version']} en place" if by == COUNCIL
+           else "promotion approuvée par Simão")
     text = (f"🧪 Méthode {chall['version']} en place : {_names(new)} s'applique désormais aux plans de JARVIS "
-            f"(promotion approuvée par Simão). En direct sur {cmp['jours']} jours de trades{_where(cmp)} : "
+            f"({who}). En direct sur {cmp['jours']} jours de trades{_where(cmp)} : "
             f"{fr(h['esperance_r'], 3)} par trade sur {h['declenches']} trades, contre {fr(c['esperance_r'], 3)} sur "
             f"{c['declenches']} pour {champ['version']} ; potentiel +10 capturé {h['capture']} fois "
             f"(contre {c['capture']}).{absolute_fr(h, cmp['delta_r'])}")
@@ -785,10 +806,10 @@ def _retire(db: LabDB, champ: dict, chall: dict, cmp: dict, now: datetime, why: 
 
 
 def judge_challenger(db: LabDB, now: datetime | None = None, cfg: dict | None = None) -> str | None:
-    """Regards fixes sur le challenger. « promouvoir » ne bascule rien : la promotion attend l'accord de
-    Simão (proposition « promouvoir vX », decide_promotion) et le challenger reste mesuré ; le regard
-    suivant la remplace. « retirer » le retire. Renvoie le verdict d'un regard ou d'un retrait, None
-    entre deux regards."""
+    """Regards fixes sur le challenger. En autonomie (autonomous), « promouvoir » le met en place tout de suite (décision
+    du council, veto de Simão possible). Sinon la promotion attend l'accord de Simão (proposition « promouvoir vX »,
+    decide_promotion) et le challenger reste mesuré ; le regard suivant la remplace. « retirer » le retire. Renvoie le
+    verdict d'un regard ou d'un retrait, None entre deux regards."""
     now = now or datetime.now(timezone.utc)
     cfg = cfg or V.config(db.conn)
     chall = challenger(db.conn)
@@ -807,7 +828,9 @@ def judge_challenger(db: LabDB, now: datetime | None = None, cfg: dict | None = 
     with db.transaction():
         if look is not None:
             db.set("methode", key, look)
-        if v == "promouvoir":
+        if v == "promouvoir" and autonomous():
+            log.info("Labo : %s", _promote(db, champ, chall, _noted(cmp, cfg), now, by=COUNCIL))
+        elif v == "promouvoir":
             promo = {"id": f"{chall['version']}-{look}", "version": chall["version"], "champion": champ["version"],
                      "regard": look, "le": now.isoformat(timespec="seconds"),
                      "texte": promotion_text(cmp, cfg, champ, chall, look)}
@@ -848,6 +871,82 @@ def decide_promotion(db: LabDB, data: dict, now: datetime | None = None) -> int:
             text = _retire(db, champ, chall, cmp, now, "promotion refusée par Simão")
     log.info("Labo : %s", text)
     return 1
+
+
+def auto_approve(db: LabDB, now: datetime | None = None) -> int:
+    """Autonomie : les règles validées sans décision partent en essai sans attendre Simão (décision du council).
+    Annoncé sur Discord (lab_events) ; le veto de Simão reste possible."""
+    if not autonomous():
+        return 0
+    now = now or datetime.now(timezone.utc)
+    rules = [V.get_rule(db.conn, h) for (h,) in db.conn.execute(
+        "SELECT hash FROM rules WHERE status = 'validee' AND decision IS NULL ORDER BY tested_at, id")]
+    if not rules:
+        return 0
+    stamp = now.isoformat(timespec="seconds")
+    with db.transaction():
+        for rule in rules:
+            db.conn.execute("UPDATE rules SET decision = 'approuvee', decided_at = ? WHERE hash = ?",
+                            (stamp, rule["empreinte"]))
+            event(db, COUNCIL, None, f"🧪 Règle « {rule.get('nom') or rule['empreinte'][:10]} » validée par le labo et "
+                                     f"approuvée par le council (autonomie totale) : elle part en essai comme "
+                                     f"challenger. `!veto` pour la retirer. {proof_fr(rule)}",
+                  {"empreinte": rule["empreinte"]}, now)
+    log.info("Labo : %d règle(s) approuvée(s) par le council", len(rules))
+    return len(rules)
+
+
+def enqueue_veto(db_file: str) -> Path:
+    """Serveur web (`!veto`) : veto de Simão sur la dernière décision du council, appliqué par le worker."""
+    target = queue_root(db_file) / "decisions" / f"veto-{uuid.uuid4().hex}.json"
+    _write_atomic(target, {"veto": True, "le": now_iso()})
+    return target
+
+
+def _refuse_rules(db: LabDB, rules: list[dict], stamp: str) -> None:
+    for r in rules:
+        db.conn.execute("UPDATE rules SET status = 'rejetee', reason = ?, decision = 'refusee', decided_at = ? "
+                        "WHERE hash = ?", (json.dumps([VETO_REASON]), stamp, r["empreinte"]))
+
+
+def apply_veto(db: LabDB, now: datetime | None = None) -> str:
+    """Veto de Simão : une méthode promue par le council redevient l'ancienne ; sinon le challenger en essai est
+    retiré ; sinon les règles approuvées par le council et pas encore en essai sont refusées. Les règles concernées
+    rejoignent la mémoire des échecs (« veto de Simão »)."""
+    from app.lab import lessons as L
+
+    now = now or datetime.now(timezone.utc)
+    stamp = now.isoformat(timespec="seconds")
+    champ, chall = champion(db.conn), challenger(db.conn)
+    settings = version_settings(db.conn, champ["version"]) if champ.get("version") else {}
+    with db.transaction():
+        if settings.get("promu_par") == COUNCIL and settings.get("champion_au_depart"):
+            back = settings["champion_au_depart"]
+            old = next((v for v in versions(db.conn) if v["version"] == back), {"regles": []})
+            removed = new_rules(old, champ)
+            if chall:
+                _retire(db, champ, chall, compare(db.conn, champ, chall), now, VETO_REASON)
+            db.conn.execute("UPDATE method_versions SET role = 'retiree', decided_at = ? WHERE version = ?",
+                            (stamp, champ["version"]))
+            restored = version_settings(db.conn, back) | {"vu_a_la_promotion": L.seen_until(db.conn)}
+            db.conn.execute("UPDATE method_versions SET role = 'champion', decided_at = ?, settings = ? "
+                            "WHERE version = ?", (stamp, json.dumps(restored, ensure_ascii=False), back))
+            _refuse_rules(db, removed, stamp)
+            text = (f"🧪 Veto de Simão : {back} remise en place à la place de {champ['version']} "
+                    f"({_names(removed)} rejoint la mémoire des échecs).")
+            event(db, "veto", back, text, None, now)
+        elif chall:
+            text = _retire(db, champ, chall, compare(db.conn, champ, chall), now, VETO_REASON)
+            _refuse_rules(db, new_rules(champ, chall), stamp)
+        else:
+            waiting = _approved_waiting(db.conn)
+            if not waiting:
+                return "Veto : rien à annuler (pas de méthode promue par le council, ni de challenger, ni de règle en attente)."
+            _refuse_rules(db, waiting, stamp)
+            text = f"🧪 Veto de Simão : {_names(waiting)} ne partira pas en essai."
+            event(db, "veto", None, text, None, now)
+    log.info("Labo : %s", text)
+    return text
 
 
 def champion_path(db_file: str | None = None) -> Path:
@@ -899,6 +998,7 @@ def step(db: LabDB, now: datetime | None = None) -> dict:
     now = now or datetime.now(timezone.utc)
     report: dict = {}
     for name, fn in (("decisions", lambda: ingest_decisions(db, now)), ("types", lambda: ingest_types(db)),
+                     ("council", lambda: auto_approve(db, now)),
                      ("challenger", lambda: (c := ensure_challenger(db, now)) and c["version"]),
                      ("bascule", lambda: judge_challenger(db, now)), ("fichier", lambda: write_champion(db))):
         try:

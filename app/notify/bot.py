@@ -28,6 +28,8 @@ qu'aux comptes listés dans JARVIS_DISCORD_OWNER_ID et ignore tout le reste sans
   !regle                réglages actuels
   !labo                 état du labo (rejeu, espérance, méthode en place, challenger, propositions)
   !lecons               carnet des leçons du labo (confirmées, à confirmer, démenties)
+  !veto                 annule la dernière décision du council du labo (autonomie totale) : remet l'ancienne méthode
+                        en place, ou retire le challenger en essai, ou refuse les règles qu'il a approuvées
   !grade                grade de JARVIS (F- à S+), de quoi il est fait et le risque qu'il permet
   !strategies           labo v2 : stratégies à déclencheur contre v1 et leur témoin aléatoire
   !frais                ta mise de 20 € chez IBKR : un bracket par objectif au plan Fixe contre le Dégressif et un ou
@@ -51,7 +53,9 @@ pour couper la copie).
 Les propositions de réglages arrivent en message privé, avec des boutons Approuver / Refuser.
 Les règles validées par le labo arrivent groupées dans un seul message privé entre 8 h et 9 h
 (app/lab/morning.py ; JARVIS_LAB_DM=on, sinon rodage : gardées sans envoi), avec un bouton Approuver
-et un bouton Refuser par règle ; les mêmes `!oui N` / `!non N` marchent.
+et un bouton Refuser par règle ; les mêmes `!oui N` / `!non N` marchent. Depuis le 25/10/2026 (autonomie
+totale du council, JARVIS_LAB_AUTONOMIE=off pour revenir en arrière), le council les approuve lui-même et
+met en place un challenger promouvable : JARVIS l'annonce, et `!veto` l'annule.
 """
 import asyncio
 import logging
@@ -64,6 +68,7 @@ from app.lab import audit as lab_audit
 from app.lab import autopsie as lab_autopsie
 from app.lab import grade as lab_grade
 from app.lab import lessons as lab_lessons
+from app.lab import method as lab_method
 from app.lab import morning as lab_morning
 from app.lab import status as lab_status
 from app.lab import potentiel as lab_potentiel
@@ -515,6 +520,10 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
         if cmd == "labo":
             text = lab_status.text(await asyncio.to_thread(lab_status.status))
             return text + "\n" + lab_morning.status_line(lab_morning.shared_state(), PR.proposals)
+        if cmd == "veto":
+            await asyncio.to_thread(lab_method.enqueue_veto, lab_db.db_path())
+            return ("🧪 Veto déposé : le labo annule la dernière décision du council à son prochain passage (méthode "
+                    "promue remise à l'ancienne, ou challenger retiré, ou règles approuvées refusées) et l'annonce ici.")
         if cmd in ("lecons", "leçons"):
             return await asyncio.to_thread(lessons_text)
         if cmd == "grade":
