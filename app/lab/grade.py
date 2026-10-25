@@ -269,7 +269,8 @@ def cost_r(market: str, r_net: float, result: str | None) -> float:
     """R d'un trade pour le grade : actions, après commission IBKR à la mise de Simão (RISK_EUR, minimum par ordre),
     au barème du compte, avec les brackets des plans (ibkr.single_target) : une sortie unique sur TP2 pour un plan
     à trois objectifs (défaut depuis le 25/10/2026, la part du milieu du solde comme strategies.cost_variants
-    r_20e_1s), sinon un bracket par objectif (r_20e au Fixe, r_20e_deg au Dégressif : l'écart change de signe selon
+    r_20e_1s ; sur le chemin des trades v1, stop à l'entrée dès TP1, la gestion du labo v1, quand la mesure des GO garde
+    le stop fixe), sinon un bracket par objectif (r_20e au Fixe, r_20e_deg au Dégressif : l'écart change de signe selon
     le nombre d'actions) ; r_net s'il manque le détail ; crypto : r_net (frais OKX déjà comptés)."""
     if market != "stock" or not result:
         return r_net
