@@ -33,6 +33,7 @@ from app.lab import potentiel as lab_potentiel
 from app.lab import audit as lab_audit
 from app.lab import autopsie as lab_autopsie
 from app.lab import rates as lab_rates
+from app.lab import polyfed as lab_polyfed
 from app.lab import sec8k as lab_sec8k
 from app.lab import filtres as lab_filtres
 from app.lab import strat_stats as lab_strategies
@@ -808,6 +809,18 @@ def lab_sec8k_get():
     conn = _lab_conn()
     try:
         return lab_sec8k.cached(conn) or lab_sec8k.report(conn)
+    finally:
+        conn.close()
+
+
+@app.get("/api/lab/polyfed", dependencies=[Depends(lab_key)])
+def lab_polyfed_get():
+    """Mesure Polymarket Fed, sans essai : par séance, ce que le repricing de la nuit de la prochaine décision de la Fed
+    (cote Polymarket, clôture de la veille → 9 h 45 New York) change au R d'orb15 et orb30, brut et moins le témoin,
+    avec l'effectif de séances requis pour voir +0,1 R. Cache du worker, sinon calcul direct."""
+    conn = _lab_conn()
+    try:
+        return lab_polyfed.cached(conn) or lab_polyfed.report(conn)
     finally:
         conn.close()
 

@@ -56,6 +56,10 @@ Toutes les ~10 min :
    mesure, hors séance US, dans le budget sec_calls, seulement si SEC_USER_AGENT est défini ; « sec8k », à volume des
    15 premières minutes égal, ce qu'un 8-K d'avant 9 h 45 change au R d'orb15 et orb30, recalculé quand les dépôts, les
    mouvements ou les trades du labo v2 changent, au plus toutes les stats_age secondes.
+20. Mesure Polymarket Fed, sans essai (polyfed.py, 25 octobre 2026) : « polymarket_collecte », événements « Fed
+   decision » et cotes horaires de leurs issues, hors séance US, dans le budget pm_calls ; « polyfed », par séance,
+   ce que le repricing de la nuit de la prochaine décision de la Fed change au R d'orb15 et orb30, recalculé quand les
+   cotes ou les trades du labo v2 changent, au plus toutes les stats_age secondes.
 Le battement (lab.heartbeat) porte l'étape en cours, affichée par /api/lab/status et !labo.
 Le rejeu couvre JARVIS_LAB_REPLAY_DAYS séances (504 ≈ 2 ans) avant le premier lancement du worker ;
 le direct prend le relais à partir de ce jour-là. JARVIS_LAB_ENABLED=off met le worker en veille.
@@ -82,6 +86,7 @@ from app.lab import heartbeat
 from app.lab import kill_complet as KC
 from app.lab import lessons as L
 from app.lab import plus10 as P10
+from app.lab import polyfed as PF
 from app.lab import method as M
 from app.lab import potentiel as PO
 from app.lab import autopsie as AUT
@@ -113,17 +118,18 @@ RATTRAPAGE_SECONDS = {"nuit": 600, "jour": 120, "seance": 0}
 MAX_LIVE_DAYS_PER_TICK = 5
 KEY_WARNING_SECONDS = 3600
 # Labo 2 : jours de mouvements calculés, appels Finnhub, règles validées et âge maximal des
-# statistiques en cache (secondes), par période ; sec_calls : appels SEC de la mesure 8-K.
+# statistiques en cache (secondes), par période ; sec_calls : appels SEC de la mesure 8-K ; pm_calls : appels
+# Polymarket de la mesure Fed.
 LAB2_BUDGET = {
     "nuit": {"moves_days": 30, "news_calls": 40, "rules": 3, "stats_age": 3600, "derivs_calls": 300,
              "coverage_days": 60, "archive_seconds": 1200, "archive_days": 40, "kill_complet_seconds": 600,
-             "plus10_seconds": 600, "sec_calls": 600},
+             "plus10_seconds": 600, "sec_calls": 600, "pm_calls": 300},
     "jour": {"moves_days": 5, "news_calls": 10, "rules": 1, "stats_age": 3 * 3600, "derivs_calls": 100,
              "coverage_days": 10, "archive_seconds": 600, "archive_days": 10, "kill_complet_seconds": 120,
-             "plus10_seconds": 120, "sec_calls": 150},
+             "plus10_seconds": 120, "sec_calls": 150, "pm_calls": 80},
     "seance": {"moves_days": 2, "news_calls": 0, "rules": 0, "stats_age": 6 * 3600, "derivs_calls": 30,
                "coverage_days": 2, "archive_seconds": 0, "archive_days": 2, "kill_complet_seconds": 0,
-               "plus10_seconds": 0, "sec_calls": 0},
+               "plus10_seconds": 0, "sec_calls": 0, "pm_calls": 0},
 }
 _key_warned_at: float | None = None
 
@@ -654,6 +660,7 @@ async def lab2(db: LabDB, now: datetime, collect: bool = True, hold: bool = Fals
     if collect and not CO.CAL.session_open(now):
         await step("actus", lambda: CAT.fetch_news(db, now, budget["news_calls"]))
         await step("sec8k_collecte", lambda: SEC8K.fetch(db, now, budget["sec_calls"]))
+        await step("polymarket_collecte", lambda: PF.fetch(db, now, budget["pm_calls"]))
     await step("file_regles", lambda: V.ingest_queue(db))
     await step("regles", lambda: len(V.process_pending(db, budget["rules"])))
     await step("methode", lambda: M.step(db, now))
@@ -664,6 +671,7 @@ async def lab2(db: LabDB, now: datetime, collect: bool = True, hold: bool = Fals
     await step("autopsie", lambda: AUT.step(db, now, budget["stats_age"]))
     await step("rates", lambda: RATES.step(db, now, budget["stats_age"]))
     await step("sec8k", lambda: SEC8K.step(db, now, budget["stats_age"]))
+    await step("polyfed", lambda: PF.step(db, now, budget["stats_age"]))
     if not CO.CAL.session_open(now):  # un journalier relu par action : pas pendant la séance US
         await step("filtres", lambda: FIL.step(db, now, budget["stats_age"]))
     summary_day = SUM.due(now, db.get("summary", "last_day"))

@@ -196,6 +196,15 @@ CREATE TABLE IF NOT EXISTS sec_exact (
     accession TEXT PRIMARY KEY, kind TEXT NOT NULL, accepted_ts INTEGER, status TEXT NOT NULL, fetched_ts INTEGER,
     attempts INTEGER NOT NULL DEFAULT 0
 );
+-- Mesure Polymarket Fed (polyfed.py, 25 octobre 2026) : issues des marchés « Fed decision » (jeton du « Yes », réunion,
+-- points de base signés) et leurs cotes horaires (app/sources/polymarket.py). status : ok ou erreur.
+CREATE TABLE IF NOT EXISTS pm_markets (
+    token TEXT PRIMARY KEY, meeting TEXT NOT NULL, event_slug TEXT, label TEXT, bps INTEGER NOT NULL, start_ts INTEGER,
+    status TEXT NOT NULL, covered_to_ts INTEGER, fetched_ts INTEGER, attempts INTEGER NOT NULL DEFAULT 0, note TEXT
+);
+CREATE TABLE IF NOT EXISTS pm_prices (
+    token TEXT NOT NULL, ts INTEGER NOT NULL, p REAL NOT NULL, PRIMARY KEY (token, ts)
+);
 -- Bloc scellé (seal.py) : mêmes tables, jamais lues par les statistiques, la routine ni le grade.
 {trades_sealed}
 {strat}
