@@ -62,10 +62,6 @@ def ny_day(ts: int) -> date:
     return datetime.fromtimestamp(ts, NEW_YORK).date()
 
 
-def utc_day(ts: int) -> date:
-    return datetime.fromtimestamp(ts, timezone.utc).date()
-
-
 def sessions_back(day: date, n: int) -> date:
     """n-ième séance avant `day` (non comprise)."""
     d = day
