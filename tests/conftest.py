@@ -34,3 +34,10 @@ def change_eur_usd_sans_reseau(monkeypatch):
         return K.EURUSD_DEFAULT
 
     monkeypatch.setattr(T, "usd_per_eur", rate)
+
+
+@pytest.fixture(autouse=True)
+def labo_sans_autonomie_du_council(monkeypatch):
+    """Les tests du Labo 3 suivent l'ancien circuit (Simão approuve) ; ceux de l'autonomie du council
+    (test_lab_council.py) la remettent."""
+    monkeypatch.setenv("JARVIS_LAB_AUTONOMIE", "off")

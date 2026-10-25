@@ -93,6 +93,7 @@ from statistics import NormalDist
 
 from app.lab import archive as ARC
 from app.lab import collector as CO
+from app.lab import council as CNC
 from app.lab import derivs as DER
 from app.lab import seal as SEAL
 from app.lab import simulator as SIM
@@ -503,6 +504,16 @@ def _bands(gap, atr_pct, vol15, risk_pct, stop_before) -> dict:
     return out
 
 
+def _own_exit(r: dict, name: str, values: dict, wit, wit_trig) -> dict:
+    """Ligne vue par une déclaration du council dont la sortie n'est pas celle de sa stratégie de base."""
+    refc = ST.ref_exit(name)
+    if refc == r["refc"]:
+        return r
+    x = values.get(refc)
+    return r | {"refc": refc, "ref": x - r["comm"] if x is not None else None,
+                "ecart_temoin": x - wit if wit_trig and wit is not None and x is not None else None}
+
+
 def _strategies(conn: sqlite3.Connection) -> dict:
     out: dict = {}
     sql = (f"SELECT s.market, s.strategy, s.day, s.triggered, s.tp1_hit, s.temoin_r, s.temoin_triggered, s.rank, "
@@ -511,6 +522,7 @@ def _strategies(conn: sqlite3.Connection) -> dict:
            "s.temoin_journee_r, s.temoin_journee_triggered, s.temoin_tirages, s.ouverture_va, s.stop_structure, r.label "
            "FROM strat_trades s LEFT JOIN regimes r ON r.market = s.market AND r.day = s.day")
     acc: dict = {}
+    ST.register_council(CNC.load(conn))
     trials = len(ST.trials())
     derivs = DER.load(conn)
     pooled = {"ecarts": defaultdict(Mean), "par_vwap": defaultdict(Mean)}  # n° 6, toutes stratégies actions
@@ -531,6 +543,12 @@ def _strategies(conn: sqlite3.Connection) -> dict:
             if v["market"] == market and v["base"] == name and (
                     (oi7 is None or oi7 < ST.OI7_MAX_PCT) if market == "crypto" else open_va == "dessus"):
                 names.append(sub)
+        council = [k for k, v in ST.COUNCIL.items() if v["market"] == market and v["base"] == name]
+        if council:  # déclarations du council (council.py) : sous-ensembles choisis par une condition connue au signal
+            ctx = CNC.context(day, signal_at, gap_open_pct=gap, atr_pct=atr_pct, vol15_adv=vol15, risk_pct=risk_pct,
+                             sur_vwap=above, ouverture_va=open_va, stop_avant_entree=stop_before,
+                             stop_structure=struct, regime=row[-1])
+            names += [k for k in council if CNC.matches(ST.COUNCIL[k]["quand"], ctx)]
         keys = []
         for n in names:
             keys.append((market, n))
@@ -577,7 +595,7 @@ def _strategies(conn: sqlite3.Connection) -> dict:
             r["oi"] = DER.bucket(oi_chg, DER.OI_BUCKETS)
             r["oi7"] = DER.bucket(oi7, DER.OI7_BUCKETS)  # n° 11, descriptif
         for key in keys:
-            _feed(acc[key], r)
+            _feed(acc[key], _own_exit(r, key[1], values, wit, wit_trig))
     for key, a in acc.items():
         if len(key) == 3:
             continue
@@ -926,9 +944,10 @@ def report(conn: sqlite3.Connection) -> dict:
     from app.lab import kill_complet as KC
     from app.lab import plus10 as P10
 
+    ST.register_council(CNC.load(conn))
     trials = len(ST.trials())
     out = {"declaration": {"numero": ST.LATEST_DECLARATION, "le": ST.REGISTERED_ON, "essais": trials,
-                           "z_candidate": candidate_z(), "seuil": "t à G − 1 jours (candidate_t), Bonferroni",
+                           "council": len(ST.COUNCIL), "z_candidate": candidate_z(), "seuil": "t à G − 1 jours (candidate_t), Bonferroni",
                            "sorties": ST.EXITS, "sorties_actions": ST.STOCK_EXITS,
                            "robustesse": ST.STRESS, "doc": "docs/labo-strategies.md", "politique": POLICY},
            "scelle": SEAL.describe(), "strategies": {}, "sorties_gemini": None, "killmode": None,
@@ -968,6 +987,7 @@ def signature(conn: sqlite3.Connection) -> list:  # worker seulement (base migr�
     sig += [cost, conn.execute("SELECT COUNT(*) FROM kill_complet WHERE cout = ?", (cost,)).fetchone()[0]]
     sig.append(conn.execute("SELECT COUNT(*) FROM progress WHERE job = 'plus10:n9'").fetchone()[0])  # n° 9
     sig.append(conn.execute("SELECT COUNT(*) FROM earnings_days WHERE status = 'ok'").fetchone()[0])
+    sig.append(len(CNC.load(conn)))  # déclarations du council : chacune ajoute une ligne et un essai
     # I3 : lignes réécrites sur place (strat_trades ; trades pour le diagnostic v1) et code des stats
     from app.lab import empreinte as E
 

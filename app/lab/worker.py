@@ -76,6 +76,7 @@ from app.lab import archive as ARC
 from app.lab import audit as AUD
 from app.lab import catalysts as CAT
 from app.lab import collector as CO
+from app.lab import council as CNC
 from app.lab import cout as COUT
 from app.lab import derivs as DER
 from app.lab import empreinte as E
@@ -663,6 +664,7 @@ async def lab2(db: LabDB, now: datetime, collect: bool = True, hold: bool = Fals
         await step("polymarket_collecte", lambda: PF.fetch(db, now, budget["pm_calls"]))
     await step("file_regles", lambda: V.ingest_queue(db))
     await step("regles", lambda: len(V.process_pending(db, budget["rules"])))
+    await step("declarations_council", lambda: CNC.ingest(db, now))  # autonomie du council (25/10/2026)
     await step("methode", lambda: M.step(db, now))
     await step("lecons", lambda: L.step(db, now, budget["stats_age"]))
     await step("grade", lambda: GRADE.step(db, now))

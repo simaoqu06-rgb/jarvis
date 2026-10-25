@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from app import alerts, config, needs, scheduler
 from app.lab import brief as lab_brief
 from app.lab import catalysts as lab_catalysts
+from app.lab import council as lab_council
 from app.lab import db as lab_db
 from app.lab import export as lab_export
 from app.lab import grade as lab_grade
@@ -38,6 +39,7 @@ from app.lab import polyfed as lab_polyfed
 from app.lab import sec8k as lab_sec8k
 from app.lab import filtres as lab_filtres
 from app.lab import strat_stats as lab_strategies
+from app.lab import strategies as lab_strategies_mod
 from app.lab import status as lab_status
 from app.lab import summary as lab_summary
 from app.lab import validator as lab_validator
@@ -693,6 +695,44 @@ def _lab_rule_enqueue(rule: dict, now: datetime | None = None):
         lab_brief.release_quota(db_file, h, now)
         raise HTTPException(429, str(exc))
     return out | {"regles_restantes_ce_soir": left}
+
+
+@app.get("/api/lab/declarations", dependencies=[Depends(lab_key)])
+def lab_declarations_get():
+    """Déclarations du council (autonomie totale, 25/10/2026) : champs et opérateurs permis, stratégies de base et
+    leurs sorties, déclarations déjà faites (à ne pas refaire)."""
+    conn = lab_db.open_readonly()
+    try:
+        decls = lab_council.load(conn) if conn is not None else []
+    finally:
+        if conn is not None:
+            conn.close()
+    bases = {k: {"marches": list(v["markets"]),
+                 "sorties": {m: list(lab_strategies_mod.strategy_exits(m, k)) for m in v["markets"]}}
+             for k, v in lab_strategies_mod.STRATEGIES.items() if "go" not in v}
+    return {"champs": lab_council.FIELDS, "operateurs": list(lab_council.OPS), "bases": bases,
+            "par_soiree": lab_council.PER_EVENING, "declarations": decls}
+
+
+@app.post("/api/lab/declarations", dependencies=[Depends(lab_key)])
+async def lab_declarations_submit(request: Request):
+    """Le council déclare un test : {"nom", "market", "base", "sortie", "quand", "pourquoi", "council"}. Mis en file,
+    inscrit par le worker ; un essai de plus, jugé sur les séances après son dépôt. 422 si mal formée ou au-delà du
+    garde-fou du soir."""
+    raw = await _lab_rule_body(request)
+    return await asyncio.to_thread(_lab_declaration_enqueue, raw)
+
+
+def _lab_declaration_enqueue(raw: dict, now: datetime | None = None):
+    now = now or datetime.now(timezone.utc)
+    conn = lab_db.open_readonly()
+    try:
+        return lab_council.enqueue(lab_db.db_path(), raw, lab_brief.soiree(now), conn)
+    except lab_council.DeclarationError as exc:
+        raise HTTPException(422, str(exc))
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 LAB_TYPES_MAX = 200

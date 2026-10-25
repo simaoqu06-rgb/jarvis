@@ -17,6 +17,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
+from app.lab import council as CNC
 from app.lab import empreinte as E
 from app.lab import seal as SEAL
 from app.lab import strat_stats as SS
@@ -116,6 +117,7 @@ def controle(lines: list[dict]) -> dict:
 
 def export(conn: sqlite3.Connection, strategies: tuple[str, ...] = GO_STRATEGIES) -> dict:
     """{"manifest", "csv"} : le CSV des lignes et son manifeste (empreinte SHA-256 du CSV comprise)."""
+    ST.register_council(CNC.load(conn))  # essais déclarés : les déclarations du council comptent
     with SS.declaration_view(conn, SS.partial(conn) or None):
         lines = rows(conn, strategies)
     buf = io.StringIO()

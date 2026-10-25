@@ -309,8 +309,30 @@ SEEN_UNTIL = {"stock": "2025-01-27", "crypto": "2025-03-03"}
 POST_SEEN = ("killmode", "cassure_zone_retest_15m", "cassure_zone_retest_1h")
 
 
+# Déclarations du council (council.py, autonomie totale du 25/10/2026) : sous-ensembles d'une stratégie déclarés
+# par la routine du soir, gardés en base et inscrits ici par register_council (strat_stats) avant chaque tableau.
+COUNCIL: dict = {}
+
+
+def register_council(decls: list[dict]) -> None:
+    for name in [k for k in LABELS if k in COUNCIL]:
+        del LABELS[name]
+    COUNCIL.clear()
+    for d in decls:
+        COUNCIL[d["strategie"]] = {"market": d["market"], "base": d["base"], "exits": (d["sortie"],),
+                                   "quand": d["quand"], "seen": d["vu_jusqu_au"],
+                                   "label": f"Council n° {d['id']} : {d['nom']}"}
+        LABELS[d["strategie"]] = COUNCIL[d["strategie"]]["label"]
+
+
+def _spec(name: str) -> dict:
+    return STRATEGIES.get(name) or N11_SUBSETS.get(name) or COUNCIL.get(name) or {}
+
+
 def seen_until(name: str, market: str) -> str | None:
     """Dernier jour déjà lu quand la stratégie a été choisie (jugée sur les suivants) ; None : jugée sur tous."""
+    if name in COUNCIL:
+        return COUNCIL[name]["seen"]
     if name in N11_NAMES:
         return SEEN_N11[market]
     return SEEN_UNTIL[market] if name in POST_SEEN else None
@@ -329,23 +351,25 @@ def exits(market: str) -> dict:
 
 def strategy_exits(market: str, name: str) -> dict:
     """Sorties d'une stratégie : celles du marché, sauf liste propre (n° 7 : la seule sortie déclarée)."""
-    own = (STRATEGIES.get(name) or N11_SUBSETS.get(name, {})).get("exits")
+    own = _spec(name).get("exits")
     return {e: exits(market)[e] for e in own} if own else exits(market)
 
 
 def ref_exit(name: str) -> str:
     """Sortie de référence (classement, règle « candidate ») : r_net, ou la sortie déclarée seule (n° 7)."""
-    own = (STRATEGIES.get(name) or N11_SUBSETS.get(name, {})).get("exits")
+    own = _spec(name).get("exits")
     return own[0] if own else "r_net"
 
 
 def trials() -> list[dict]:
-    """Essais déclarés : chaque stratégie (et v1) × sortie × marché, comptés gagnants ou non."""
+    """Essais déclarés : chaque stratégie (et v1) × sortie × marché, comptés gagnants ou non, plus les déclarations du
+    council inscrites (register_council)."""
     out = []
     for market in ("stock", "crypto"):
         names = [REFERENCE] + [k for k, v in STRATEGIES.items() if market in v["markets"]]
         out += [{"market": market, "strategy": n, "exit": e} for n in names for e in strategy_exits(market, n)]
-    return out + list(KILL_COMPLETE_TRIALS) + list(PLUS10_TRIALS) + list(N11_TRIALS)
+    council = [{"market": v["market"], "strategy": k, "exit": v["exits"][0]} for k, v in COUNCIL.items()]
+    return out + list(KILL_COMPLETE_TRIALS) + list(PLUS10_TRIALS) + list(N11_TRIALS) + council
 
 
 # --- Indicateurs sur bougies de 5 min ---------------------------------------------------------

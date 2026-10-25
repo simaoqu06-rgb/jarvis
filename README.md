@@ -283,6 +283,12 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
 - **Veille des routines** (`app/lab/routines_watch.py`, 25/10/2026) : alerte Discord, une fois, si l'équipe du
   soir n'a déposé aucun avis du council pour la soirée de la veille (vérifié à 9 h Paris, du mardi au samedi), ou
   si la recherche avant l'ouverture n'a rendu aucun verdict sur le scan du jour (vérifié à 10 h 30 New York).
+- **Autonomie totale du council** (`app/lab/council.py`, `app/lab/method.py`, 25/10/2026, choix de Simão) : une règle
+  validée part en essai sans son accord, un challenger qui passe son regard est mis en place tout seul, et l'équipe du soir
+  déclare elle-même ses tests (`POST /api/lab/declarations` : un sous-ensemble d'une stratégie du labo v2 choisi par une
+  condition connue au signal, un essai de plus, jugé seulement sur les séances après son dépôt ; `GET` pour les champs
+  permis). Tout est annoncé sur Discord ; `!veto` annule la dernière décision du council. `JARVIS_LAB_AUTONOMIE=off`
+  rend les décisions à Simão. Les hausses du grade restent à lui.
 - **Export pour un recalcul externe** (`app/lab/export.py`, `GET /api/lab/export/trades?strategies=…`, 25/10/2026) :
   les lignes de `strat_trades` (par défaut les GO, hors bloc scellé) en CSV, avec un manifeste (définition de chaque
   colonne, empreintes du code et du modèle de coût, SHA-256 du CSV, recette d'agrégation et chiffres de contrôle),
