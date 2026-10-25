@@ -1279,6 +1279,30 @@ mesurées, avec au moins un quart du budget `sec_calls`. Garde-fous :
 - une séance résolue « avant l'ouverture » rejoint le groupe de son 8-K ; une séance résolue « pendant la séance »
   rejoint « aucun » (ou le groupe d'un autre 8-K de sa fenêtre).
 
+## Mesure Polymarket Fed (25 octobre 2026) : sans essai
+
+Demande de Simão (fil « Évaluer l'IA Argona sur Polymarket ») : tester les cotes Polymarket comme donnée pour les
+actions, pas pour parier. Code : `app/sources/polymarket.py`, `app/lab/polyfed.py`. Règles figées avant toute lecture :
+
+- **Variable unique** : le *repricing de la nuit*. Pour la séance J, la décision attendue à la prochaine réunion de
+  la Fed (moyenne des issues « No change », « 25 bps decrease »… pondérée par leur cote, normalisée) à 9 h 45 New
+  York, moins la même à la clôture de J−1. Cote horaire, la dernière connue avant l'instant lu (jamais après), ignorée
+  si elle a plus de 24 h ; issues dont les cotes ne somment pas à 0,85-1,15 : séance « sans_cote ».
+- **Groupes** : colombe (≤ −2 pb), neutre, faucon (≥ +2 pb).
+- **Lecture** : trades déclenchés d'`orb15` et `orb30` par groupe (R brut, R à 20 €, témoin, part au stop). Le
+  repricing est le même pour toutes les actions d'un jour : la comparaison se fait **par séance** (moyenne des trades
+  de chaque séance, écart « faucon − neutre » et « colombe − neutre », z de Welch sur les séances), sur le R brut et
+  sur R brut − témoin (le mouvement d'ensemble du marché retiré), avec la corrélation repricing → R du jour et le
+  nombre de séances requis pour voir +0,1 R.
+- **Collecte** : hors séance US, budget `pm_calls` (nuit 300, jour 80, séance 0). Réunions du calendrier FOMC
+  (2024-2026) ; événements trouvés par étiquette (`fed-rates`, `fed`) puis par slug. Les réunions sans marché trouvé
+  sont listées dans `!fed`.
+- **Suite** : un écart net sur assez de séances peut devenir une déclaration (après la n° 11 complète), jugée au
+  seuil du labo et sur le bloc scellé. Sinon, la piste est abandonnée.
+
+Limites : la cote Polymarket suit surtout les futures Fed funds (elle peut refléter l'info sans la précéder) ; une
+issue « 50+ bps » compte pour 50. Lecture : `!fed` (ou `!polymarket`), `GET /api/lab/polyfed`.
+
 ## Bloc scellé
 
 Le rejeu du **6 avril au 5 octobre 2026** est calculé mais rangé à part (`trades_sealed`,
