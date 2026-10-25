@@ -20,7 +20,10 @@ Une seule sortie par défaut depuis le 25/10/2026 (single_exit, choix de Simão)
 sur TP2 (l'objectif du milieu), TP1 et TP3 restant des repères sans ordre. Critère fixé avant la mesure avec GPT et
 Gemini (au moins +0,02 R par trade au Dégressif contre un bracket par objectif, IC au-dessus de zéro), tenu sur les GO
 confirmés de l'export qu'ils ont recalculé : go_confirme_v2 +0,036 R [+0,021 ; +0,051], go_confirme +0,032 R
-[+0,020 ; +0,043] (1 078 et 2 380 trades). JARVIS_IBKR_BRACKETS=3 rend un bracket par objectif.
+[+0,020 ; +0,043] (1 078 et 2 380 trades). Les deux gestions comparées gardent le stop fixe (sortie de référence des
+GO : r_sans_be), la règle de Simão pour une sortie à TP2. Le gain vient des frais évités (+0,048 à +0,057 R) ; vendre
+tout à TP2 plutôt que par tiers coûte un peu sur le chemin (−0,012 à −0,021 R). JARVIS_IBKR_BRACKETS=3 rend un
+bracket par objectif.
 """
 from __future__ import annotations
 
@@ -141,8 +144,8 @@ def lines(p: dict) -> list[str]:
            if f[other]["usd"] < f[mine]["usd"] else "")
     if b.get("sortie_unique"):
         out.append(f"-# Sortie unique sur {b['brackets'][0]['name']} ({' et '.join(b['reperes'])} : repères, sans ordre) : "
-                   "+0,03 à +0,04 R par trade au labo contre un bracket par objectif (mesure faite avec le stop remonté "
-                   "à l'entrée dès TP1)")
+                   "stop fixe jusque-là, comme au labo : +0,03 à +0,04 R par trade face à un bracket par objectif, tout "
+                   "en frais évités (écart relatif, pas un gain net)")
         out.append(f"-# Commissions estimées ({LABELS[mine]}, 1 bracket) : {f[mine]['usd']:.2f} $ = {f[mine]['r']:.2f} R"
                    f"{tip} · un bracket par objectif : {f[mine]['par_objectif_usd']:.2f} $")
         return out

@@ -100,6 +100,8 @@ def test_sortie_unique_sur_tp2_par_defaut(monkeypatch):
     text = "\n".join(ibkr.lines(p))
     assert "Bracket 1 : 44 @ entrée 5.00" in text and "TP2 6.00" in text and "Bracket 2" not in text
     assert "Sortie unique sur TP2 (TP1 et TP3 : repères, sans ordre)" in text
+    # La mesure des GO garde le stop fixe (sortie de référence r_sans_be) : la règle de Simão, pas un stop à l'entrée.
+    assert "stop fixe jusque-là, comme au labo" in text and "remonté" not in text
     assert "un bracket par objectif : 4.83 $" in text
 
 

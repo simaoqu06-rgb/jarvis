@@ -299,7 +299,8 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
 - **Sortie unique sur TP2** (`app/trading/ibkr.py`, 25/10/2026, choix de Simão) : un plan d'actions à trois objectifs
   donne un seul bracket de toute la position sur TP2, TP1 et TP3 restant des repères. Critère fixé avant la mesure
   avec GPT et Gemini (au moins +0,02 R par trade au Dégressif, IC au-dessus de zéro), tenu sur l'export : GO V2
-  +0,036 R, GO confirmés +0,032 R. Le grade (`grade.cost_r`), le suivi `!prends` (fin du trade à TP2, R et frais d'un
+  +0,036 R, GO confirmés +0,032 R, stop fixe dans les deux gestions comparées (la règle de Simão) ; le gain vient des
+  frais évités, vendre tout à TP2 coûtant un peu sur le chemin. Le grade (`grade.cost_r`), le suivi `!prends` (fin du trade à TP2, R et frais d'un
   seul bracket), le risque ouvert et le cockpit suivent ; un KILL et les trades pris avant gardent un tiers par
   objectif. `JARVIS_IBKR_BRACKETS=3` rend un bracket par objectif partout.
 - **Note composite masquée** (audits de GPT et Gemini, 25/10/2026) : tant que la pente mesurée de la note est ≤ 0 au
