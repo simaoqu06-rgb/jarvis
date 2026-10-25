@@ -293,6 +293,15 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
   les lignes de `strat_trades` (par défaut les GO, hors bloc scellé) en CSV, avec un manifeste (définition de chaque
   colonne, empreintes du code et du modèle de coût, SHA-256 du CSV, recette d'agrégation et chiffres de contrôle),
   pour que GPT et Gemini recalculent eux-mêmes espérance, IC en grappes par jour et écart au témoin.
+  5e tour (25/10/2026) : empreintes du code et du coût des lignes elles-mêmes (`revisions_lignes`), contrôle par
+  origine (rejeu et direct), « t » jugé contre Student G − 1 et variante « nulle imposée », motif d'absence du témoin
+  (`temoin_absent`) et part des frais dans l'écart entre trois brackets et un seul (`frais_3s_moins_1s_deg_r`).
+- **Sortie unique sur TP2** (`app/trading/ibkr.py`, 25/10/2026, choix de Simão) : un plan d'actions à trois objectifs
+  donne un seul bracket de toute la position sur TP2, TP1 et TP3 restant des repères. Critère fixé avant la mesure
+  avec GPT et Gemini (au moins +0,02 R par trade au Dégressif, IC au-dessus de zéro), tenu sur l'export : GO V2
+  +0,036 R, GO confirmés +0,032 R. Le grade (`grade.cost_r`), le suivi `!prends` (fin du trade à TP2, R et frais d'un
+  seul bracket), le risque ouvert et le cockpit suivent ; un KILL et les trades pris avant gardent un tiers par
+  objectif. `JARVIS_IBKR_BRACKETS=3` rend un bracket par objectif partout.
 - **Note composite masquée** (audits de GPT et Gemini, 25/10/2026) : tant que la pente mesurée de la note est ≤ 0 au
   labo (`score.show_note`), les plans, le scanner, `!avis` et Killmode n'affichent plus la note ni ses sous-notes,
   seulement le verdict GO / NO GO (règle de sélection figée). Sous les objectifs du plan, la calibration mesurée des

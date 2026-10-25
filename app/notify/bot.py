@@ -475,6 +475,7 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
                 plan["killmode"] = True
                 plan["sizing"] = killmode.taken_sizing(plan)  # 20 € hors grade, compté dans le risque ouvert
                 plan.pop("sizing_regle", None)
+                trading.IBKR.attach(plan)  # brackets du KILL à sa taille : un par objectif, comme son journal
             async with lock or asyncio.Lock():
                 from app import scheduler  # import tardif : scheduler importe ce module
                 scheduler.book.add(plan, "via Killmode" if req.get("killmode") else

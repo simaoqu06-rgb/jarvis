@@ -85,3 +85,32 @@ def test_lignes_discord():
     assert "44 actions" in text and "Bracket 3 : 14 @ entrée 5.00" in text
     assert "en Dégressif" in text  # le moins cher est signalé quand le plan du compte est le Fixe
     assert S.IBKR is ibkr
+
+
+def test_sortie_unique_sur_tp2_par_defaut(monkeypatch):
+    monkeypatch.delenv("JARVIS_IBKR_BRACKETS")
+    b = ibkr.brackets(_plan())
+    assert b["brackets"] == [{"name": "TP2", "quantity": 44, "take_profit": 6.0}]
+    assert b["sortie_unique"] and b["reperes"] == ["TP1", "TP3"]
+    # Un seul bracket : 2 ordres de 1 $ au Fixe ; un bracket par objectif reste affiché pour comparer.
+    assert b["fees"]["fixe"]["usd"] == 2.0 == b["fees"]["fixe"]["un_bracket_usd"]
+    assert b["fees"]["fixe"]["par_objectif_usd"] == 4.83
+    p = _plan()
+    ibkr.attach(p)
+    text = "\n".join(ibkr.lines(p))
+    assert "Bracket 1 : 44 @ entrée 5.00" in text and "TP2 6.00" in text and "Bracket 2" not in text
+    assert "Sortie unique sur TP2 (TP1 et TP3 : repères, sans ordre)" in text
+    assert "un bracket par objectif : 4.83 $" in text
+
+
+def test_sortie_unique_seulement_sur_trois_objectifs_hors_kill(monkeypatch):
+    """La mesure porte sur les plans à trois objectifs ; un KILL garde la gestion que mesure son journal."""
+    monkeypatch.delenv("JARVIS_IBKR_BRACKETS")
+    b = ibkr.brackets(_plan(tps=(5.5,)))
+    assert b["brackets"] == [{"name": "TP1", "quantity": 44, "take_profit": 5.5}] and not b["sortie_unique"]
+    assert len(ibkr.brackets(_plan(tps=(5.5, 6.0)))["brackets"]) == 2
+    kill = _plan() | {"killmode": True}
+    assert len(ibkr.brackets(kill)["brackets"]) == 3 and ibkr.single_target(kill) is None
+    assert ibkr.single_target(_plan()) == 1 and ibkr.single_target(_plan(market="crypto")) is None
+    monkeypatch.setenv("JARVIS_IBKR_BRACKETS", "3")
+    assert ibkr.single_target(_plan()) is None

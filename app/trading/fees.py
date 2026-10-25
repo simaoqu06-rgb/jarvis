@@ -4,7 +4,8 @@ Actions : barème IBKR de Killmode (killmode.IBKR_PLAN, minimum et plafond par o
 taille du trade en actions entières (risque de sa taille en € × change noté avec elle, sinon les 20 € de Killmode
 à 1,15), un bracket par objectif réparti comme le journal de Killmode (killmode._legs) : une commission à l'entrée
 de chaque bracket et une à sa sortie (objectif ou stop) ; une sortie à la main (`!sortie`, cockpit) part en un
-seul ordre : les frais de killmode._at_size, sans le gain ni le glissement. Crypto : frais du labo (taker,
+seul ordre : les frais de killmode._at_size, sans le gain ni le glissement. Trade à sortie unique
+(`sortie_unique`, défaut depuis le 25/10/2026) : un seul bracket de toute la position. Crypto : frais du labo (taker,
 SIM.costs) à l'entrée et à la sortie, sur le prix d'entrée.
 
 Pas de strat_stats.ibkr_commission_r : sans le minimum de 1 $ par ordre, il sous-estime les frais d'environ 50 fois
@@ -38,16 +39,22 @@ def shares(trade: dict, risk: float) -> int:
 
 def _exits(trade: dict) -> list[dict]:
     """Sortie de chaque tiers : prix de l'objectif touché (celui de l'événement, corrigé par `!sortie`), sinon
-    celui de la dernière sortie (stop ou clôture)."""
+    celui de la dernière sortie (stop ou clôture). Sortie unique : une seule part, toute la position."""
     legs = len(trade["targets"])
     hit = min(trade.get("targets_hit", 0), legs)
     events = trade.get("events") or []
     prices = {e["kind"]: e["price"] for e in events}
-    out = [{"prix": prices.get(f"tp{i}", t["price"]), "raison": f"tp{i}", "part": 1 / legs}
-           for i, t in enumerate(trade["targets"][:hit], start=1)]
     last = next((e for e in reversed(events) if e["kind"] in ("stop", "close")), None)
     rest = {"prix": last["price"] if last else trade.get("last_price", trade["entry"]),
             "raison": "cloture" if last and last["kind"] == "close" else "stop", "part": 1 / legs}
+    single = trade.get("sortie_unique")
+    if single is not None:
+        if hit > single:
+            return [{"prix": prices.get(f"tp{single + 1}", trade["targets"][single]["price"]),
+                     "raison": f"tp{single + 1}", "part": 1.0}]
+        return [rest | {"part": 1.0}]
+    out = [{"prix": prices.get(f"tp{i}", t["price"]), "raison": f"tp{i}", "part": 1 / legs}
+           for i, t in enumerate(trade["targets"][:hit], start=1)]
     return out + [rest] * (legs - hit)
 
 
@@ -60,7 +67,8 @@ def fees_r(trade: dict) -> float | None:
         return round(2 * SIM.costs("crypto", trade["entry"])["taker"] * trade["entry"] / risk, 4)
     q = shares(trade, risk)
     plan = K.IBKR_PLANS.get(K.IBKR_PLAN, K.IBKR_PLANS["fixe"])
-    legs = K._legs(q, len(trade["targets"]), _exits(trade))
+    brackets = 1 if trade.get("sortie_unique") is not None else len(trade["targets"])
+    legs = K._legs(q, brackets, _exits(trade))
     usd = sum(K.order_commission(n, trade["entry"], plan) for n, _ in legs)
     usd += sum(K.order_commission(n, e["prix"], plan) for n, e in legs if e["raison"] != "cloture")
     closing = [(n, e["prix"]) for n, e in legs if e["raison"] == "cloture"]

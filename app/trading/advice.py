@@ -433,7 +433,10 @@ def r_of(trade: dict, price: float) -> float:
 
 
 def exit_r(trade: dict, price: float) -> float:
-    """Gain en R si tout ce qui reste est vendu à `price` (un tiers par objectif, comme realized_r)."""
+    """Gain en R si tout ce qui reste est vendu à `price` (un tiers par objectif, comme realized_r ; toute la position
+    pour une sortie unique, encore ouverte)."""
+    if trade.get("sortie_unique") is not None:
+        return round(r_of(trade, price), 2)
     legs = len(trade["targets"]) or 1
     hit = min(trade["targets_hit"], legs)
     done = sum(r_of(trade, t["price"]) for t in trade["targets"][:hit])

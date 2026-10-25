@@ -657,6 +657,8 @@ class Book:
             "stop_current": p["stop"], "targets_hit": 0, "events": [],
             "last_price": p["entry"], "last_check": int(datetime.fromisoformat(p["created_at"]).timestamp()),
             "late_warned": [], "exit_signals": [],
+            # Sortie unique (indice de l'objectif, 1 : TP2) ou None (un tiers par objectif), fixée à la prise.
+            "sortie_unique": p["sortie_unique"] if "sortie_unique" in p else IBKR.single_target(p),
         }
         self.trades.append(trade)
         self.save()
@@ -693,7 +695,7 @@ def reopen(book: Book, symbol: str, plan: dict) -> dict | None:
     plan |= {k: old[k] for k in ("killmode", "policy") if old.get(k)}
     # La note, le grade et la taille de l'entrée font foi (même trade, même quantité tenue) : la note recalculée au
     # niveau du stop ne fait pas passer un trade « contre JARVIS », et la taille garde les frais du trade réel.
-    for k in ("score", "grade", "sizing", "sizing_regle"):
+    for k in ("score", "grade", "sizing", "sizing_regle", "sortie_unique"):
         if k in old:
             plan[k] = old[k]
         else:
@@ -703,6 +705,7 @@ def reopen(book: Book, symbol: str, plan: dict) -> dict | None:
 
         plan["sizing"] = K.taken_sizing(plan)
         plan.pop("sizing_regle", None)
+        IBKR.attach(plan)  # brackets du KILL, un par objectif
     book.trades.remove(old)
     book.add(plan, f"rouvert : stop {_num(old['stop_current'])} non exécuté chez le courtier")
     return old
@@ -718,7 +721,9 @@ def apply_bars(trade: dict, bars: list[dict], now: datetime) -> list[str]:
 
     Le stop ne remonte pas au prix d'entrée dès le TP1 (EmperorBTC : « ne soyez pas pressé de
     passer votre SL au seuil de rentabilité ») : il y monte après le TP2. Un KILL pris (`!prends … kill`) suit la
-    gestion que mesure le journal de Killmode : stop à l'entrée dès le TP1.
+    gestion que mesure le journal de Killmode : stop à l'entrée dès le TP1. Un trade à sortie unique
+    (`sortie_unique`, défaut depuis le 25/10/2026) se termine en entier à son objectif (TP2), les autres
+    objectifs étant des repères.
     """
     messages = []
     sign = 1 if trade["side"] == "long" else -1
@@ -769,6 +774,13 @@ def apply_bars(trade: dict, bars: list[dict], now: datetime) -> list[str]:
             if target["minutes_median"]:
                 text += f" (prévu ~{duration_fr(target['minutes_median'])})"
             text += "."
+            single = trade.get("sortie_unique")
+            if single is not None and n > single:
+                trade["status"] = "closed"
+                _settle(trade)
+                text += " Sortie unique : toute la position vendue, trade terminé. 🏁"
+                messages.append(text)
+                break
             if n == len(trade["targets"]):
                 trade["status"] = "closed"
                 _settle(trade)
@@ -791,7 +803,9 @@ def apply_bars(trade: dict, bars: list[dict], now: datetime) -> list[str]:
                     stop_text = f"Stop remonté à l'entrée ({_num(trade['entry'])})."
                 else:
                     stop_text = f"Stop inchangé à {_num(trade['stop_current'])} (pas de break-even précipité)."
-                text += f"\nProchain : {nxt['name']} {_num(nxt['price'])}, {nxt['eta_text']}. {stop_text} Garde le reste."
+                keep = ("Garde toute la position : sortie unique sur "
+                        f"{trade['targets'][single]['name']}." if single is not None else "Garde le reste.")
+                text += f"\nProchain : {nxt['name']} {_num(nxt['price'])}, {nxt['eta_text']}. {stop_text} {keep}"
             messages.append(text)
     # Objectif en retard sur le délai à 75 % des cas qui l'ont touché : l'élan faiblit peut-être. Avant le TP
     # précédent, la population est celle de tous les cas passés ; après, celle des cas qui l'ont touché.
@@ -982,13 +996,15 @@ def suivi_politique() -> str:
     from app.trading import killmode as K  # import tardif : killmode importe ce module
 
     return ("ton suivi `!prends` : entrée à ton prix, stop d'origine jusqu'au TP2 puis à l'entrée, aucune sortie au "
-            f"temps, un tiers par objectif ; taille du trade (sinon {K.RISK_EUR:g} € de risque), frais IBKR estimés à "
-            "cette taille (crypto : frais du labo)")
+            "temps, un tiers par objectif (une sortie unique sur TP2 pour les trades pris depuis le 25/10/2026) ; "
+            f"taille du trade (sinon {K.RISK_EUR:g} € de risque), frais IBKR estimés à cette taille (crypto : frais "
+            "du labo)")
 
 
 def realized_r(trade: dict) -> float | None:
     """Gain d'un trade terminé en R, avec un tiers de la position par objectif (sa gestion habituelle), avant frais.
-    Chaque tiers sort au prix noté par le suivi (objectif, stop exécuté, clôture) ou corrigé avec `!sortie`."""
+    Chaque tiers sort au prix noté par le suivi (objectif, stop exécuté, clôture) ou corrigé avec `!sortie`. Sortie
+    unique (`sortie_unique`) : toute la position à son objectif, sinon à la dernière sortie (stop, clôture)."""
     if trade["status"] != "closed" or not trade.get("targets"):
         return None
     sign = 1 if trade["side"] == "long" else -1
@@ -1000,9 +1016,14 @@ def realized_r(trade: dict) -> float | None:
     hit = min(trade["targets_hit"], legs)
     events = trade.get("events") or []
     prices = {e["kind"]: e["price"] for e in events}
+    exits = [e for e in events if e["kind"] in EXIT_KINDS]
+    single = trade.get("sortie_unique")
+    if single is not None:
+        if hit > single:
+            return round(r(prices.get(f"tp{single + 1}", trade["targets"][single]["price"])), 2)
+        return round(r(exits[-1]["price"] if exits else trade["last_price"]), 2)
     total = sum(r(prices.get(f"tp{i}", t["price"])) for i, t in enumerate(trade["targets"][:hit], start=1)) / legs
     if hit < legs:
-        exits = [e for e in events if e["kind"] in EXIT_KINDS]
         total += (legs - hit) / legs * r(exits[-1]["price"] if exits else trade["last_price"])
     return round(total, 2)
 
@@ -1268,7 +1289,9 @@ def cockpit_text(book: Book, now: datetime | None = None) -> str:
             when = next((e["at"] for e in t["events"] if e["kind"] == tp["name"].lower()), None)
             status = (f"✅ touché {time_fr(datetime.fromisoformat(when), now)}" if done and when else
                       f"⏱️ {tp['eta_text']}")
-            lines.append(f"   {tp['name']} {_num(tp['price'])} ({tp['pct']:+.2f} %) · {status}")
+            role = (" · sortie unique" if i == t.get("sortie_unique") else " · repère"
+                    if t.get("sortie_unique") is not None else "")
+            lines.append(f"   {tp['name']} {_num(tp['price'])} ({tp['pct']:+.2f} %){role} · {status}")
         if t["exit_signals"]:
             lines.append(f"   ⚠️ signes de sortie : {', '.join(t['exit_signals'])}")
     return "\n".join(lines)
