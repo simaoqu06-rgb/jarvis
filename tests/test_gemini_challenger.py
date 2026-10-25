@@ -263,3 +263,22 @@ def test_time_exit_without_trade_at_exit_minute_uses_last_close():
     bars = flat(ts(15, 0), 10, 10.3) + [bar(ts(9, 30, NEXT), 9.5, 9.6, 9.4, 9.5)]  # rien après 15 h 10, puis lendemain
     m = G.manage(f, bars, ts(15, 59))
     assert {px for _, px, _, _ in m["sorties"]} == {10.3}
+
+
+def _plan_b_settle():
+    return {"symbol": "TRAW", "kind": "B", "day": DAY.isoformat(), "entry": 10.0, "stop": 9.5, "tp1": 11.0,
+            "tp2": 12.0, "actif_des": ts(12, 38), "temoins": []}
+
+
+def test_scenario_stay_or_exit_overnight():
+    p = _plan_b_settle()
+    me = flat(ts(9, 30), 188, 9.9) + [bar(ts(12, 38), 9.9, 10.1, 9.9, 10.05)]
+    me += flat(ts(12, 39), 200, 10.4)                         # reste au-dessus de l'entrée et du VWAP
+    me += [bar(ts(9, 30, NEXT), 11.5, 11.6, 11.4, 11.5)]       # gap de la nuit vers TP1
+    calm = flat(ts(9, 30), 390, 500.0)
+    out = G.settle_plan(p, {"TRAW": me, "SPY": calm}, NEXT, 1.15)
+    assert out["jx"]["scenario"] == "rester" and out["jx"]["sorties"] == out["j1"]["sorties"]
+    tense = flat(ts(9, 30), 200, 500.0) + flat(ts(12, 50), 190, 490.0)  # SPY −2 %
+    out = G.settle_plan(p, {"TRAW": me, "SPY": tense}, NEXT, 1.15)
+    assert out["jx"]["scenario"] == "sortir" and "tension" in out["jx"]["pourquoi"]
+    assert out["jx"]["sorties"] == out["j0"]["sorties"]

@@ -28,7 +28,9 @@ sans filtrer (le plan PACS n'a pas de volume relatif et compte 42 M d'actions), 
 Les jours de clôture anticipée sont sautés (les heures des plans n'y existent pas).
 
 Mesure : chaque plan est soldé après la clôture sur les bougies SIP d'1 min d'Alpaca, en deux versions, sortie le jour
-même (la règle des plans) et sortie à la clôture du lendemain (« parfois ça prenait un peu plus de 24 h »). Une minute
+même (la règle des plans), sortie à la clôture du lendemain (« parfois ça prenait un peu plus de 24 h ») et, pour B et C,
+le scénario de 15 h 59 que donnaient les plans (« jx ») : rester la nuit si le prix est au-dessus de l'entrée et du VWAP
+et si le marché (SPY, faute de secteur fiable) ne perd pas 1 % ou plus, sinon sortir. Une minute
 qui touche le stop et un objectif compte comme stop. Le chiffre qui décide est le R aux frais de Simão : 20 € de risque
 (JARVIS_RISK_EUR) en actions entières, un bracket IBKR par objectif au barème du compte (JARVIS_IBKR_PLAN, Dégressif par
 défaut ici), glissement du labo (au moins un demi-pas) sur les ordres stop et au marché. Le témoin : une action tirée
@@ -82,7 +84,10 @@ CHUNK = 200           # symboles par requête Alpaca
 TEMOINS = 3            # témoins tirés par plan (le premier qui a des bougies sert)
 READ_AT = 100          # lecture du pari : 100 plans déclenchés
 IBKR_PLAN = (os.getenv("JARVIS_IBKR_PLAN") or "degressif").strip().lower()
-VARIANTS = {"j0": "sortie le jour même", "j1": "sortie le lendemain"}
+VARIANTS = {"j0": "sortie le jour même", "j1": "sortie le lendemain",
+            "jx": "sortir ou rester la nuit selon le scénario de 15 h 59"}
+MARKET = "SPY"         # tension du jour : le marché, faute de secteur fiable par action
+TENSION_PCT = -1.0     # SPY à −1 % ou pire à 15 h 59 : on ne garde pas la nuit
 
 
 # --- État -------------------------------------------------------------------------------------
@@ -356,12 +361,36 @@ def exit_ts(p: dict, variant: str, next_day: date | None) -> int | None:
     return _ts(day, A_CLOSE if p["kind"] == "A" else LAST_MINUTE)
 
 
+def stay_overnight(f: dict, bars: list[dict], day: date, market: list[dict] | None) -> tuple[bool, str]:
+    """Scénario de 15 h 59 (précision de Simão du 25/10 : les plans disaient quand sortir et quand rester, en évitant
+    le gap de la nuit en cas de tension) : rester si le prix est au-dessus de l'entrée et du VWAP de la séance et si
+    le marché (SPY) ne perd pas 1 % ou plus sur la journée ; sinon sortir."""
+    end = _ts(day, LAST_MINUTE)
+    today = [b for b in session(bars, day) if b["t"] < end]
+    if not today:
+        return False, "pas de cours avant 15 h 59"
+    px, vw = today[-1]["c"], vwaps(today)[-1]
+    if px <= f["prix"]:
+        return False, "sous l'entrée"
+    if px <= vw:
+        return False, "sous le VWAP"
+    m = [b for b in session(market or [], day) if b["t"] < end]
+    if not m:
+        return False, "marché illisible"
+    change = (m[-1]["c"] / m[0]["o"] - 1) * 100
+    if change <= TENSION_PCT:
+        return False, f"tension sur le marché ({_fr(change)} %)"
+    return True, "au-dessus de l'entrée et du VWAP, marché calme"
+
+
 def settle_plan(p: dict, bars: dict[str, list[dict]], next_day: date, eurusd: float, variants=("j0", "j1")) -> dict:
-    """Solde d'un plan et de son témoin dans chaque version. `bars` : bougies d'1 min SIP du jour et du lendemain."""
+    """Solde d'un plan et de son témoin dans chaque version. `bars` : bougies d'1 min SIP du jour et du lendemain
+    (et de SPY pour le scénario « jx », qui reprend j1 s'il reste la nuit, sinon j0 ; le témoin a son propre scénario)."""
     f = fill(p, bars.get(p["symbol"]) or [])
     out = {"declenche": bool(f), "eurusd": eurusd}
     if not f:
         return out
+    day = date.fromisoformat(p["day"])
     out["entree"] = {"t": f["t"], "prix": f["prix"], "stop": f["stop"], "tp1": f["tp1"], "tp2": f["tp2"]}
     wsym, wf = None, None
     for s in p.get("temoins") or []:
@@ -380,6 +409,14 @@ def settle_plan(p: dict, bars: dict[str, list[dict]], next_day: date, eurusd: fl
             wr = result(wf, wm, eurusd)
             row["temoin"] = {"r_brut": wr["r_brut"], "r_frais": wr["r_frais"], "incomplet": wm["incomplet"]}
         out[v] = row
+    if p["kind"] != "A" and "j0" in out and "j1" in out:  # A ferme à 15 h 45, avant le scénario de 15 h 59
+        stay, why = stay_overnight(f, bars.get(p["symbol"]) or [], day, bars.get(MARKET))
+        row = dict(out["j1" if stay else "j0"]) | {"scenario": "rester" if stay else "sortir", "pourquoi": why}
+        if wf:
+            w_stay, _ = stay_overnight(wf, bars.get(wsym) or [], day, bars.get(MARKET))
+            row["temoin"] = (out["j1" if w_stay else "j0"].get("temoin") or {}) | {"scenario": "rester" if w_stay
+                                                                                  else "sortir"}
+        out["jx"] = row
     return out
 
 
@@ -696,7 +733,7 @@ async def settle_due(now: datetime | None = None, state: dict | None = None) -> 
     rate = await KM.eurusd() or KM.EURUSD_DEFAULT
     done = 0
     for p, day, nxt, end in todo:
-        syms = [p["symbol"], *(p.get("temoins") or [])]
+        syms = [p["symbol"], *(p.get("temoins") or []), MARKET]
         start = datetime.combine(day, time(9, 30), NEW_YORK)
         try:
             bars = await alpaca.bars_range(syms, 1, start, end, feed="sip")
