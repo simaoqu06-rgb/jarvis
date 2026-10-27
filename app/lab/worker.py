@@ -63,9 +63,11 @@ Toutes les ~10 min :
 21. Étude des 8-K sur plusieurs jours, COLLECTE seulement (etude8k.py, protocole v2.1 du 25 octobre 2026) :
    « etude8k_collecte », index complet d'EDGAR, dépôts des CIK, en-têtes des heures ambiguës, tickers à la date (budget
    e8k_calls, appels SEC) puis bougies journalières depuis septembre 2020 (e8k_seconds), hors séance US. Aucun calcul.
-22. Déclaration n° 12 (ouverture.py, 27 octobre 2026) : « ouverture5_collecte », première bougie de 5 min de toute la
-   cote des séances utiles (budget ouverture_calls, appels Alpaca), puis « ouverture_n12 », passe A de Gemini et ORB des
-   stocks in play rejoués sur les bougies d'1 min relues et gardées en mémoire (ouverture_seconds), hors séance US.
+22. Déclaration n° 12 (ouverture.py, 27 octobre 2026, protocole v2) : « ouverture5_collecte », première bougie de 5 min
+   de toute la cote des séances utiles (budget ouverture_calls, appels Alpaca), puis « ouverture_n12 », passe A de Gemini
+   et ORB des stocks in play rejoués sur les bougies d'1 min, minutes qui décident des achats de l'ORB relues en
+   transactions et NBBO (environ 250 requêtes par séance), gardées en mémoire (ouverture_seconds, une séance au moins
+   par passage), hors séance US.
 Le battement (lab.heartbeat) porte l'étape en cours, affichée par /api/lab/status et !labo.
 Le rejeu couvre JARVIS_LAB_REPLAY_DAYS séances (504 ≈ 2 ans) avant le premier lancement du worker ;
 le direct prend le relais à partir de ce jour-là. JARVIS_LAB_ENABLED=off met le worker en veille.

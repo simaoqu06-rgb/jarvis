@@ -397,7 +397,7 @@ def test_nouvelle_declaration_relance_le_rattrapage(tmp_path, monkeypatch):
 
 def test_seuil_candidate_corrige_du_nombre_d_essais():
     assert SS.candidate_z(32) == pytest.approx(2.96, abs=0.01) and SS.candidate_z(60) == pytest.approx(3.14, abs=0.01)
-    assert SS.candidate_z() == pytest.approx(3.42, abs=0.001)  # 162 essais (déclaration n° 12)
+    assert SS.candidate_z() == pytest.approx(3.43, abs=0.001)  # 163 essais (déclaration n° 12, protocole v2)
     db = LabDB(":memory:")
     _rows(db, "pullback", 0.3, 0.2, days=40)   # bat son témoin (z ≈ 2,5), mais trop peu pour 60 essais
     db.conn.execute("UPDATE strat_trades SET temoin_r = r_net - (0.1 + CASE WHEN CAST(substr(day, 9, 2) AS INTEGER) "
@@ -479,9 +479,9 @@ def test_essais_declares():
     # de plus sur les 9 couples des actions ; n° 7 : 2 bras × 2 stops, avec la seule sortie stop fixe ; n° 8 : les
     # 3 filtres FRSH du bras confirmé (stop d'origine) et Killmode complet (espérance, écart au témoin propre).
     # n° 11 : stop structurel (orb30 actions, cassure de zone sur deux marchés) et 2 sous-ensembles, sortie r_net.
-    # n° 12 : passe A de Gemini (2 sorties) et ORB des stocks in play (3 versions), sur r_frais, lignes à part.
-    assert len(t) == 162 and len(ST.EXITS) == 7 and len(ST.STOCK_EXITS) == 3
-    assert t[-13:] == (list(ST.KILL_COMPLETE_TRIALS) + list(ST.PLUS10_TRIALS) + list(ST.N11_TRIALS)
+    # n° 12 : passe A de Gemini (2 sorties) et ORB des stocks in play (4 essais, protocole v2), sur r_frais, à part.
+    assert len(t) == 163 and len(ST.EXITS) == 7 and len(ST.STOCK_EXITS) == 3
+    assert t[-14:] == (list(ST.KILL_COMPLETE_TRIALS) + list(ST.PLUS10_TRIALS) + list(ST.N11_TRIALS)
                        + list(ST.N12_TRIALS))
     assert {x["exit"] for x in t if x["market"] == "crypto"} == set(ST.EXITS)
     assert {x["exit"] for x in t if x["market"] == "stock"} == set(ST.EXITS) | set(ST.STOCK_EXITS) | {"r_20e", "r_frais"}
@@ -666,4 +666,4 @@ def test_route_api_des_strategies(tmp_path, monkeypatch):
     _rows(db, "pullback", 0.3, -0.2)
     r = TestClient(main.app).get("/api/lab/strategies", headers={"X-Lab-Key": "cle"})
     assert r.status_code == 200 and "pullback" in r.json()["strategies"]["stock"]
-    assert r.json()["declaration"]["essais"] == 162 and r.json()["declaration"]["z_candidate"] == 3.42
+    assert r.json()["declaration"]["essais"] == 163 and r.json()["declaration"]["z_candidate"] == 3.43

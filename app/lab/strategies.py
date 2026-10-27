@@ -129,8 +129,9 @@ les jours neufs (SEEN_N11) :
   veille, open_va) sur chaque ligne ; orb30_va, sous-ensemble des lignes d'orb30 ouvertes « dessus ».
 Déclaration n° 12 (27 octobre 2026, demande de Simão : « trouver LA méthode gagnante ») : cassures des 5 premières
 minutes rejouées sur toute la cote (ouverture.py), la passe A du challenger Gemini et l'ORB des « stocks in play »
-(SSRN 4729284) en trois versions, cinq essais (N12_TRIALS) jugés sur leurs propres lignes (table ouverture_trades) ;
-les lignes du labo v2 ne changent pas (DECLARATION reste 11, pas de rattrapage).
+(SSRN 4729284) en quatre versions, six essais (N12_TRIALS, protocole v2 figé le 27/10 après l'avis de GPT et de
+Gemini) jugés sur leurs propres lignes (table ouverture_trades) ; les lignes du labo v2 ne changent pas (DECLARATION
+reste 11, pas de rattrapage).
 Objectifs : 1, 2 et 3 R. Fenêtre des signaux : actions de 9 h 45 à 15 h New York (soldé à la
 clôture) ; crypto de 0 h à 20 h UTC (soldé 24 h après le signal).
 v1 est rejouée avec les mêmes sorties et tests, sur ses propres objectifs : c'est la référence.
@@ -236,10 +237,11 @@ N11_SUBSETS = {"cassure_zone_retest_oi7": {"market": "crypto", "base": "cassure_
                "orb30_va": {"market": "stock", "base": "orb30", "exits": ("r_net",),
                             "label": "Cassure du range d'ouverture (30 min), ouverture au-dessus de la valeur de la veille"}}
 N11_TRIALS = tuple({"market": v["market"], "strategy": k, "exit": "r_net"} for k, v in N11_SUBSETS.items())
-# n° 12 : cassures des 5 premières minutes rejouées sur toute la cote (ouverture.py), cinq essais jugés sur r_frais
-# (le R aux frais du compte de Simão), hors STRATEGIES.
+# n° 12 : cassures des 5 premières minutes rejouées sur toute la cote (ouverture.py), six essais jugés sur r_frais
+# (le R aux frais du compte de Simão), hors STRATEGIES ; l'essai 6 (sip_long_top5) vient du protocole v2.
 N12_TRIALS = tuple({"market": "stock", "strategy": name, "exit": "r_frais"}
-                   for name in ("gemini_a_j0", "gemini_a_jx", "sip_long", "sip_long_filtres", "sip_long_range"))
+                   for name in ("gemini_a_j0", "gemini_a_jx", "sip_long", "sip_long_filtres", "sip_long_range",
+                                "sip_long_top5"))
 N11_NAMES = ("orb30_structure", "cassure_zone_retest_structure", *N11_SUBSETS)
 # n° 11 : tout l'historique visible était lu ; ses essais ne sont jugés que sur les jours suivants.
 SEEN_N11 = {"stock": "2026-10-16", "crypto": "2026-10-17"}
