@@ -30,7 +30,7 @@ def test_plan_a_gap_band_and_levels():
     p, why = G.plan_a(first, 10.0)
     assert why is None
     assert p["entry"] == 11.51 and p["stop_range"] == 10.79
-    assert p["vol_min_minute"] == 1500.0  # 1,5 × 5000 / 5
+    assert "vol_min_minute" not in p      # v2 : seuil lu au solde sur les bougies SIP
     assert G.plan_a([bar(ts(9, 30), 13.0, 13.5, 12.8, 13.3)], 10.0)[0] is None   # +30 % : « gap and crap »
     assert G.plan_a([bar(ts(9, 30), 10.2, 10.5, 10.1, 10.3)], 10.0)[0] is None   # +2 %
 
@@ -87,19 +87,25 @@ def test_rvol_same_time_of_day():
 
 def _plan_a():
     return {"symbol": "CHRN", "kind": "A", "day": DAY.isoformat(), "entry": 17.51, "stop_range": 16.99,
-            "vol_min_minute": 1500.0, "tp_pct": [10.0, 20.0], "actif_des": ts(9, 37), "temoins": ["RAND"]}
+            "tp_pct": [10.0, 20.0], "actif_des": ts(9, 37), "temoins": ["RAND"]}
 
 
 def test_fill_a_needs_volume_and_close_above():
     p = _plan_a()
-    bars = flat(ts(9, 37), 3, 17.4) + [bar(ts(9, 40), 17.4, 17.6, 17.4, 17.45, 9000),   # mèche : close sous l'entrée
-                                       bar(ts(9, 41), 17.45, 17.7, 17.4, 17.6, 1000),    # volume trop faible
-                                       bar(ts(9, 42), 17.6, 17.8, 17.5, 17.7, 2000)]
+    first = flat(ts(9, 30), 5, 17.4)  # 5 premières minutes SIP : 1 000 par minute, seuil 1 500
+    bars = first + flat(ts(9, 37), 3, 17.4) + [
+        bar(ts(9, 40), 17.4, 17.6, 17.4, 17.45, 9000),   # mèche : close sous l'entrée
+        bar(ts(9, 41), 17.45, 17.7, 17.4, 17.6, 1000),   # volume trop faible
+        bar(ts(9, 42), 17.6, 17.8, 17.5, 17.7, 2000)]
+    assert G.vol_min_minute(bars, DAY) == pytest.approx(1500.0)
     f = G.fill(p, bars)
     assert f["t"] == ts(9, 43) and f["prix"] == 17.7
     assert f["tp1"] == pytest.approx(19.47) and f["tp2"] == pytest.approx(21.24)
     late = _plan_a() | {"actif_des": ts(10, 31)}
     assert G.fill(late, bars) is None
+    busy = flat(ts(9, 30), 5, 17.4, v=2000) + bars[5:]             # 5 premières minutes plus actives : seuil 3 000
+    assert G.fill(p, busy) is None
+    assert G.fill(p, bars[5:]) is None                              # pas de bougie SIP des 5 premières minutes
 
 
 def test_manage_tp1_then_breakeven_and_worst_case():

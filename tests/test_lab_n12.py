@@ -84,7 +84,8 @@ def test_declaration_et_essais():
     assert (OUV.SIP_TOP, OUV.SIP_RVOL_DAYS, OUV.SIP_RVOL_MIN, OUV.SIP_STOP_ATR) == (20, 14, 1.0, 0.10)
     assert OUV.SIP_FILTERS == {"prix_min": 5.0, "volume_min": 1_000_000, "atr_min": 0.50}
     assert (OUV.MA_TOP, OUV.TG_TOP, OUV.ACTIF_DES, OUV.MESURE) == (100, 50, time(9, 38), 1)
-    assert (G.VERSION, G.SEUILS["gap_min"], G.SEUILS["gap_max"], G.SEUILS["rvol_min"]) == (1, 5.0, 25.0, 4.0)
+    assert (G.VERSION, G.SEUILS["gap_min"], G.SEUILS["gap_max"], G.SEUILS["rvol_min"]) == (2, 5.0, 25.0, 4.0)
+    assert OUV.REGLES_GEMINI == G.VERSION    # règles du direct changées : nouvelle déclaration
     doc = (Path(__file__).resolve().parents[1] / "docs" / "labo-strategies.md").read_text()
     section = doc.split("## Déclaration n° 12")[1].split("## Bloc scellé")[0]
     assert "**162**" in section and "SSRN 4729284" in section
@@ -181,15 +182,16 @@ def test_passe_a_le_tri_du_direct(monkeypatch):
                      "ecartees": {"B": "volume relatif 3.0", "C": "volume relatif inconnu"}}
     a = plans[0]
     assert (a["kind"], a["rang"], a["etf"], a["actif_des"], a["bar_o"]) == ("A", 1, "SPY", ts(9, 38), 11.0)
-    assert (a["entry"], a["stop_range"], a["vol_min_minute"], a["rvol"]) == (11.51, 10.79, 15000.0, 5.0)
+    assert (a["entry"], a["stop_range"], a["rvol"]) == (11.51, 10.79, 5.0)
     assert len(a["temoins"]) == G.TEMOINS and set(a["temoins"]) <= {"B", "C", "D", "E"}  # jamais une valeur retenue
     assert OUV.gemini_plans(DAY, POP_A)[0][0]["temoins"] == a["temoins"]                 # graine fixe
 
 
 def _gapr_bars(trigger_volume=20000.0):
+    """5 premières minutes à 10 000 par minute (la bougie de 9 h 30 de 50 000) : seuil de la cassure 15 000."""
     rise = {0: (11.0, 11.5, 10.8, 11.3, 10000.0), 10: (11.4, 11.6, 11.4, 11.55, trigger_volume),
             30: (11.55, 12.8, 11.55, 12.8, 5000.0)}
-    return path(DAY, 11.3, rise) + path(NEXT, 12.8)
+    return path(DAY, 11.3, rise, v=10000.0) + path(NEXT, 12.8)
 
 
 def test_passe_a_soldee_par_le_code_du_direct():
@@ -453,7 +455,7 @@ async def test_seance_calculee_de_bout_en_bout(seance):
     both = next(c for c in seance.calls if c[4] == CO.session_ts(NEXT)[1])   # plan, témoins et SPY : deux séances
     assert {"GAPR", "SPY"} <= set(both[0]) and len(both[0]) == 2 + G.TEMOINS
     stats = seance.get(OUV.JOB, DAY.isoformat())
-    assert stats["plans"] == ["GAPR"] and stats["cote"] == 5 and stats["mesure"] == 1 and stats["regles_gemini"] == 1
+    assert stats["plans"] == ["GAPR"] and stats["cote"] == 5 and stats["mesure"] == 1 and stats["regles_gemini"] == 2
     assert stats["sip"] == {"sip": ["GAPR", "PLAY", "CHEAP", "DOWN"], "sip_filtres": ["GAPR", "PLAY", "DOWN"]}
     rows = {(r[0], r[1]): r[2:] for r in seance.conn.execute(
         "SELECT symbol, essai, declenche, r_brut, r_frais, r_suivante, temoin, t_entree FROM ouverture_trades")}
@@ -469,7 +471,7 @@ async def test_seance_calculee_de_bout_en_bout(seance):
     assert OUV.ready_days(seance, SETTLED) == [] and await OUV.step(seance, SETTLED, 60) == 0
     assert OUV.progress(seance.conn, SETTLED)["seances_calculees"] == 1
     rep = OUV.report(seance.conn, 162)
-    assert (rep["numero"], rep["seances"], rep["plans_a"], rep["cote"], rep["regles_gemini"]) == (12, 1, 1, 5.0, [1])
+    assert (rep["numero"], rep["seances"], rep["plans_a"], rep["cote"], rep["regles_gemini"]) == (12, 1, 1, 5.0, [2])
     assert set(rep["lignes"]) == set(OUV.LABELS)
     it = rep["lignes"]["sip_long"]
     assert (it["lignes"], it["declenches"], it["mesures"], it["essai"], it["tient"]) == (3, 2, 2, True, False)
@@ -521,7 +523,8 @@ def test_regle_candidate_du_labo():
     rep = {"seances": 40, "du": "2025-11-03", "au": "2025-12-30", "plans_a": 0, "essais_labo": 162,
            "lignes": {"sip_long": it, "sip_court": court}}
     assert "✅ tient : candidate au bloc scellé" in OUV.text(rep).splitlines()[1]
-    assert "✅" not in OUV.text(rep).splitlines()[2]
+    assert "✅" not in OUV.text(rep).splitlines()[2] and "⚠️" not in OUV.text(rep | {"regles_gemini": [2]})
+    assert "(v3) : la n° 12 déclare la v2" in OUV.text(rep | {"regles_gemini": [2, 3]})
     assert OUV.text(None).startswith("🌅") and "aucune séance calculée" in OUV.text({"seances": 0,
                                                                                     "bougies_9h30_lues": 3})
 

@@ -1353,7 +1353,7 @@ crypto appariées).
 
 ### A. Passe A de Gemini (deux essais)
 
-Le code du direct (`gemini.plan_a`, `gemini.settle_plan`, seuils `SEUILS`, règles v1), sur une population refaite à
+Le code du direct (`gemini.plan_a`, `gemini.settle_plan`, seuils `SEUILS`, règles v2), sur une population refaite à
 9 h 35 : les 100 plus forts volumes de la bougie de 9 h 30 et les 50 plus fortes hausses à 9 h 35 (le screener
 d'Alpaca ne se rejoue pas).
 - Gap de +5 à +25 % (journalier ajusté), au moins 21 séances ; les 30 premières au volume de la bougie sur le volume
@@ -1367,10 +1367,10 @@ d'Alpaca ne se rejoue pas).
   fiche (TP1 touché, prix au-dessus du VWAP, SPY pas à −1,5 % ou pire, sortie le lendemain à 10 h 30) :
   **`gemini_a_jx`** ; sortie le lendemain à 15 h 59 : `gemini_a_j1`, publiée sans essai.
 - Écarts au direct, dits : ni catalyseur ni nombre d'actions (aucune donnée datée sur toute la période) ; pas de liste de
-  surveillance ; SPY à la place de l'ETF du secteur ; la bougie de 9 h 30 et la condition de volume viennent du SIP. Le
-  direct lit la bougie IEX (une petite part du volume) et compare son volume au volume SIP d'1 min au solde : sa
-  condition de volume est plus facile à remplir que la règle écrite. Constat transmis au fil du challenger ; rien n'est
-  changé au direct ici.
+  surveillance ; SPY à la place de l'ETF du secteur ; la bougie de 9 h 30 et les volumes relatifs viennent du SIP (le
+  direct lit la bougie IEX, une petite part du volume, et compare IEX à IEX). La condition de volume de la cassure se lit
+  ici comme au solde du direct, sur les bougies SIP d'1 min : règles v2 du 27/10, écrites avec cette déclaration. En
+  v1, le direct prenait son seuil sur la bougie IEX et la condition était presque toujours remplie.
 - Règles du direct changées (`gemini.VERSION`) : chaque séance garde la version sous laquelle elle a été calculée et le
   tableau le signale ; une autre version demande une nouvelle déclaration.
 

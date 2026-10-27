@@ -28,8 +28,9 @@ moyenne des RVOL_DAYS dernières séances, parmi les RVOL_WINDOW d'avant, où la
 minutes, au moins RVOL_MIN_DAYS) ; les FINNHUB_MAX premières dans cet ordre. Ordre actif à ACTIF_DES (le direct : deux
 minutes après le message de 9 h 36). Écarts au direct, dits : ni catalyseur ni nombre d'actions (aucune donnée datée
 sur toute la période), ni la liste de surveillance ; SPY à la place de l'ETF du secteur pour la règle de nuit ; la
-bougie de 9 h 30 et la condition de volume viennent du SIP (le direct prend la bougie IEX, dont le volume n'est qu'une
-petite part du SIP, et la compare au volume SIP d'1 min). Un essai par sortie qui décide : j0 (la règle du plan) et jx
+bougie de 9 h 30 et les volumes relatifs viennent du SIP (le direct prend la bougie IEX, une petite part du volume, et
+compare IEX à IEX) ; la condition de volume de la cassure se lit, comme au solde du direct (règles v2), sur les bougies
+SIP d'1 min. Un essai par sortie qui décide : j0 (la règle du plan) et jx
 (règle de nuit) ; j1 est publié sans essai. Témoin : comme le direct, une valeur tirée au hasard dans la population
 (graine fixe), achetée au marché à la minute du déclenchement, même géométrie en %, mêmes sorties.
 
@@ -97,7 +98,8 @@ SETTLED_AFTER = 20 * 60  # secondes après la clôture du lendemain (SIP gratuit
 # l'avancement ordinaire, comme les jours neufs de la n° 9.
 BACKLOG_UNTIL = date(2026, 10, 26)
 EURUSD = K.EURUSD_DEFAULT
-# Passe A (app/trading/gemini.py, version 1 des règles)
+# Passe A (app/trading/gemini.py) : version des règles du direct déclarée (gemini.VERSION)
+REGLES_GEMINI = 2
 MA_TOP, TG_TOP = 100, 50
 ACTIF_DES = time(9, 38)
 MARKET = G.MARKET
@@ -801,9 +803,10 @@ def text(rep: dict | None) -> str:
                      f"{it['mesures']} trades sur {m['jours']} jours · brut {_r(it['brut']['esperance_r'])} · écart au "
                      f"témoin {_r(e['esperance_r'])} (t {SS._z(e['z'])}"
                      + (f", seuil {SS._z(it['seuil_t'])}" if it.get("essai") else "") + f"){verdict}")
-    if len(rep.get("regles_gemini") or []) > 1:
-        lines.append(f"⚠️ Passe A rejouée sous plusieurs versions des règles du direct ({rep['regles_gemini']}) : la n° 12 "
-                     "déclare la v1, une autre version demande une nouvelle déclaration.")
+    autres = [v for v in rep.get("regles_gemini") or [] if v != REGLES_GEMINI]
+    if autres:
+        lines.append(f"⚠️ Passe A rejouée en partie sous d'autres règles du direct ({', '.join(f'v{v}' for v in autres)}) : "
+                     f"la n° 12 déclare la v{REGLES_GEMINI}, une autre version demande une nouvelle déclaration.")
     lines.append("-# Rejeu hors bloc scellé, aux frais de ton compte. Passe A sans catalyseur ni nombre d'actions (pas de "
                  "données datées). Une ligne qui tient ne devient une méthode qu'après le bloc scellé, ouvert une fois par "
                  "toi.")
