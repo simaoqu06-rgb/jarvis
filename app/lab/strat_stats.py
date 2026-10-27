@@ -940,8 +940,9 @@ def revisions(conn: sqlite3.Connection) -> dict:
 
 
 def report(conn: sqlite3.Connection) -> dict:
-    # import tardif : kill_complet et plus10 importent ce module
+    # import tardif : kill_complet, plus10 et ouverture importent ce module
     from app.lab import kill_complet as KC
+    from app.lab import ouverture as OUV
     from app.lab import plus10 as P10
 
     ST.register_council(CNC.load(conn))
@@ -951,7 +952,8 @@ def report(conn: sqlite3.Connection) -> dict:
                            "sorties": ST.EXITS, "sorties_actions": ST.STOCK_EXITS,
                            "robustesse": ST.STRESS, "doc": "docs/labo-strategies.md", "politique": POLICY},
            "scelle": SEAL.describe(), "strategies": {}, "sorties_gemini": None, "killmode": None,
-           "confirmation_go": None, "killmode_complet": None, "potentiel_plus10": None, "diagnostic_v1": {},
+           "confirmation_go": None, "killmode_complet": None, "potentiel_plus10": None, "ouverture_n12": None,
+           "diagnostic_v1": {},
            "entree_v1": None, "revisions": {}}
     try:  # base pas encore migrée par le worker (lecture seule) : tableau vide plutôt qu'une erreur
         # I2 : pendant un rattrapage, le tableau ne lit que les lignes de la déclaration en vigueur (declaration_view).
@@ -963,6 +965,7 @@ def report(conn: sqlite3.Connection) -> dict:
             out["confirmation_go"] = out["strategies"].pop("_n7", None)
             out["killmode_complet"] = KC.report(conn, trials)
             out["potentiel_plus10"] = P10.report(conn, trials)
+            out["ouverture_n12"] = OUV.report(conn, trials)  # n° 12, lignes à part (pas de rattrapage)
             out["diagnostic_v1"] = diagnostic_v1(conn)
             out["entree_v1"] = entree_v1_appariee(conn)  # n° 10 (L4)
             out["revisions"] = revisions(conn)  # 2e tour d'avis (C6), descriptif
@@ -988,10 +991,11 @@ def signature(conn: sqlite3.Connection) -> list:  # worker seulement (base migr�
     sig.append(conn.execute("SELECT COUNT(*) FROM progress WHERE job = 'plus10:n9'").fetchone()[0])  # n° 9
     sig.append(conn.execute("SELECT COUNT(*) FROM earnings_days WHERE status = 'ok'").fetchone()[0])
     sig.append(len(CNC.load(conn)))  # déclarations du council : chacune ajoute une ligne et un essai
-    # I3 : lignes réécrites sur place (strat_trades ; trades pour le diagnostic v1) et code des stats
+    # I3 : lignes réécrites sur place (strat_trades ; trades pour le diagnostic v1 ; ouverture_trades, n° 12, chaque
+    # séance calculée) et code des stats
     from app.lab import empreinte as E
 
-    return sig + E.sig(conn, "trades", "strat")
+    return sig + E.sig(conn, "trades", "strat", "ouverture")
 
 
 def cached(conn: sqlite3.Connection) -> dict | None:
@@ -1260,6 +1264,10 @@ def text(rep: dict | None) -> str:
         from app.lab import plus10 as P10  # import tardif
 
         lines.append(P10.text(rep["potentiel_plus10"]))
+    if rep.get("ouverture_n12"):
+        from app.lab import ouverture as OUV  # import tardif
+
+        lines.append(OUV.text(rep["ouverture_n12"]))
     diag = (rep.get("diagnostic_v1") or {}).get("stock")
     if diag:
         gaps = " · ".join(f"{k} {_r(v['esperance_r'])} ({v['n']})" for k, v in diag["par_gap"].items())

@@ -127,6 +127,10 @@ les jours neufs (SEEN_N11) :
   l'open interest a gagné moins de 9 % sur 7 jours (strat_stats, derivs.context) ; pas de ligne en plus ;
 - C, profil de volume de la veille (actions) : colonne ouverture_va (dessus, dedans, dessous de la zone de valeur de la
   veille, open_va) sur chaque ligne ; orb30_va, sous-ensemble des lignes d'orb30 ouvertes « dessus ».
+Déclaration n° 12 (27 octobre 2026, demande de Simão : « trouver LA méthode gagnante ») : cassures des 5 premières
+minutes rejouées sur toute la cote (ouverture.py), la passe A du challenger Gemini et l'ORB des « stocks in play »
+(SSRN 4729284) en trois versions, cinq essais (N12_TRIALS) jugés sur leurs propres lignes (table ouverture_trades) ;
+les lignes du labo v2 ne changent pas (DECLARATION reste 11, pas de rattrapage).
 Objectifs : 1, 2 et 3 R. Fenêtre des signaux : actions de 9 h 45 à 15 h New York (soldé à la
 clôture) ; crypto de 0 h à 20 h UTC (soldé 24 h après le signal).
 v1 est rejouée avec les mêmes sorties et tests, sur ses propres objectifs : c'est la référence.
@@ -156,14 +160,14 @@ from app.trading import confirm as CF
 from app.trading import indicators as I
 from app.trading import signals as S
 
-REGISTERED_ON = "2026-10-18"
+REGISTERED_ON = "2026-10-27"
 # Déclaration qui fixe les lignes du labo v2 (docs/labo-strategies.md). En changer relance le rattrapage de tous les
 # jours déjà traités (progress_job), pour que chaque stratégie soit mesurée sur les mêmes jours. N° 10 : mesures
 # corrigées (simulateur, témoin, prix négociés), aucun essai de plus. N° 11 : stop structurel (lignes en plus) et
 # ouverture face au profil de la veille (colonne en plus).
 DECLARATION = 11
-# Dernière déclaration (affichée).
-LATEST_DECLARATION = 11
+# Dernière déclaration (affichée). N° 12 : nouvelles lignes à part (ouverture.py), rien à rattraper.
+LATEST_DECLARATION = 12
 # Dernière déclaration qui change les lignes crypto : la n° 11 (stop structurel de la cassure de zone).
 CRYPTO_DECLARATION = 11
 # n° 10 : révision du simulateur des lignes du labo v2 (simulator.simulate, `sim_rev`) ; le Labo 1 reste en 1.
@@ -232,6 +236,10 @@ N11_SUBSETS = {"cassure_zone_retest_oi7": {"market": "crypto", "base": "cassure_
                "orb30_va": {"market": "stock", "base": "orb30", "exits": ("r_net",),
                             "label": "Cassure du range d'ouverture (30 min), ouverture au-dessus de la valeur de la veille"}}
 N11_TRIALS = tuple({"market": v["market"], "strategy": k, "exit": "r_net"} for k, v in N11_SUBSETS.items())
+# n° 12 : cassures des 5 premières minutes rejouées sur toute la cote (ouverture.py), cinq essais jugés sur r_frais
+# (le R aux frais du compte de Simão), hors STRATEGIES.
+N12_TRIALS = tuple({"market": "stock", "strategy": name, "exit": "r_frais"}
+                   for name in ("gemini_a_j0", "gemini_a_jx", "sip_long", "sip_long_filtres", "sip_long_range"))
 N11_NAMES = ("orb30_structure", "cassure_zone_retest_structure", *N11_SUBSETS)
 # n° 11 : tout l'historique visible était lu ; ses essais ne sont jugés que sur les jours suivants.
 SEEN_N11 = {"stock": "2026-10-16", "crypto": "2026-10-17"}
@@ -369,7 +377,7 @@ def trials() -> list[dict]:
         names = [REFERENCE] + [k for k, v in STRATEGIES.items() if market in v["markets"]]
         out += [{"market": market, "strategy": n, "exit": e} for n in names for e in strategy_exits(market, n)]
     council = [{"market": v["market"], "strategy": k, "exit": v["exits"][0]} for k, v in COUNCIL.items()]
-    return out + list(KILL_COMPLETE_TRIALS) + list(PLUS10_TRIALS) + list(N11_TRIALS) + council
+    return out + list(KILL_COMPLETE_TRIALS) + list(PLUS10_TRIALS) + list(N11_TRIALS) + list(N12_TRIALS) + council
 
 
 # --- Indicateurs sur bougies de 5 min ---------------------------------------------------------

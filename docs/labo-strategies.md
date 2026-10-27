@@ -1312,6 +1312,165 @@ actions, pas pour parier. Code : `app/sources/polymarket.py`, `app/lab/polyfed.p
 Limites : la cote Polymarket suit surtout les futures Fed funds (elle peut refléter l'info sans la précéder) ; une
 issue « 50+ bps » compte pour 50. Lecture : `!fed` (ou `!polymarket`), `GET /api/lab/polyfed`.
 
+## Déclaration n° 12 (27 octobre 2026) : ouverture 5 min sur toute la cote, passe A de Gemini et « stocks in play »
+
+Demande de Simão (26 octobre, fil « Équipe du soir du labo » : « je veux que tu trouves LA méthode gagnante, au moins
+qu'on y avance »). Écrite avant tout chiffre : aucune ligne de la n° 12 n'a été calculée ni lue pour choisir ses
+règles ou ses seuils, qui viennent tous du dehors (la fiche de la méthode Gemini,
+`/mnt/project-files/labo/methode-challenger-gemini-2026-10-25.md`, et l'article SSRN 4729284). Revues de littérature
+du 26 octobre (ORB des stocks in play, gaps sur actualité, autres avantages documentés) et protocole :
+`/mnt/project-files/labo/methode-gagnante/`. Code : `app/lab/ouverture.py`, `app/trading/gemini.py` (glissement
+multiplié, sans effet sur le direct), `db.py`, `strategies.py`, `worker.py`, `status.py`. Proposée en PR brouillon :
+en vigueur au déploiement, sur le feu vert de Simão.
+
+Conditions d'avant (« Avant la déclaration suivante ») : `!labo` dit « n° 11 : complète » (27/10) ; le tableau complet
+de la n° 11 a été relu sans retouche (fiches du soir du 23 et du 26/10 : 0 ✅, 0 ☑️ sur 28 lignes) ; l'audit apparié
+de la n° 11 a été lu le 27/10 (écart ≈ 0 attendu et mesuré : 0,000 R sur 445 123 lignes d'actions et 260 306 de
+crypto appariées).
+
+**Pourquoi** :
+- le rejeu du labo choisit ses actions à 9 h 10 sur les chiffres de la veille : il n'a vu que 8,7 % des gappers
+  (couverture mesurée pour Killmode). Les deux déclarations qui ont rejoué les gappers de toute la base perdent : n° 9
+  (ORB 15 min, 471 trades, −0,15 R à 20 €) et Killmode complet (n° 8, 122 séances, −0,29 R à 20 €, le catalyseur
+  n'ajoutant que +0,06 R, non significatif) ;
+- la méthode Gemini, que Simão tient pour gagnante, n'est mesurée qu'en direct (challenger, PR #67), lue à 100 plans
+  déclenchés ;
+- l'ORB 5 min des « stocks in play » (Zarattini, Barbon et Aziz, 2024) est la seule preuve publiée d'un avantage
+  intraday lié au volume relatif d'ouverture : −0,02 R par trade sous un volume relatif de 1, +0,08 R au-dessus, +0,38 R
+  au-dessus de 30 (nets de commission, pas d'écart achat-vente, 2016-2023). Aucune réplique fidèle n'existe après
+  février 2024, et une réplique pré-enregistrée (2016-2019) la trouve perdante.
+
+**Données** (rien n'est vu de l'avenir) :
+- `open5` : la bougie de 9 h 30 - 9 h 35 (SIP, prix réellement négociés, `adjustment=raw`) de chaque action de la base
+  qui a coté la séance, actifs inactifs d'Alpaca compris, connue à 9 h 35 ; collectée pour chaque séance calculée et
+  ses 24 séances d'avant (bloc scellé compris : des cours, pas des résultats) ;
+- journalier ajusté des divisions : clôture de la veille, ATR de Wilder 14 j, volumes moyens de 14 et 20 séances, remis
+  aux prix et aux actions négociés du jour par `facteur` (ouverture ajustée du jour sur ouverture brute de la bougie de
+  9 h 30). Une division dans la fenêtre d'un volume relatif (facteur qui varie de plus de 25 %) le rend inconnu ;
+- bougies d'1 min SIP brutes des seules valeurs retenues, de leurs témoins et de SPY, relues et gardées en mémoire ;
+- une séance n'est calculée que 20 min après la clôture de la séance suivante ; les séances de clôture anticipée sont
+  sautées ; un journalier de moins de 1 000 actions fait reprendre la séance plus tard.
+
+### A. Passe A de Gemini (deux essais)
+
+Le code du direct (`gemini.plan_a`, `gemini.settle_plan`, seuils `SEUILS`, règles v1), sur une population refaite à
+9 h 35 : les 100 plus forts volumes de la bougie de 9 h 30 et les 50 plus fortes hausses à 9 h 35 (le screener
+d'Alpaca ne se rejoue pas).
+- Gap de +5 à +25 % (journalier ajusté), au moins 21 séances ; les 30 premières au volume de la bougie sur le volume
+  moyen de 20 séances ; plan sur la bougie de 9 h 30 (entrée au plus haut + 1 pas, stop au plus bas − 1 pas, remonté
+  au VWAP − 1 pas s'il est plus haut et sous le prix ; minute de cassure qui clôture au-dessus de l'entrée avec au moins
+  1,5 fois le volume moyen d'une minute de la bougie) ; volume relatif ≥ 4 (bougie de 9 h 30 contre la moyenne des 20
+  dernières séances, parmi les 24 d'avant, où la valeur a échangé dans les 5 premières minutes ; au moins 5) ; les 8
+  premières dans cet ordre.
+- Ordre actif à 9 h 38 (le direct : deux minutes après son message de 9 h 36), déclenchable jusqu'à 10 h 30 ; moitié à
+  +10 %, reste à +20 %, stop remonté à l'entrée après TP1, sortie à 15 h 45 : **`gemini_a_j0`** ; règle de nuit de la
+  fiche (TP1 touché, prix au-dessus du VWAP, SPY pas à −1,5 % ou pire, sortie le lendemain à 10 h 30) :
+  **`gemini_a_jx`** ; sortie le lendemain à 15 h 59 : `gemini_a_j1`, publiée sans essai.
+- Écarts au direct, dits : ni catalyseur ni nombre d'actions (aucune donnée datée sur toute la période) ; pas de liste de
+  surveillance ; SPY à la place de l'ETF du secteur ; la bougie de 9 h 30 et la condition de volume viennent du SIP. Le
+  direct lit la bougie IEX (une petite part du volume) et compare son volume au volume SIP d'1 min au solde : sa
+  condition de volume est plus facile à remplir que la règle écrite. Constat transmis au fil du challenger ; rien n'est
+  changé au direct ici.
+- Règles du direct changées (`gemini.VERSION`) : chaque séance garde la version sous laquelle elle a été calculée et le
+  tableau le signale ; une autre version demande une nouvelle déclaration.
+
+### B. ORB des « stocks in play » (trois essais)
+
+Règles des sections 2.1 et 4 de l'article SSRN 4729284 :
+- volume relatif = volume de la bougie de 9 h 30 sur la moyenne simple des 14 séances d'avant (0 pour une séance cotée
+  sans échange à l'ouverture), au moins 1 ; bougies sans corps retirées avant le classement (système en direct des
+  auteurs) ; les 20 plus forts, ou ceux qui qualifient s'il y en a moins ;
+- sens de la bougie de 9 h 30 (verte : achat, rouge : vente) ; ordre stop au plus haut (achat) ou au plus bas (vente) de
+  la bougie, actif de 9 h 35 à 15 h 59, rempli au niveau ou à l'ouverture de la minute au-delà ;
+- stop à 10 % de l'ATR 14 j du prix d'exécution ; sortie au dernier cours de la séance.
+
+Trois versions, achats seuls en essai : **`sip_long`** (sans filtre, règle de Simão), **`sip_long_filtres`** (les
+filtres de l'article : ouverture > 5 $, volume moyen 14 j ≥ 1 M d'actions, ATR > 0,50 $ ; elle mesure ce que coûte la
+règle « pas de filtre » et ne devient pas une règle de JARVIS sans Simão) et **`sip_long_range`** (sans filtre, stop à
+l'autre bout de la bougie de 9 h 30, règle de l'article frère sur QQQ, SSRN 4416622 : un stop plus large que les frais,
+l'alternative que la revue donne au risque principal, le coût d'exécution en R). Les ventes à découvert (`sip_court`,
+`sip_court_filtres`, `sip_court_range`) sont publiées sans essai : emprunt, locate et règle SSR ne sont pas modélisés.
+
+Ambiguïtés de l'article, tranchées ici : ATR de Wilder (cité par l'article ; le code public des auteurs prend une
+moyenne simple) ; ordre jamais annulé avant 15 h 59 ; dans la minute de l'entrée, un stop touché compte (ordre des prix
+inconnu : le pire, comme le simulateur du labo), et la variante « stop vérifié à partir de la minute suivante » est
+publiée à côté.
+
+### Témoin et mesure
+
+- **Témoin** : une valeur tirée au hasard dans la population de la même séance (graine fixe par séance, version et
+  valeur ; jamais une valeur retenue), prise au marché à la minute de l'entrée, même sens, même géométrie en % du prix,
+  mêmes sorties.
+- **Mesure qui décide, `r_frais`** : le R aux frais du compte de Simão, 20 € de risque au change de 1,15, actions
+  entières, commission IBKR du plan du compte (Dégressif), glissement du labo (au moins un demi-pas) à l'entrée et sur
+  chaque sortie au marché. Passe A : un bracket par objectif, comme le direct ; ORB : un ordre d'entrée et un de
+  sortie. Robustesse : le même avec le glissement doublé (`r_frais_x2`).
+
+### Jugement
+
+Règle « candidate » du labo (n° 8 et 10), sur les séances hors bloc scellé : borne basse de l'IC 95 % de `r_frais`
+> 0 ; écart au témoin au seuil en t (Bonferroni sur les 162 essais, Student à jours − 1) ; au moins 30 trades ; les
+deux moitiés chronologiques et le glissement doublé positifs. L'historique est jugé, comme pour la n° 9 : aucune règle
+n'a été choisie ni réglée sur les chiffres du labo, et le seuil corrige du nombre d'essais. Une ligne qui tient devient
+candidate au **bloc scellé**, ouvert une seule fois et par Simão ; le bloc scellé n'est ni lu ni calculé ici. Rien ne
+passe au direct sans Simão.
+
+### Essais
+
+157 + 5 = **162** : `gemini_a_j0`, `gemini_a_jx`, `sip_long`, `sip_long_filtres`, `sip_long_range`, chacun sur
+`r_frais`, jugés sur leurs propres lignes (table `ouverture_trades`). Les lignes du labo v2 ne changent pas
+(`DECLARATION` reste 11, pas de rattrapage) ; `LATEST_DECLARATION` = 12. Le seuil z d'affichage reste 3,42.
+
+### Mesures sans essai
+
+Pour chaque ligne : brut, témoin, part gagnante, valeur médiane de la position, par année, par tranche de prix (< 5 $,
+5-20 $, ≥ 20 $) et de gap (revues du 26/10 : ventiler, pas filtrer). Pour l'ORB en plus : par risque par action
+(< 10 c, 10-20 c, 20-50 c, ≥ 50 c), par volume relatif (1-2, 2-5, 5-30, > 30 : la courbe de la figure 4 de l'article)
+et stop vérifié à partir de la minute suivante. Une séance se vérifie sur les graphiques avec
+`GET /api/lab/ouverture?jour=AAAA-MM-JJ` (listes, plans écartés et pourquoi, lignes).
+
+### Coût
+
+- Collecte : la bougie de 9 h 30 d'environ 10 000 actions par séance, 200 par requête Alpaca, soit environ 50
+  requêtes par séance et 21 000 pour l'historique (environ 426 séances) ; budget `ouverture_calls` (nuit 600 par
+  passage, jour 150, séance 0) : une à deux nuits. Base : environ +250 Mo (table `open5`).
+- Calcul : environ 15 requêtes d'1 min et 20 à 30 s par séance (budget `ouverture_seconds`), hors séance US.
+- Avancement : `!labo` (« séances n° 12 à calculer ») ; la n° 12 n'est « complète » qu'une fois l'historique calculé
+  jusqu'au 26/10/2026, les séances suivantes étant l'avancement ordinaire.
+
+### Paris de l'analyste (écrits avant le premier chiffre)
+
+- `sip_long` : négatif après frais (≈ 75 %), brut positif (≈ 55 %) ; un stop de 10 % de l'ATR fait des risques de
+  quelques cents, où les frais pèsent de 0,1 à 0,3 R.
+- `sip_long_range` : plus près de zéro que `sip_long` (≈ 65 %).
+- `sip_long_filtres` meilleur que `sip_long` (≈ 70 %) : l'écart serait le coût mesuré de la règle « pas de filtre ».
+- Passe A (`gemini_a_j0`, `gemini_a_jx`) : négative après frais (≈ 70 %), en ligne avec la n° 9 et Killmode complet.
+- Au moins une des cinq lignes tient la règle « candidate » : ≈ 10 %.
+
+### Limites
+
+- Passe A sans catalyseur ni nombre d'actions : le rejeu teste la mécanique de la méthode, pas son tri sur l'actualité
+  (le challenger en direct mesure la méthode entière).
+- Sortie au dernier cours d'1 min, pas à l'enchère de clôture ; pas de haltes LULD ; dans la minute, l'ordre des prix
+  est inconnu (pire cas, variante publiée).
+- Écart achat-vente non mesuré (pas de cotations) : le glissement du labo en tient lieu, doublé en robustesse ; sous
+  5 $, l'écart réel peut dépasser le glissement modélisé (1,1 à 1,7 % sous 100 M$ de capitalisation selon la SEC, données
+  2013, ouverture exclue).
+- Un ticker réutilisé peut mêler deux sociétés ; les valeurs radiées sans bougies chez Alpaca manquent.
+- Environ 380 séances non scellées (octobre 2024 à octobre 2026, hors avril-octobre 2026) : « pas d'avantage démontré »
+  restera la lecture la plus probable et ne voudra pas dire « pas d'avantage ».
+
+### Council
+
+Position de l'analyste, sur les faits : la piste qui a le plus de preuves publiées (ORB 5 min sur le volume relatif
+d'ouverture) et la méthode que Simão tient pour gagnante n'ont jamais été rejouées sur toute la cote ; cinq essais,
+règles prises telles quelles. **Sceptique** : l'avantage publié est d'environ 0,1 R brut par trade et le risque
+principal est le coût en R d'un stop de quelques cents ; accepté, d'où la version au stop large et le glissement doublé
+dans la règle. **Pragmatique** : aucune source de données payante, les bougies d'1 min ne sont relues que pour une
+vingtaine de valeurs par séance. **Critique** : la passe A rejouée n'a pas le pilier catalyseur ; écrit en limite, et le
+challenger en direct reste la mesure de la méthode entière. GO, sous réserve de l'avis de GPT et de Gemini et du feu
+vert de Simão.
+
 ## Bloc scellé
 
 Le rejeu du **6 avril au 5 octobre 2026** est calculé mais rangé à part (`trades_sealed`,
@@ -1322,7 +1481,8 @@ Limite assumée : les mouvements du jour et les fiches catalyseurs de ces dates 
 ## Où voir les chiffres
 
 `!strategies` sur Discord, `GET /api/lab/strategies` (clé du labo), ligne « Labo v2 » de `!labo`, et la ligne de
-la déclaration en vigueur dans `!labo` (« n° 11 : complète », ou ce qui reste à refaire). Audit des mesures
+la déclaration en vigueur dans `!labo` (« n° 12 : complète », ou ce qui reste à refaire). N° 12 : `!ouverture` (ou
+`!n12`) et `GET /api/lab/ouverture` (`?jour=AAAA-MM-JJ` pour une séance). Audit des mesures
 remplacées (pour audit, jamais pour décider) : la section « Audit » de `!strategies` et
 `GET /api/lab/strategies/audit`.
 Les jours traités avant le labo v2 sont rattrapés par le worker hors séance (`app/lab/rattrapage.py`) :

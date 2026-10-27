@@ -44,6 +44,8 @@ qu'aux comptes listés dans JARVIS_DISCORD_OWNER_ID et ignore tout le reste sans
   !fed                  mesure Polymarket (sans essai) : par séance, ce que le repricing de la Fed pendant la nuit
                         change au R des ORB (aussi `!polymarket`)
   !potentiel            potentiel +10 : part des séances qui touchent +8 % selon le gap, types de catalyseurs
+  !ouverture            déclaration n° 12 : passe A de Gemini et ORB 5 min des « stocks in play » rejoués sur toute
+                        la cote, R à 20 € contre le témoin aléatoire, avancement de la collecte (aussi `!n12`)
   !gemini               challenger « méthode Gemini » (forward-test) : plans du jour et bilan contre le témoin
                         aléatoire, frais IBKR compris ; `!gemini bilan` pour le bilan seul
   !kill                 JARVIS Killmode, désactivé par défaut : `!kill on`, `!kill NVDA`, `!kill scan`, `!kill bilan`
@@ -77,6 +79,7 @@ from app.lab import potentiel as lab_potentiel
 from app.lab import rates as lab_rates
 from app.lab import etude8k as lab_etude8k
 from app.lab import polyfed as lab_polyfed
+from app.lab import ouverture as lab_ouverture
 from app.lab import sec8k as lab_sec8k
 from app.lab import strat_stats as lab_strategies
 from app.core.http import SourceError
@@ -370,6 +373,16 @@ def potentiel_text() -> str:
         conn.close()
 
 
+def ouverture_text() -> str:
+    conn = lab_db.open_readonly()
+    if conn is None:
+        return "🌅 Base du labo absente : le service jarvis-lab n'a pas encore démarré."
+    try:
+        return lab_ouverture.text(lab_ouverture.report(conn))
+    finally:
+        conn.close()
+
+
 def strategies_text() -> str:
     conn = lab_db.open_readonly()
     if conn is None:
@@ -558,6 +571,8 @@ async def handle(content: str, lock: asyncio.Lock | None = None) -> str | None:
             return await asyncio.to_thread(polyfed_text)
         if cmd in ("potentiel", "potentiel10", "plus10"):
             return await asyncio.to_thread(potentiel_text)
+        if cmd in ("ouverture", "n12"):
+            return await asyncio.to_thread(ouverture_text)
         if cmd == "gemini":
             return await gemini.command(args)
         if cmd == "kill":

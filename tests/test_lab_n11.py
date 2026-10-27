@@ -13,9 +13,9 @@ from tests.test_lab_strategies import make_day
 
 
 def test_declaration_et_essais():
-    assert ST.DECLARATION == ST.CRYPTO_DECLARATION == ST.LATEST_DECLARATION == 11
+    assert ST.DECLARATION == ST.CRYPTO_DECLARATION == 11 and ST.LATEST_DECLARATION == 12  # n° 12 : lignes à part
     t = ST.trials()
-    assert len(t) == 157 and t[-2:] == list(ST.N11_TRIALS)
+    assert len(t) == 162 and t[-7:-5] == list(ST.N11_TRIALS) and t[-5:] == list(ST.N12_TRIALS)
     n11 = [x for x in t if x["strategy"] in ST.N11_NAMES]
     assert len(n11) == 5 and {x["exit"] for x in n11} == {"r_net"}
     assert ST.seen_until("orb30_va", "stock") == "2026-10-16" and ST.seen_until("orb30", "stock") is None

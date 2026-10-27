@@ -103,11 +103,11 @@ def test_indicateur_n10_complete_ou_ce_qui_reste(tmp_path):
     path = str(tmp_path / "lab.db")
     db = LabDB(path)
     n = STATUS.declaration_state(db.conn)
-    assert n == {"numero": ST.LATEST_DECLARATION, "jours": {"stock": 0, "crypto": 0},
+    assert n == {"numero": ST.LATEST_DECLARATION, "lignes_v2": ST.DECLARATION, "jours": {"stock": 0, "crypto": 0},
                  "lignes_anciennes": {"stock": 0, "crypto": 0}, "seances_n9": 0, "seances_kill_complet": 0,
-                 "complete": True}
+                 "seances_n12": 0, "bougies_9h30": {"lues": 0, "utiles": 0}, "complete": True}
     assert STATUS.declaration_line(n) == (f"n° {ST.LATEST_DECLARATION} : complète (stratégies, n° 9 et Killmode complet "
-                                         "re-mesurés)")
+                                         "re-mesurés, n° 12 calculée)")
     db.set("replay:stock", "start", "2025-03-10")                          # deux jours d'actions à rattraper
     db.set("replay:stock", "last_day", "2025-03-11")
     _daily(db, "2025-03-10", "2025-03-11")
@@ -475,7 +475,7 @@ def _audit_base(tmp_path):
 def test_audit_apparie_nouveau_moins_ancien(tmp_path):
     db, days = _audit_base(tmp_path)
     rep = AUD.report(db.conn)
-    assert rep["declaration"] == ST.LATEST_DECLARATION
+    assert rep["declaration"] == ST.DECLARATION  # la déclaration qui a réécrit les lignes (la n° 12 n'en réécrit aucune)
     assert list(rep["archives"]) == [f"labo2-avant-n{ST.DECLARATION}.db"]
     mk = rep["marches"]["stock"]
     assert mk["archivees"] == 7 and mk["appariees"] == 6                  # ZZZ sans pendant
@@ -533,7 +533,7 @@ def test_audit_en_cache_et_texte(tmp_path):
     assert AUD.refresh(db, now + timedelta(seconds=60), 3600) is None    # lignes changées, cache trop jeune
     assert AUD.refresh(db, now + timedelta(seconds=3601), 3600) == 5
     text = AUD.text(rep)
-    assert text.startswith(f"🔎 **Audit de la n° {ST.LATEST_DECLARATION} (ancien → nouveau, mêmes trades)** : pour "
+    assert text.startswith(f"🔎 **Audit de la n° {ST.DECLARATION} (ancien → nouveau, mêmes trades)** : pour "
                            "audit, jamais pour décider")
     assert "Actions : 6 lignes appariées sur 7 archivées" in text and "espérance +0,57 R [" in text
     assert "(5 trades)" in text and "témoin -0,20 R" in text
@@ -559,7 +559,7 @@ def test_audit_route_et_strategies(tmp_path, monkeypatch):
     assert r.status_code == 200 and r.json()["marches"]["stock"]["appariees"] == 6
     assert "Audit de la n°" not in bot.strategies_text()                       # pas de cache : rien dans Discord
     AUD.refresh(db, datetime(2026, 10, 11, 3, tzinfo=timezone.utc), 3600)
-    assert f"Audit de la n° {ST.LATEST_DECLARATION} (ancien → nouveau, mêmes trades)" in bot.strategies_text()
+    assert f"Audit de la n° {ST.DECLARATION} (ancien → nouveau, mêmes trades)" in bot.strategies_text()
 
 
 # --- C5 : Killmode, comparaison journal / labo ---------------------------------------------------------------------

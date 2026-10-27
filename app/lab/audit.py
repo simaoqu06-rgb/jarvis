@@ -312,7 +312,7 @@ def report(conn: sqlite3.Connection, uri: bool = False) -> dict | None:
     current = set(files)
     for decl in on_disk(main):  # fichier plus ancien (copie manuelle d'avant la n° 10…) : apparié à part
         files.setdefault(decl, ["stock", "crypto"])
-    out: dict = {"declaration": ST.LATEST_DECLARATION, "marches": {}, "archives": {}, "seances_exclues": excluded()}
+    out: dict = {"declaration": ST.DECLARATION, "marches": {}, "archives": {}, "seances_exclues": excluded()}
     for decl, markets in sorted(files.items()):
         path = archive_path(main, decl)
         if not path.exists():

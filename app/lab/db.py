@@ -239,6 +239,19 @@ CREATE TABLE IF NOT EXISTS pm_markets (
 CREATE TABLE IF NOT EXISTS pm_prices (
     token TEXT NOT NULL, ts INTEGER NOT NULL, p REAL NOT NULL, PRIMARY KEY (token, ts)
 );
+-- Déclaration n° 12 (ouverture.py, 27 octobre 2026) : première bougie de 5 min (9 h 30 - 9 h 35) de chaque action
+-- qui a coté, SIP, prix négociés (open5) ; une ligne par valeur retenue, essai et séance (ouverture_trades), passe A
+-- de Gemini et ORB des stocks in play rejoués sur les bougies d'1 min non ajustées.
+CREATE TABLE IF NOT EXISTS open5 (
+    day TEXT NOT NULL, symbol TEXT NOT NULL, o REAL, h REAL, l REAL, c REAL, v REAL, PRIMARY KEY (day, symbol)
+) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS ouverture_trades (
+    day TEXT NOT NULL, symbol TEXT NOT NULL, essai TEXT NOT NULL, rang INTEGER, cote TEXT, gap_pct REAL, rvol REAL,
+    prix REAL, entry REAL, stop REAL, risque REAL, declenche INTEGER NOT NULL, t_entree INTEGER, sortie TEXT,
+    r_brut REAL, r_frais REAL, r_frais_x2 REAL, r_suivante REAL, hors_mise INTEGER, incomplet INTEGER, valeur REAL,
+    temoin TEXT, temoin_r_brut REAL, temoin_r_frais REAL, detail TEXT,
+    PRIMARY KEY (day, symbol, essai)
+);
 -- Bloc scellé (seal.py) : mêmes tables, jamais lues par les statistiques, la routine ni le grade.
 {trades_sealed}
 {strat}

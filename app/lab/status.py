@@ -165,19 +165,22 @@ def declaration_state(conn: sqlite3.Connection) -> dict | None:
     encore exclues, séances de la n° 9 et de Killmode complet à recalculer. « complete » : tout est à zéro, condition
     écrite pour déclarer la suivante (docs/labo-strategies.md, « Avant la déclaration suivante »). None si la base n'est pas lisible."""
     from app.lab import kill_complet as KC  # imports tardifs : tirent killmode, runner et generator
+    from app.lab import ouverture as OUV
     from app.lab import plus10 as P10
     from app.lab import strat_stats as SS
     from app.lab import strategies as ST
 
     try:
         part = SS.partial(conn)
-        out = {"numero": ST.LATEST_DECLARATION,
+        n12 = OUV.progress(conn) or {}
+        out = {"numero": ST.LATEST_DECLARATION, "lignes_v2": ST.DECLARATION,
                "jours": {m: (part.get(m) or {}).get("jours_rattrapage", 0) for m in ("stock", "crypto")},
                "lignes_anciennes": {m: (part.get(m) or {}).get("lignes_exclues", 0) for m in ("stock", "crypto")},
-               "seances_n9": P10.a_recalculer(conn), "seances_kill_complet": KC.stale_days(conn)}
+               "seances_n9": P10.a_recalculer(conn), "seances_kill_complet": KC.stale_days(conn),
+               "seances_n12": n12.get("seances_a_calculer", 0), "bougies_9h30": n12.get("bougies_9h30")}
     except sqlite3.Error:
         return None
-    out["complete"] = not part and not out["seances_n9"] and not out["seances_kill_complet"]
+    out["complete"] = not part and not out["seances_n9"] and not out["seances_kill_complet"] and not out["seances_n12"]
     return out
 
 
@@ -187,7 +190,7 @@ def declaration_line(n: dict | None) -> str | None:
         return None
     head = f"n° {n['numero']}"
     if n["complete"]:
-        return f"{head} : complète (stratégies, n° 9 et Killmode complet re-mesurés)"
+        return f"{head} : complète (stratégies, n° 9 et Killmode complet re-mesurés, n° 12 calculée)"
     days, old, parts = n["jours"], n["lignes_anciennes"], []
     if days["stock"] or days["crypto"]:
         parts.append(f"{days['stock']} j actions, {days['crypto']} j crypto à rattraper")
@@ -199,6 +202,11 @@ def declaration_line(n: dict | None) -> str | None:
     if n["seances_kill_complet"]:
         parts.append(f"{n['seances_kill_complet']} séance{'s' if n['seances_kill_complet'] > 1 else ''} Killmode "
                      "complet à recalculer")
+    k = n.get("seances_n12") or 0
+    if k:
+        seen = n.get("bougies_9h30") or {}
+        parts.append(f"{k} séance{'s' if k > 1 else ''} n° 12 à calculer (bougies de 9 h 30 : {seen.get('lues', 0)} "
+                     f"séances lues sur {seen.get('utiles', 0)})")
     return f"⏳ {head} : " + ", ".join(parts)
 
 
@@ -291,7 +299,8 @@ def text(st: dict) -> str:
     pause = E.guard_text(st.get("garde_v1"))
     if pause:  # garde du Labo 1 : rien de ce qui suit n'avance côté v1
         lines.append(f"{pause} : rejeu et direct arrêtés, aucune ligne v1 écrite ; Labo 2, rattrapage et grade continuent")
-    arch = archive_line(st.get("archive_audit"), (st.get("declaration") or {}).get("numero"))
+    decl = st.get("declaration") or {}
+    arch = archive_line(st.get("archive_audit"), decl.get("lignes_v2", decl.get("numero")))
     if arch:  # relecture W1 : sans elle, le rattrapage arrêté n'avait aucune cause visible
         lines.append(arch)
     for market in ("stock", "crypto"):

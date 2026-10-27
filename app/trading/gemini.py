@@ -342,13 +342,14 @@ def commission(shares: int, price: float) -> float:
     return KM.order_commission(shares, price, KM.IBKR_PLANS.get(IBKR_PLAN, KM.IBKR_PLANS["degressif"]))
 
 
-def result(f: dict, m: dict, eurusd: float) -> dict:
-    """R brut (sans frais ni glissement) et R aux frais de Simão (20 € de risque, un bracket IBKR par objectif)."""
+def result(f: dict, m: dict, eurusd: float, slip_mult: float = 1.0) -> dict:
+    """R brut (sans frais ni glissement) et R aux frais de Simão (20 € de risque, un bracket IBKR par objectif).
+    `slip_mult` : glissement multiplié (robustesse du rejeu, déclaration n° 12 ; 1 en direct)."""
     risk = f["prix"] - f["stop"]
     if risk <= 0 or not m["sorties"]:
         return {"r_brut": None, "r_frais": None, "hors_mise": False}
     brut = sum(0.5 * (px - f["prix"]) for _, px, _, _ in m["sorties"]) / risk
-    entry = f["prix"] + slip(f["prix"])
+    entry = f["prix"] + slip_mult * slip(f["prix"])
     risk_paid = entry - f["stop"]
     total = math.floor(KM.RISK_EUR * eurusd / risk_paid + 1e-9) if risk_paid > 0 else 0
     if total < 2:  # une action ne se coupe pas en deux brackets : pas à la taille de Simão
@@ -357,7 +358,7 @@ def result(f: dict, m: dict, eurusd: float) -> dict:
     pnl = 0.0
     for leg, px, _, market in m["sorties"]:
         n = sizes[leg]
-        exit_px = px - (slip(px) if market else 0.0)
+        exit_px = px - (slip_mult * slip(px) if market else 0.0)
         pnl += n * (exit_px - entry) - commission(n, entry) - commission(n, exit_px)
     return {"r_brut": round(brut, 4), "r_frais": round(pnl / (total * risk_paid), 4), "hors_mise": False,
             "actions": total}
@@ -401,9 +402,11 @@ def keep_overnight(f: dict, bars: list[dict], day: date, etf: list[dict] | None)
     return True, f"TP1 touché, au-dessus du VWAP, secteur {_fr(change)} %"
 
 
-def settle_plan(p: dict, bars: dict[str, list[dict]], next_day: date, eurusd: float, variants=("j0", "j1")) -> dict:
+def settle_plan(p: dict, bars: dict[str, list[dict]], next_day: date, eurusd: float, variants=("j0", "j1"),
+                slip_mult: float = 1.0) -> dict:
     """Solde d'un plan et de son témoin dans chaque version. `bars` : bougies d'1 min SIP du jour et du lendemain
-    (et de SPY pour le scénario « jx », qui reprend j1 s'il reste la nuit, sinon j0 ; le témoin a son propre scénario)."""
+    (et de SPY pour le scénario « jx », qui reprend j1 s'il reste la nuit, sinon j0 ; le témoin a son propre scénario).
+    `slip_mult` : glissement multiplié dans chaque résultat (rejeu de la n° 12 ; 1 en direct)."""
     f = fill(p, bars.get(p["symbol"]) or [])
     out = {"declenche": bool(f), "eurusd": eurusd}
     if not f:
@@ -420,11 +423,11 @@ def settle_plan(p: dict, bars: dict[str, list[dict]], next_day: date, eurusd: fl
     for v in variants:
         end = exit_ts(p, v, next_day)
         m = manage(f, bars.get(p["symbol"]) or [], end)
-        row = result(f, m, eurusd) | {"sorties": [[leg, px, why] for leg, px, why, _ in m["sorties"]],
-                                      "incomplet": m["incomplet"]}
+        row = result(f, m, eurusd, slip_mult) | {"sorties": [[leg, px, why] for leg, px, why, _ in m["sorties"]],
+                                                 "incomplet": m["incomplet"]}
         if wf:
             wm = manage(wf, bars.get(wsym) or [], end)
-            wr = result(wf, wm, eurusd)
+            wr = result(wf, wm, eurusd, slip_mult)
             row["temoin"] = {"r_brut": wr["r_brut"], "r_frais": wr["r_frais"], "incomplet": wm["incomplet"]}
         out[v] = row
     if "j0" in out:
@@ -437,11 +440,11 @@ def settle_plan(p: dict, bars: dict[str, list[dict]], next_day: date, eurusd: fl
             return m, keep, why
 
         m, keep, why = night(f, bars.get(p["symbol"]) or [])
-        row = result(f, m, eurusd) | {"sorties": [[leg, px, w] for leg, px, w, _ in m["sorties"]],
-                                      "incomplet": m["incomplet"], "nuit": keep, "pourquoi": why}
+        row = result(f, m, eurusd, slip_mult) | {"sorties": [[leg, px, w] for leg, px, w, _ in m["sorties"]],
+                                                 "incomplet": m["incomplet"], "nuit": keep, "pourquoi": why}
         if wf:
             wm, wkeep, _ = night(wf, bars.get(wsym) or [])
-            wr = result(wf, wm, eurusd)
+            wr = result(wf, wm, eurusd, slip_mult)
             row["temoin"] = {"r_brut": wr["r_brut"], "r_frais": wr["r_frais"], "incomplet": wm["incomplet"],
                              "nuit": wkeep}
         out["jx"] = row

@@ -39,6 +39,7 @@ from app.lab import etude8k as lab_etude8k
 from app.lab import polyfed as lab_polyfed
 from app.lab import sec8k as lab_sec8k
 from app.lab import filtres as lab_filtres
+from app.lab import ouverture as lab_ouverture
 from app.lab import strat_stats as lab_strategies
 from app.lab import strategies as lab_strategies_mod
 from app.lab import status as lab_status
@@ -902,6 +903,25 @@ def lab_filtres_get():
     conn = _lab_conn()
     try:
         return lab_filtres.cached(conn) or lab_filtres.report(conn)
+    finally:
+        conn.close()
+
+
+@app.get("/api/lab/ouverture", dependencies=[Depends(lab_key)])
+def lab_ouverture_get(jour: str | None = Query(None, max_length=10)):
+    """Déclaration n° 12 : passe A de Gemini et ORB des stocks in play rejoués sur toute la cote (r_frais à 20 €, témoin,
+    règle « candidate » du labo), avancement de la collecte ; `jour` (AAAA-MM-JJ) : les listes et les lignes d'une
+    séance calculée, pour la vérifier sur les graphiques. Lecture seule, calcul direct, hors bloc scellé."""
+    day = _day(jour, "jour")
+    conn = _lab_conn()
+    try:
+        if day:
+            data = lab_ouverture.day_detail(conn, day)
+            if data is None:
+                raise HTTPException(404, f"Séance {day} pas calculée par la n° 12")
+            return data
+        return (lab_ouverture.report(conn) or {"numero": lab_ouverture.NUMERO, "seances": 0}) | {
+            "avancement": lab_ouverture.progress(conn)}
     finally:
         conn.close()
 
