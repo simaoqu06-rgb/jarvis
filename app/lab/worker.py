@@ -63,6 +63,11 @@ Toutes les ~10 min :
 21. Étude des 8-K sur plusieurs jours, COLLECTE seulement (etude8k.py, protocole v2.1 du 25 octobre 2026) :
    « etude8k_collecte », index complet d'EDGAR, dépôts des CIK, en-têtes des heures ambiguës, tickers à la date (budget
    e8k_calls, appels SEC) puis bougies journalières depuis septembre 2020 (e8k_seconds), hors séance US. Aucun calcul.
+22. Déclaration n° 12 (ouverture.py, 27 octobre 2026, protocole v2) : « ouverture5_collecte », première bougie de 5 min
+   de toute la cote des séances utiles (budget ouverture_calls, appels Alpaca), puis « ouverture_n12 », passe A de Gemini
+   et ORB des stocks in play rejoués sur les bougies d'1 min, minutes qui décident des achats de l'ORB relues en
+   transactions et NBBO (environ 250 requêtes par séance), gardées en mémoire (ouverture_seconds, une séance au moins
+   par passage), hors séance US.
 Le battement (lab.heartbeat) porte l'étape en cours, affichée par /api/lab/status et !labo.
 Le rejeu couvre JARVIS_LAB_REPLAY_DAYS séances (504 ≈ 2 ans) avant le premier lancement du worker ;
 le direct prend le relais à partir de ce jour-là. JARVIS_LAB_ENABLED=off met le worker en veille.
@@ -93,6 +98,7 @@ from app.lab import lessons as L
 from app.lab import plus10 as P10
 from app.lab import polyfed as PF
 from app.lab import method as M
+from app.lab import ouverture as OUV
 from app.lab import potentiel as PO
 from app.lab import autopsie as AUT
 from app.lab import rates as RATES
@@ -125,20 +131,21 @@ KEY_WARNING_SECONDS = 3600
 # Labo 2 : jours de mouvements calculés, appels Finnhub, règles validées et âge maximal des
 # statistiques en cache (secondes), par période ; sec_calls : appels SEC de la mesure 8-K ; pm_calls : appels
 # Polymarket de la mesure Fed ; e8k_calls et e8k_seconds : appels SEC et secondes Alpaca de la collecte de l'étude des
-# 8-K sur plusieurs jours.
+# 8-K sur plusieurs jours ; ouverture_calls et ouverture_seconds : appels Alpaca de la bougie de 9 h 30 de toute la cote et
+# secondes de calcul de la déclaration n° 12.
 LAB2_BUDGET = {
     "nuit": {"moves_days": 30, "news_calls": 40, "rules": 3, "stats_age": 3600, "derivs_calls": 300,
              "coverage_days": 60, "archive_seconds": 1200, "archive_days": 40, "kill_complet_seconds": 600,
              "plus10_seconds": 600, "sec_calls": 600, "pm_calls": 300,
-             "e8k_calls": 900, "e8k_seconds": 600},
+             "e8k_calls": 900, "e8k_seconds": 600, "ouverture_calls": 600, "ouverture_seconds": 600},
     "jour": {"moves_days": 5, "news_calls": 10, "rules": 1, "stats_age": 3 * 3600, "derivs_calls": 100,
              "coverage_days": 10, "archive_seconds": 600, "archive_days": 10, "kill_complet_seconds": 120,
              "plus10_seconds": 120, "sec_calls": 150, "pm_calls": 80,
-             "e8k_calls": 200, "e8k_seconds": 120},
+             "e8k_calls": 200, "e8k_seconds": 120, "ouverture_calls": 150, "ouverture_seconds": 120},
     "seance": {"moves_days": 2, "news_calls": 0, "rules": 0, "stats_age": 6 * 3600, "derivs_calls": 30,
                "coverage_days": 2, "archive_seconds": 0, "archive_days": 2, "kill_complet_seconds": 0,
                "plus10_seconds": 0, "sec_calls": 0, "pm_calls": 0,
-               "e8k_calls": 0, "e8k_seconds": 0},
+               "e8k_calls": 0, "e8k_seconds": 0, "ouverture_calls": 0, "ouverture_seconds": 0},
 }
 _key_warned_at: float | None = None
 
@@ -671,6 +678,8 @@ async def lab2(db: LabDB, now: datetime, collect: bool = True, hold: bool = Fals
         await step("sec8k_collecte", lambda: SEC8K.fetch(db, now, budget["sec_calls"]))
         await step("polymarket_collecte", lambda: PF.fetch(db, now, budget["pm_calls"]))
         await step("etude8k_collecte", lambda: E8K.collect(db, now, budget["e8k_calls"], budget["e8k_seconds"]))
+        await step("ouverture5_collecte", lambda: OUV.collect_open5(db, now, budget["ouverture_calls"]))
+        await step("ouverture_n12", lambda: OUV.step(db, now, budget["ouverture_seconds"]))
     await step("file_regles", lambda: V.ingest_queue(db))
     await step("regles", lambda: len(V.process_pending(db, budget["rules"])))
     await step("declarations_council", lambda: CNC.ingest(db, now))  # autonomie du council (25/10/2026)

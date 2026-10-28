@@ -30,10 +30,10 @@ def test_listes_figees_par_la_declaration():
     lists = P10.ranked(pop)
     assert lists == {"s10": ["B", "C", "A"], "rebond": ["G", "F"]}  # égalité B/C par symbole ; E trop calme
     assert (P10.GAP_MIN, P10.ATR_MIN, P10.TOP, P10.DRAWS) == (5.0, 5.0, 5, 20)
-    assert [t["strategy"] for t in ST.PLUS10_TRIALS] == list(P10.TRIALS) and len(ST.trials()) == 157
+    assert [t["strategy"] for t in ST.PLUS10_TRIALS] == list(P10.TRIALS) and len(ST.trials()) == 163
     # La n° 9 ne relançait pas le rattrapage du labo v2 (DECLARATION restait à 8) ; la n° 10 corrige la mesure
-    # sans essai de plus : 152.
-    assert ST.DECLARATION == 11 and ST.LATEST_DECLARATION == 11
+    # sans essai de plus : 152. La n° 12 ajoute ses lignes à part (ouverture.py), sans rattrapage non plus.
+    assert ST.DECLARATION == 11 and ST.LATEST_DECLARATION == 12
 
 
 def test_amplitude_par_groupe_et_par_prix():
@@ -132,7 +132,7 @@ async def test_seance_rejouee_sur_les_prix_negocies(lab, tmp_path):
     assert rep["concordance_direct"] == {"seances": 1, "valeurs_du_labo": 6, "retrouvees": 3, "concordance_pct": 50.0}
     assert "Potentiel +10" in P10.text(rep)
     full = SS.report(lab.conn)
-    assert full["declaration"]["numero"] == 11 and full["potentiel_plus10"]["seances"] == 1
+    assert full["declaration"]["numero"] == 12 and full["potentiel_plus10"]["seances"] == 1
 
 
 def test_tirages_reproductibles():

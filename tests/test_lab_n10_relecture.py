@@ -132,7 +132,7 @@ async def test_archive_en_echec_dite_dans_labo_jusqu_au_passage_qui_reussit(tmp_
     assert st["archive_audit"] == {"etat": "echec", "raison": "OperationalError: database or disk is full",
                                    "depuis": "2026-10-11T03:00:00+00:00"}
     alert = (f"⚠️ Archive d'audit en échec depuis le 11/10/2026 à 03:00 UTC (OperationalError: database or disk is "
-             f"full) : rattrapage de la n° {ST.LATEST_DECLARATION}, Killmode complet, n° 9 et recalcul du direct à "
+             f"full) : rattrapage de la n° {ST.DECLARATION}, Killmode complet, n° 9 et recalcul du direct à "
              "l'arrêt, rien n'est réécrit (docker compose logs jarvis-lab)")
     assert alert in STATUS.text(st).splitlines()
     report = await W.tick(db, night + timedelta(minutes=30), collect=True)   # place libérée : l'archivage passe
@@ -246,7 +246,8 @@ def test_labo_separe_rattrapage_et_direct_en_attente(tmp_path):
     lines = STATUS.text(st).splitlines()
     assert "Labo v2 : 2 lignes de stratégies (`!strategies`) · direct en attente de calcul : 1 jour actions" in lines
     assert not any("rattrapage :" in line for line in lines)
-    assert f"n° {ST.LATEST_DECLARATION} : complète (stratégies, n° 9 et Killmode complet re-mesurés)" in lines
+    assert (f"n° {ST.LATEST_DECLARATION} : complète (stratégies, n° 9 et Killmode complet re-mesurés, n° 12 calculée)"
+            in lines)
     db.set("replay:stock", "last_day", "2026-10-09")                 # cinq séances du rejeu à rattraper aussi
     lines = STATUS.text(STATUS.status(path)).splitlines()
     assert ("Labo v2 : 2 lignes de stratégies (`!strategies`) · rattrapage : 5 jours actions, 0 jour crypto · direct "

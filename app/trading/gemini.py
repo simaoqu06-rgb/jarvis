@@ -36,7 +36,8 @@ qui touche le stop et un objectif compte comme stop. Le chiffre qui décide est 
 défaut ici), glissement du labo (au moins un demi-pas) sur les ordres stop et au marché. Le témoin : une action tirée
 au hasard dans la population du même passage (graine fixe, tirée au moment du plan), achetée au marché à la minute où le
 plan s'est déclenché, avec le même stop et les mêmes objectifs en pourcentage et les mêmes sorties. L'écart plan −
-témoin se lit avec un intervalle de confiance groupé par jour (stats du labo).
+témoin se lit avec un intervalle de confiance groupé par jour (stats du labo). La condition de volume de A (minute de
+cassure contre les 5 premières minutes) se lit aussi au solde, sur les bougies SIP des deux côtés (règles v2).
 """
 from __future__ import annotations
 
@@ -65,7 +66,8 @@ NEW_YORK = ZoneInfo("America/New_York")
 STATE_PATH = os.getenv("JARVIS_GEMINI_PATH", "data/gemini_challenger.json")
 JOURNAL_PATH = os.getenv("JARVIS_GEMINI_SCANS_PATH", "data/gemini_scans.jsonl")
 # Version des règles : le bilan ne mélange pas deux versions. À changer à chaque modification d'un seuil ou d'un plan.
-VERSION = 1
+# v2 (27/10/2026) : la condition de volume de la cassure (A) se lit au solde sur les bougies SIP des deux côtés.
+VERSION = 2
 SEUILS = {"gap_min": 5.0, "gap_max": 25.0, "rvol_min": 4.0, "actions_max": 30e6, "parabole_pct": 15.0,
           "hausse_b_min": 5.0, "drapeau_bougies": 6, "drapeau_part_max": 0.4, "volume_cassure": 1.5,
           "resultats_seances": 5, "tp_a": (10.0, 20.0), "tp_b2": 10.0}
@@ -202,8 +204,17 @@ def plan_a(sess: list[dict], prev_close: float) -> tuple[dict | None, str | None
     hi, lo = first["h"], first["l"]
     entry = round(hi + tick(hi), 4)
     return {"entry": entry, "stop_range": round(lo - tick(lo), 4), "range_haut": hi, "range_bas": lo,
-            "vol_min_minute": round(SEUILS["volume_cassure"] * first["v"] / 5, 1), "gap_pct": round(gap, 2),
-            "tp_pct": list(SEUILS["tp_a"])}, None
+            "gap_pct": round(gap, 2), "tp_pct": list(SEUILS["tp_a"])}, None
+
+
+def vol_min_minute(today: list[dict], day: date) -> float | None:
+    """Volume minimal de la minute de cassure (A) : SEUILS["volume_cassure"] fois le volume moyen par minute des 5
+    premières, lu sur les mêmes bougies SIP que la cassure. En v1, le seuil venait de la bougie IEX de 9 h 30 (une petite
+    part du volume) et se comparait au solde aux bougies SIP : la condition était presque toujours remplie. Les niveaux
+    publiés à 9 h 36 (entrée, stop) restent ceux du plan."""
+    t0 = _ts(day, time(9, 30))
+    first = [b for b in today if t0 <= b["t"] < t0 + 300]
+    return SEUILS["volume_cassure"] * sum(b["v"] for b in first) / 5 if first else None
 
 
 def plan_b(sess: list[dict], prev_close: float) -> tuple[dict | None, str | None]:
@@ -271,12 +282,15 @@ def fill(p: dict, bars: list[dict]) -> dict | None:
         until = _ts(day, A_UNTIL)
         today = session(bars, day)
         vw = vwaps(today)
+        vol_min = vol_min_minute(today, day)
+        if vol_min is None:
+            return None
         for i, b in enumerate(today):
             if b["t"] < start:
                 continue
             if b["t"] >= until:
                 return None
-            if b["h"] >= p["entry"] and b["c"] >= p["entry"] and b["v"] >= p["vol_min_minute"]:
+            if b["h"] >= p["entry"] and b["c"] >= p["entry"] and b["v"] >= vol_min:
                 price = b["c"]
                 stop = p["stop_range"]
                 v_stop = round(vw[i] - tick(vw[i]), 4)
@@ -342,13 +356,14 @@ def commission(shares: int, price: float) -> float:
     return KM.order_commission(shares, price, KM.IBKR_PLANS.get(IBKR_PLAN, KM.IBKR_PLANS["degressif"]))
 
 
-def result(f: dict, m: dict, eurusd: float) -> dict:
-    """R brut (sans frais ni glissement) et R aux frais de Simão (20 € de risque, un bracket IBKR par objectif)."""
+def result(f: dict, m: dict, eurusd: float, slip_mult: float = 1.0) -> dict:
+    """R brut (sans frais ni glissement) et R aux frais de Simão (20 € de risque, un bracket IBKR par objectif).
+    `slip_mult` : glissement multiplié (robustesse du rejeu, déclaration n° 12 ; 1 en direct)."""
     risk = f["prix"] - f["stop"]
     if risk <= 0 or not m["sorties"]:
         return {"r_brut": None, "r_frais": None, "hors_mise": False}
     brut = sum(0.5 * (px - f["prix"]) for _, px, _, _ in m["sorties"]) / risk
-    entry = f["prix"] + slip(f["prix"])
+    entry = f["prix"] + slip_mult * slip(f["prix"])
     risk_paid = entry - f["stop"]
     total = math.floor(KM.RISK_EUR * eurusd / risk_paid + 1e-9) if risk_paid > 0 else 0
     if total < 2:  # une action ne se coupe pas en deux brackets : pas à la taille de Simão
@@ -357,7 +372,7 @@ def result(f: dict, m: dict, eurusd: float) -> dict:
     pnl = 0.0
     for leg, px, _, market in m["sorties"]:
         n = sizes[leg]
-        exit_px = px - (slip(px) if market else 0.0)
+        exit_px = px - (slip_mult * slip(px) if market else 0.0)
         pnl += n * (exit_px - entry) - commission(n, entry) - commission(n, exit_px)
     return {"r_brut": round(brut, 4), "r_frais": round(pnl / (total * risk_paid), 4), "hors_mise": False,
             "actions": total}
@@ -401,9 +416,11 @@ def keep_overnight(f: dict, bars: list[dict], day: date, etf: list[dict] | None)
     return True, f"TP1 touché, au-dessus du VWAP, secteur {_fr(change)} %"
 
 
-def settle_plan(p: dict, bars: dict[str, list[dict]], next_day: date, eurusd: float, variants=("j0", "j1")) -> dict:
+def settle_plan(p: dict, bars: dict[str, list[dict]], next_day: date, eurusd: float, variants=("j0", "j1"),
+                slip_mult: float = 1.0) -> dict:
     """Solde d'un plan et de son témoin dans chaque version. `bars` : bougies d'1 min SIP du jour et du lendemain
-    (et de SPY pour le scénario « jx », qui reprend j1 s'il reste la nuit, sinon j0 ; le témoin a son propre scénario)."""
+    (et de SPY pour le scénario « jx », qui reprend j1 s'il reste la nuit, sinon j0 ; le témoin a son propre scénario).
+    `slip_mult` : glissement multiplié dans chaque résultat (rejeu de la n° 12 ; 1 en direct)."""
     f = fill(p, bars.get(p["symbol"]) or [])
     out = {"declenche": bool(f), "eurusd": eurusd}
     if not f:
@@ -420,11 +437,11 @@ def settle_plan(p: dict, bars: dict[str, list[dict]], next_day: date, eurusd: fl
     for v in variants:
         end = exit_ts(p, v, next_day)
         m = manage(f, bars.get(p["symbol"]) or [], end)
-        row = result(f, m, eurusd) | {"sorties": [[leg, px, why] for leg, px, why, _ in m["sorties"]],
-                                      "incomplet": m["incomplet"]}
+        row = result(f, m, eurusd, slip_mult) | {"sorties": [[leg, px, why] for leg, px, why, _ in m["sorties"]],
+                                                 "incomplet": m["incomplet"]}
         if wf:
             wm = manage(wf, bars.get(wsym) or [], end)
-            wr = result(wf, wm, eurusd)
+            wr = result(wf, wm, eurusd, slip_mult)
             row["temoin"] = {"r_brut": wr["r_brut"], "r_frais": wr["r_frais"], "incomplet": wm["incomplet"]}
         out[v] = row
     if "j0" in out:
@@ -437,11 +454,11 @@ def settle_plan(p: dict, bars: dict[str, list[dict]], next_day: date, eurusd: fl
             return m, keep, why
 
         m, keep, why = night(f, bars.get(p["symbol"]) or [])
-        row = result(f, m, eurusd) | {"sorties": [[leg, px, w] for leg, px, w, _ in m["sorties"]],
-                                      "incomplet": m["incomplet"], "nuit": keep, "pourquoi": why}
+        row = result(f, m, eurusd, slip_mult) | {"sorties": [[leg, px, w] for leg, px, w, _ in m["sorties"]],
+                                                 "incomplet": m["incomplet"], "nuit": keep, "pourquoi": why}
         if wf:
             wm, wkeep, _ = night(wf, bars.get(wsym) or [])
-            wr = result(wf, wm, eurusd)
+            wr = result(wf, wm, eurusd, slip_mult)
             row["temoin"] = {"r_brut": wr["r_brut"], "r_frais": wr["r_frais"], "incomplet": wm["incomplet"],
                              "nuit": wkeep}
         out["jx"] = row
