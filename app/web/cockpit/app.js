@@ -185,12 +185,13 @@ const fromHash = location.hash.replace('#', ''); if (VIEWS.some((x) => x[0] === 
 
 /* ---------- scrutation : une requête à la fois, arrêt quand l'onglet est masqué */
 function poller(fn, ms) {
-  let timer = 0, busy = false, on = false;
+  let timer = 0, busy = false, on = false, again = false;
   const run = async () => {
     clearTimeout(timer);
-    if (!on || document.hidden || busy) return;
+    if (!on || document.hidden) return;
+    if (busy) { again = true; return; } // changement de vue pendant une lecture lente : on repasse dès qu'elle finit
     busy = true;
-    try { await fn(); } catch (_) { /* l'erreur est déjà affichée */ } finally { busy = false; if (on) timer = setTimeout(run, ms()); }
+    try { await fn(); } catch (_) { /* l'erreur est déjà affichée */ } finally { busy = false; if (on) timer = setTimeout(run, again ? 0 : ms()); again = false; }
   };
   return { start() { on = true; run(); }, stop() { on = false; clearTimeout(timer); }, now() { if (on) run(); } };
 }
@@ -929,7 +930,7 @@ function drawInstrument(fresh) {
 
 /* ---------- données des vues Risque, Labo, Agenda, Journal et Santé : relues seulement quand la vue est affichée ;
    une carte n'est re-remplie que si ses données ont changé (fill). */
-const sigOf = (x) => { try { return JSON.stringify(x); } catch (_) { return String(Date.now()); } };
+const sigOf = (x) => { try { const s = JSON.stringify(x); return s === undefined ? '∅' : s; } catch (_) { return String(Date.now()); } };
 function fill(box, data, build) {
   if (!box) return;
   const s = sigOf(data);
@@ -1119,7 +1120,7 @@ function labFacts(lab) {
   const fact = (k, v, sub) => el('div', { class: 'fact' }, el('span', { class: 'k', text: k }), el('span', { class: 'v num', text: v }), sub ? el('span', { class: 's', text: sub }) : null);
   const rep = s.replay || {}, last = (m) => ((rep[m] || {}).last_day || null);
   return [el('div', { class: 'facts' },
-    fact('Méthode en place', s.method_version || DASH, s.exists ? (isNum(s.db_size_mb) ? 'base ' + (s.db_size_mb >= 1024 ? nf(1).format(s.db_size_mb / 1024) + ' Go' : nf(0).format(s.db_size_mb) + ' Mo') : 'base présente') : 'base absente'),
+    fact('Méthode en place', s.method_version || DASH, s.exists ? (isNum(s.db_size_mb) ? 'base ' + (s.db_size_mb >= 1024 ? nf(1).format(s.db_size_mb / 1024) + ' Go' : nf(s.db_size_mb < 10 ? 1 : 0).format(s.db_size_mb) + ' Mo') : 'base présente') : 'base absente'),
     fact('Rejeu jusqu\'au', last('stock') ? DTF.dm.format(toDate(last('stock'))) : DASH, 'actions' + (last('crypto') ? ' · crypto ' + DTF.dm.format(toDate(last('crypto'))) : '')),
     fact('Règles', int(r.validee) + ' validée' + ((r.validee || 0) > 1 ? 's' : ''), int(r.rejetee) + ' rejetées · ' + int(r.en_attente) + ' en attente · ' + int(r.essais) + ' essais'),
     fact('Leçons', int(l.confirmee) + ' confirmée' + ((l.confirmee || 0) > 1 ? 's' : ''), int(l.a_confirmer) + ' à confirmer · ' + int(l.dementie) + ' démenties'))];
@@ -1176,7 +1177,7 @@ function councilCard() {
 }
 function declarationsCard() {
   const box = waitBox('lab');
-  onData('lab', (lab) => fill(box, lab.declarations, (ds) => {
+  onData('lab', (lab) => fill(box, lab.declarations || lab.base, (ds) => {
     if (!Array.isArray(ds)) return empty('Déclarations du council illisibles', [ds && ds.erreur]);
     if (!ds.length) return empty('Aucune déclaration du council', ['Une déclaration = une règle pré-déclarée jouée contre un témoin aléatoire ; le tableau complet est dans l\'onglet « Déclarations ».']);
     return el('div', { class: 'feed decl' }, ds.slice().reverse().slice(0, 12).map((d) => el('div', null,
@@ -1195,17 +1196,26 @@ function ecoItem(e) {
   const det = [['prévision', e.prevision], ['précédent', e.precedent], ['réel', e.reel]].filter((x) => x[1] != null && x[1] !== '').map((x) => x[0] + ' ' + x[1]).join(' · ');
   return { at: e.at, titre: e.pays + ' · ' + e.titre, categorie: 'macro', source: 'Helious', importance: e.impact === 'High' ? 'haute' : 'normale', detail: 'impact ' + (IMPACT[e.impact] || [e.impact])[0] + (det ? ' · ' + det : '') };
 }
+function ecoUnknown(eco, day) {
+  if (!eco) return 'en lecture…';
+  if (eco.erreur) return 'indisponible (' + eco.erreur + ')';
+  if (!eco.couvre_jusqu_au || day > eco.couvre_jusqu_au) return 'pas encore publié par la source';
+  return '';
+}
 function agendaDayCard() {
-  const box = el('div'), meta = el('span');
+  const box = el('div'), meta = el('span'), note = el('div', { class: 'small muted mt-8' });
   const draw = () => {
-    const a = st.agenda, today = dayKey(new Date());
-    const eco = a && a.economique && a.economique.evenements ? a.economique.evenements.filter((e) => dayKey(toDate(e.at)) === today).map(ecoItem) : [];
+    const a = st.agenda, today = dayKey(new Date()), ecoAll = a && a.economique;
+    const eco = ecoAll && ecoAll.evenements ? ecoAll.evenements.filter((e) => dayKey(toDate(e.at)) === today).map(ecoItem) : [];
     const items = ((st.state && st.state.agenda_today) || []).concat(eco).sort((x, y) => (x.at < y.at ? -1 : 1));
-    meta.textContent = DTF.day.format(new Date()) + (a ? '' : ' · calendrier économique en lecture…');
-    fill(box, items, () => agendaList(items, 0));
+    const unknown = ecoUnknown(ecoAll, today);
+    meta.textContent = DTF.day.format(new Date());
+    note.textContent = unknown ? 'Calendrier économique ' + unknown + ' : les annonces du jour ne figurent pas ici.' : ecoAll.stale ? '⚠ Calendrier économique : dernière valeur connue' + (ecoAll.maj ? ' (' + stamp(ecoAll.maj) + ')' : '') + '.' : '';
+    note.hidden = !note.textContent;
+    fill(box, [items, Math.floor(Date.now() / 60000)], () => agendaList(items, 0)); // la ligne « maintenant » avance à la minute
   };
   bind(draw); onData('agenda', draw);
-  return card('c-7', 'Aujourd\'hui', meta, box);
+  return card('c-7', 'Aujourd\'hui', meta, box, note);
 }
 function earningsBlock(r) {
   if (!r) return el('div', { class: 'skeleton short' });
@@ -1225,13 +1235,17 @@ function secBlock(s) {
   if (!s) return el('div', { class: 'skeleton short' });
   if (s.erreur) return empty('Dépôts SEC indisponibles', [s.erreur]);
   if (s.manque) return empty('Pas de lecture des 8-K', [s.manque]);
-  const rows = s.depots || [];
+  const rows = s.depots || [], list = (k) => s[k] || [];
+  const unread = [[list('erreurs'), 'en erreur'], [list('trop_lentes'), 'SEC trop lente'], [list('sans_cik'), 'sans CIK'], [list('hors_plafond'), 'au-delà de ' + list('valeurs').length + ' valeurs']]
+    .filter((x) => x[0].length).map((x) => x[1] + ' : ' + x[0].join(', '));
   return el('div', null,
     rows.length ? el('div', { class: 'feed sec' }, rows.map((f) => el('div', null, el('b', { class: 'mono', text: f.symbol }), el('span', { class: 'soft', text: DTF.dm.format(toDate(f.date + 'T12:00:00Z')) + (f.form !== '8-K' ? ' · ' + f.form : '') }),
       el('span', { class: 'chips' }, (f.items || []).filter((i) => i.code !== '9.01').map((i) => chip(i.label, i.code === '2.02' ? 'info' : i.code === '1.01' ? 'up' : '', 'item ' + i.code))),
       el('a', { class: 'right small', href: f.lien, target: '_blank', rel: 'noopener noreferrer', text: 'EDGAR ↗' }))))
-      : el('p', { class: 'small soft m-0', text: 'Aucun 8-K depuis le ' + DTF.dm.format(toDate(s.depuis + 'T12:00:00Z')) + ' sur les ' + (s.valeurs || []).length + ' valeurs suivies.' }),
-    el('div', { class: 'small muted mt-8', text: s.note + ((s.sans_cik || []).length ? ' · sans CIK : ' + s.sans_cik.join(', ') : '') + ((s.erreurs || []).length ? ' · en erreur : ' + s.erreurs.join(', ') : '') }));
+      : (s.lues || []).length ? el('p', { class: 'small soft m-0', text: 'Aucun 8-K depuis le ' + DTF.dm.format(toDate(s.depuis + 'T12:00:00Z')) + ' sur les ' + s.lues.length + ' valeur' + (s.lues.length > 1 ? 's' : '') + ' lue' + (s.lues.length > 1 ? 's' : '') + '.' })
+        : empty('8-K inconnus', [(s.valeurs || []).length ? 'Aucune valeur lue sur la SEC (détail ci-dessous).' : 'Aucune valeur suivie : watchlist vide, aucun trade ni plan du jour.']),
+    unread.length ? el('div', { class: 'small warn mt-8', text: 'Non vérifiées : ' + unread.join(' · ') }) : null,
+    el('div', { class: 'small muted mt-8', text: s.note }));
 }
 function agendaSideCard() {
   const earn = waitBox('agenda'), sec = waitBox('agenda'), who = el('p', { class: 'small muted m-0' });
@@ -1240,29 +1254,32 @@ function agendaSideCard() {
     fill(sec, a.sec8k, () => secBlock(a.sec8k));
     who.textContent = 'Valeurs suivies : ' + ((a.valeurs_suivies || []).join(', ') || 'aucune (watchlist vide, aucun trade ni plan)') + '.';
   });
-  return card('c-5', 'Résultats et 8-K', 'valeurs suivies : watchlist, positions, plans du jour', who,
+  return card('c-5', 'Résultats et 8-K', 'valeurs suivies : positions, plans du jour, watchlist', who,
     el('h3', { class: 'sub-h', text: 'Résultats du jour' }), earn, el('h3', { class: 'sub-h', text: '8-K des trois derniers jours' }), sec);
 }
 function agendaWeekCard() {
   const box = waitBox('agenda'), src = el('div', { class: 'small muted mt-12' });
   onData('agenda', (a) => {
     const eco = a.economique || {}, res = a.resultats || {};
-    fill(box, [eco.evenements, res.suivies, res.jours, eco.erreur], () => {
+    fill(box, [eco.evenements, eco.couvre_jusqu_au, res.suivies, res.jours, eco.erreur, res.erreur, res.manque, dayKey(new Date())], () => {
       const days = [];
       for (let k = 0; k < 7; k++) days.push(dayKey(new Date(Date.now() + k * 864e5)));
       const out = days.map((d) => {
         const ev = (eco.evenements || []).filter((e) => dayKey(toDate(e.at)) === d);
         const mine = (res.suivies || []).filter((x) => x.date === d), all = (res.jours || {})[d];
         const label = DTF.day.format(new Date(d + 'T12:00:00'));
-        if (!ev.length && !mine.length && !all) return el('div', { class: 'wday empty-day' }, el('h3', { text: label }), el('p', { class: 'small muted m-0', text: 'rien de notable' }));
-        return el('div', { class: 'wday' }, el('h3', { text: label }),
+        // Inconnu ≠ rien : un jour que la source ne couvre pas, ou des résultats sans clé, ne sont pas « rien de notable »
+        const unknown = [ecoUnknown(eco, d) ? 'calendrier économique' : null, res.erreur || res.manque ? 'résultats' : null].filter(Boolean);
+        const unk = unknown.length ? el('p', { class: 'small warn m-0 mt-8', text: unknown.length > 1 ? 'calendrier économique et résultats inconnus' : unknown[0] + (unknown[0] === 'résultats' ? ' inconnus' : ' inconnu') }) : null;
+        if (!ev.length && !mine.length && !all) return el('div', { class: 'wday empty-day' }, el('h3', { text: label }), unk || el('p', { class: 'small muted m-0', text: 'rien de notable' }));
+        return el('div', { class: 'wday' }, el('h3', { text: label }), unk,
           ev.length ? el('ul', { class: 'wlist' }, ev.map((e) => el('li', { class: e.impact === 'High' ? 'hot' : '' }, el('span', { class: 'mono', text: hhmm(toDate(e.at)) }), el('span', null, el('b', { text: e.pays + ' ' }), e.titre, el('span', { class: 'small muted blk', text: ecoItem(e).detail }))))) : null,
           mine.length ? el('div', { class: 'row-gap mt-8' }, mine.map((x) => chip(x.symbol + ' · ' + (HOUR[x.heure] || 'résultats'), 'info'))) : null,
           all ? el('p', { class: 'small muted m-0 mt-8', text: all.total + ' publications sur toute la cote' }) : null);
       });
       return el('div', { class: 'week' }, out);
     });
-    src.textContent = 'Calendrier économique : ' + (eco.erreur ? 'indisponible (' + eco.erreur + ')' : (eco.source || 'Helious') + (eco.stale ? ' · ⚠ dernière valeur connue' : '') + ' · ' + (eco.filtre || '')) + '. Résultats : ' + (res.manque ? 'clé Finnhub absente' : res.erreur ? 'indisponibles' : 'Finnhub') + '. Rien ici ne dépense de crédit Twelve Data.';
+    src.textContent = 'Calendrier économique : ' + (eco.erreur ? 'indisponible (' + eco.erreur + ')' : (eco.source || 'source inconnue') + (eco.stale && eco.source ? ' · ⚠ dernière valeur connue' + (eco.maj ? ' (' + stamp(eco.maj) + ')' : '') : '') + (eco.couvre_jusqu_au ? ' · publié jusqu\'au ' + DTF.dm.format(toDate(eco.couvre_jusqu_au + 'T12:00:00Z')) : '') + ' · ' + (eco.filtre || '')) + '. Résultats : ' + (res.manque ? 'clé Finnhub absente' : res.erreur ? 'indisponibles' : 'Finnhub') + '. Rien ici ne dépense de crédit Twelve Data.';
   });
   return card('c-12', 'Cette semaine', 'heure de Paris', box, src);
 }
@@ -1318,7 +1335,8 @@ function confirmCard() {
     if (!c) return empty('Confirmations illisibles', []);
     const today = c.jour && c.aujourd_hui ? Object.entries(c.aujourd_hui) : [];
     const rows = (c.lignes || []).slice(0, 10);
-    return [today.length ? el('div', { class: 'row-gap' }, el('span', { class: 'small soft', text: 'Aujourd\'hui :' }), today.map(([sym, g]) => chip(sym + ' · ' + (CONF[g.status] || [g.status])[0], CONF_ROW[g.status] || ''))) : el('p', { class: 'small soft m-0', text: 'Aucun GO à confirmer aujourd\'hui.' }),
+    const when = c.du_jour ? 'Aujourd\'hui :' : 'GO de la séance du ' + DTF.dm.format(toDate(c.jour + 'T12:00:00Z')) + ' (aucun aujourd\'hui pour l\'instant) :';
+    return [today.length ? el('div', { class: 'row-gap' }, el('span', { class: 'small soft', text: when }), today.map(([sym, g]) => chip(sym + ' · ' + (CONF[g.status] || [g.status])[0], CONF_ROW[g.status] || ''))) : el('p', { class: 'small soft m-0', text: 'Aucun GO à confirmer aujourd\'hui.' }),
       rows.length ? el('div', { class: 'feed mt-8' }, rows.map((r) => el('div', null, el('b', { class: 'mono', text: r.symbol }), el('span', { class: 'mono ' + (isNum(r.confirme_r20) ? (r.confirme_r20 >= 0 ? 'up' : 'down') : 'muted'), text: isNum(r.confirme_r20) ? rr(r.confirme_r20) : isNum(r.confirme_r) ? rr(r.confirme_r) : DASH, title: 'R à 20 € (sinon R brut) de la politique confirmée' }), chip(r.status, CONF_ROW[r.status] || ''), el('span', { class: 'soft right', text: r.day })))) : null,
       el('div', { class: 'small muted mt-8', text: int(c.total) + ' GO mesurés depuis le début' })];
   }));
@@ -1365,10 +1383,10 @@ function sourcesCard() {
 function jarvisCard() {
   const box = el('dl', { class: 'kv', data: { wait: 'health' } }, st.health ? null : el('div', { class: 'skeleton short' }));
   onData('health', (h) => {
-    const lab = h.labo, sv = h.planificateur.suivi, d = h.discord, disk = h.disque || {};
+    const lab = h.labo, sv = h.planificateur.suivi, d = h.discord, disk = h.disque || {}, lag = (Date.now() - st.healthAt) / 1000;
     put(box, kvRow('API', 'répond · ' + stamp(h.generated_at), 'txt up'),
-      kvRow('Suivi des trades', sv.at ? ago(sv.age_s) + (sv.stale ? ' ⚠' : '') : 'jamais passé', sv.stale ? 'txt warn' : 'txt'),
-      kvRow('Labo (battement)', lab.age_s == null ? (lab.raison || 'aucun battement') : (lab.etape ? lab.etape + ' · ' : '') + ago(lab.age_s) + (lab.stale ? ' ⚠' : ''), lab.stale ? 'txt warn' : 'txt'),
+      kvRow('Suivi des trades', sv.at ? ago(sv.age_s + lag) + (sv.stale ? ' ⚠' : '') : 'jamais passé', sv.stale ? 'txt warn' : 'txt'),
+      kvRow('Labo (battement)', lab.age_s == null ? (lab.raison || 'aucun battement') : (lab.etape ? lab.etape + ' · ' : '') + ago(lab.age_s + lag) + (lab.stale ? ' ⚠' : ''), lab.stale ? 'txt warn' : 'txt'),
       kvRow('Discord', (d.notifications ? 'notifications actives' : 'notifications coupées') + ' · ' + d.file_en_attente + ' en file' + (d.plus_ancien ? ' depuis ' + stamp(d.plus_ancien) : ''), d.file_en_attente ? 'txt warn' : 'txt'),
       kvRow('Disque', disk.erreur ? disk.erreur : isNum(disk.libre_go) ? nf(1).format(disk.libre_go) + ' Go libres sur ' + nf(1).format(disk.total_go) + ' (' + pct(disk.utilise_pct, false, 0) + ' utilisés)' : DASH, isNum(disk.utilise_pct) && disk.utilise_pct > 90 ? 'txt warn' : 'txt'));
   });
@@ -1377,12 +1395,12 @@ function jarvisCard() {
 }
 function loopsCard() {
   const box = waitBox('health');
-  onData('health', (h) => fill(box, h.planificateur.boucles, (b) => {
-    const rows = Object.entries(b || {});
+  onData('health', (h) => fill(box, [h.planificateur.boucles, st.healthAt], ([b]) => {
+    const rows = Object.entries(b || {}), lag = (Date.now() - st.healthAt) / 1000;
     if (!rows.length) return empty('Aucune boucle n\'a encore tourné', ['Le planificateur démarre avec le serveur ; chaque boucle s\'ajoute à son premier passage.']);
     return el('div', { class: 'feed loops' }, rows.sort((x, y) => (x[0] < y[0] ? -1 : 1)).map(([name, r]) => el('div', null,
       el('span', { class: 'grow', text: name }), chip(!r.ok ? 'échec' + (r.erreur ? ' · ' + r.erreur : '') : r.stale ? 'en retard' : 'ok', !r.ok ? 'down' : r.stale ? 'warn' : 'up'),
-      el('span', { class: 'soft fv', text: 'toutes les ' + (r.every_s < 60 ? r.every_s + ' s' : dur(r.every_s / 60)) }), el('span', { class: 'soft right', text: ago(r.age_s) + (isNum(r.duree_s) ? ' · ' + nf(1).format(r.duree_s) + ' s' : '') }))));
+      el('span', { class: 'soft fv', text: 'toutes les ' + (r.every_s < 60 ? r.every_s + ' s' : dur(r.every_s / 60)) }), el('span', { class: 'soft right', text: (isNum(r.age_s) ? ago(r.age_s + lag) : DASH) + (isNum(r.duree_s) ? ' · ' + nf(1).format(r.duree_s) + ' s' : '') }))));
   }));
   return card('c-6', 'Boucles du planificateur', 'en retard au-delà de 3 passages (3 min au moins)', box);
 }

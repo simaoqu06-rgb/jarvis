@@ -27,6 +27,7 @@ def client(monkeypatch, tmp_path):
     monkeypatch.setattr(API, "_lab_cache", {"at": 0.0, "data": None})
     monkeypatch.setattr(API, "_text_cache", {})
     monkeypatch.setattr(API, "_agenda_cache", {})
+    monkeypatch.setattr(API, "_agenda_inflight", {})
 
     async def no_twelvedata(*a, **kw):
         raise AssertionError("la page ne doit jamais déclencher un appel Twelve Data")
@@ -317,6 +318,8 @@ def test_agenda_filtre_les_sources_et_ne_montre_aucune_cle(client, agenda_source
     depot = sec["depots"][0]
     assert depot["heure_douteuse"] and [i["label"] for i in depot["items"]] == ["résultats", "item 9.99"]
     assert depot["lien"].startswith("https://www.sec.gov/") and sec["sans_cik"] == ["ZZZZ"]
+    assert sec["lues"] == ["AMD", "KO"] and sec["erreurs"] == sec["trop_lentes"] == sec["hors_plafond"] == []
+    assert out["economique"]["couvre_jusqu_au"] is not None
     client.get("/api/cockpit/agenda")
     assert agenda_sources["submissions"] == 2  # AMD et KO une fois chacun : le second passage lit le cache
 
@@ -334,3 +337,79 @@ def test_agenda_sans_cles_et_source_en_panne(client, agenda_sources, monkeypatch
     assert "FINNHUB_API_KEY" in out["resultats"]["manque"] and out["resultats"]["suivies"] == []
     assert "SEC_USER_AGENT" in out["sec8k"]["manque"] and out["sec8k"]["depots"] == []
     assert "Helious injoignable" in out["economique"]["erreur"] and out["aujourd_hui"]
+
+
+def test_agenda_calendrier_sans_valeur_connue_est_une_erreur(client, agenda_sources, monkeypatch):
+    """needs.resolve ne lève jamais : sans source ni valeur gardée, il rend data=None. Inconnu ≠ « rien de notable »."""
+    from app import needs
+    from app.core.result import Result
+
+    async def unknown():
+        return Result("economic_calendar", None, None, None, None, stale=True,
+                      message="Donnée indisponible : aucune valeur connue")
+
+    monkeypatch.setattr(needs, "economic_calendar", unknown)
+    eco = client.get("/api/cockpit/agenda").json()["economique"]
+    assert "aucune valeur connue" in eco["erreur"] and "evenements" not in eco
+
+
+def test_agenda_positions_d_abord_plans_du_jour_seulement(client, agenda_sources, monkeypatch):
+    from app import config
+
+    monkeypatch.setattr(config, "WATCHLIST_STOCKS", ["KO", "W1", "W2"])
+    monkeypatch.setattr(API, "_held_symbols", lambda space=None: {"AMD": "stock", "BTC": "crypto"})
+    monkeypatch.setattr(API, "plans_today", lambda now: {"du_jour": False, "picks": [{"symbol": "OLD"}]})
+    assert API.agenda_symbols(NOW) == ["AMD", "KO", "W1", "W2"]  # pas le scan d'une séance passée
+    monkeypatch.setattr(API, "plans_today", lambda now: {"du_jour": True, "picks": [{"symbol": "PLAN"}]})
+    assert API.agenda_symbols(NOW) == ["AMD", "PLAN", "KO", "W1", "W2"]
+    monkeypatch.setattr(API, "SEC_MAX_SYMBOLS", 2)
+    sec = client.get("/api/cockpit/agenda").json()["sec8k"]
+    assert sec["valeurs"] == ["AMD", "PLAN"] and sec["hors_plafond"] == ["KO", "W1", "W2"] and sec["lues"] == ["AMD"]
+    assert sec["sans_cik"] == ["PLAN"]
+
+
+async def test_8k_valeurs_lues_separees_des_erreurs_et_des_lentes(agenda_sources, monkeypatch):
+    import asyncio
+
+    from app.sources import edgar
+
+    async def tickers():
+        return {"AMD": 1, "KO": 2, "SLOW": 3}
+
+    async def submissions(cik):
+        if cik == 2:
+            raise ConnectionError("HTTP 403")
+        if cik == 3:
+            await asyncio.sleep(5)
+        return {"recent": []}
+
+    monkeypatch.setattr(edgar, "tickers", tickers)
+    monkeypatch.setattr(edgar, "submissions", submissions)
+    monkeypatch.setattr(API, "SEC_BUDGET_S", 0.2)
+    sec = await API._sec_filings(NOW, ["AMD", "KO", "SLOW"])
+    assert sec["lues"] == ["AMD"] and sec["erreurs"] == ["KO : ConnectionError"] and sec["trop_lentes"] == ["SLOW"]
+    assert sec["depots"] == []  # aucun 8-K chez AMD ; KO et SLOW non vérifiées, pas « sans 8-K »
+    API._agenda_inflight["sec:3"].cancel()
+
+
+async def test_cache_de_l_agenda_partage_les_lectures_et_oublie_les_perimees(monkeypatch):
+    import asyncio
+
+    monkeypatch.setattr(API, "_agenda_cache", {"vieux": (0.0, "périmé")})
+    monkeypatch.setattr(API, "_agenda_inflight", {})
+    calls = []
+
+    async def fetch():
+        calls.append(1)
+        await asyncio.sleep(0.05)
+        return "valeur"
+
+    out = await asyncio.gather(*(API._cached("clé", 60, fetch) for _ in range(3)))
+    assert out == ["valeur"] * 3 and len(calls) == 1  # une seule lecture pour trois requêtes
+    assert "vieux" not in API._agenda_cache and "clé" not in API._agenda_inflight
+
+
+def test_confirmations_d_une_seance_passee_ne_sont_pas_celles_du_jour(client, monkeypatch):
+    monkeypatch.setattr(scheduler, "confirm_state", {"day": "2026-10-23", "gos": {"NVDA": {"status": "attente"}}})
+    c = client.get("/api/cockpit/journal").json()["confirmations"]
+    assert c["du_jour"] is False and c["jour"] == "2026-10-23"

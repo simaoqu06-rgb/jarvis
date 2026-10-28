@@ -26,6 +26,7 @@ from fastapi.responses import JSONResponse
 
 from app import config, scheduler
 from app.core import sources_health
+from app.core.http import SourceError
 from app.lab import db as lab_db
 from app.lab import grade as lab_grade
 from app.lab import heartbeat
@@ -900,6 +901,7 @@ AGENDA_DAYS = 7
 AGENDA_TTL_S = {"resultats": 3600, "sec": 900}
 ECO_COUNTRIES, ECO_IMPACTS = ("US", "EU", "FR", "DE"), ("High", "Medium")  # le filtre du point du matin (alerts.py)
 SEC_MAX_SYMBOLS = 20
+SEC_CONCURRENCY, SEC_BUDGET_S = 4, 12.0  # sous les 10 requêtes/s de la SEC (partagées avec le labo) ; la vue attend 30 s
 ITEMS_8K = {"1.01": "contrat important", "1.02": "fin d'un contrat important", "1.03": "faillite",
             "2.01": "acquisition ou cession", "2.02": "résultats", "2.03": "nouvelle dette",
             "2.05": "restructuration", "2.06": "dépréciation", "3.01": "radiation ou non-conformité",
@@ -908,29 +910,59 @@ ITEMS_8K = {"1.01": "contrat important", "1.02": "fin d'un contrat important", "
             "5.03": "statuts", "5.07": "vote des actionnaires", "7.01": "communiqué (Reg FD)",
             "8.01": "autre événement", "9.01": "annexes"}
 _agenda_cache: dict[str, tuple[float, object]] = {}
+_agenda_inflight: dict[str, asyncio.Future] = {}
 
 
 def agenda_symbols(now: datetime) -> list[str]:
-    """Actions qui comptent pour Simão : watchlist, positions des deux espaces, plans du jour (ordre gardé)."""
-    syms = list(config.WATCHLIST_STOCKS) + [s for s, m in _held_symbols().items() if m == "stock"]
-    syms += [p["symbol"] for p in plans_today(now)["picks"]]
+    """Actions qui comptent pour Simão, les plus importantes d'abord (le plafond des 8-K coupe la fin) : positions des
+    deux espaces, plans du scan du jour (pas celui d'une séance passée), watchlist."""
+    syms = [s for s, m in _held_symbols().items() if m == "stock"]
+    plans = plans_today(now)
+    if plans["du_jour"]:
+        syms += [p["symbol"] for p in plans["picks"]]
+    syms += list(config.WATCHLIST_STOCKS)
     return [s for i, s in enumerate(syms) if s and s not in syms[:i] and SYMBOL_RE.match(s)]
 
 
+def _store(key: str, ttl: float, value) -> None:
+    now = clock.monotonic()
+    for k in [k for k, (until, _) in _agenda_cache.items() if until <= now]:  # un calendrier par jour : pas de fuite
+        del _agenda_cache[k]
+    _agenda_cache[key] = (now + ttl, value)
+
+
+async def _fill(key: str, ttl: float, fetch):
+    try:
+        value = await fetch()
+    except Exception as exc:
+        _store(key, 60, exc)
+        raise
+    _store(key, ttl, value)
+    return value
+
+
+def _settled(key: str, task: asyncio.Future) -> None:
+    if _agenda_inflight.get(key) is task:
+        del _agenda_inflight[key]
+    if not task.cancelled():
+        task.exception()  # lue ici : une lecture abandonnée par la vue ne laisse pas d'avertissement asyncio
+
+
 async def _cached(key: str, ttl: float, fetch):
-    """Valeur en cache jusqu'à `ttl` ; une erreur remonte (la partie le dit) et n'est retentée qu'après une minute."""
+    """Valeur en cache jusqu'à `ttl` ; une erreur remonte (la partie le dit) et n'est retentée qu'après une minute.
+    Une lecture en cours est partagée (deux onglets ne la relancent pas) et va au bout même si la vue n'attend plus :
+    le passage suivant la trouve en cache."""
     hit = _agenda_cache.get(key)
     if hit and clock.monotonic() < hit[0]:
         if isinstance(hit[1], Exception):
             raise hit[1]
         return hit[1]
-    try:
-        value = await fetch()
-    except Exception as exc:
-        _agenda_cache[key] = (clock.monotonic() + 60, exc)
-        raise
-    _agenda_cache[key] = (clock.monotonic() + ttl, value)
-    return value
+    task = _agenda_inflight.get(key)
+    if task is None or task.get_loop() is not asyncio.get_running_loop():
+        task = asyncio.ensure_future(_fill(key, ttl, fetch))
+        _agenda_inflight[key] = task
+        task.add_done_callback(lambda t, key=key: _settled(key, t))
+    return await asyncio.shield(task)
 
 
 async def _part(name: str, build) -> dict:
@@ -945,10 +977,13 @@ async def _economic(now: datetime) -> dict:
     from app import needs
 
     res = await needs.economic_calendar()  # cache d'une heure de needs.resolve
+    if res.data is None:  # aucune source ni valeur connue : inconnu, pas « rien de notable »
+        raise SourceError(res.message or "calendrier économique inconnu")
     start = datetime.combine(now.astimezone(PARIS).date(), time(0), PARIS)
     end = start + timedelta(days=AGENDA_DAYS)
+    dated = [at for at in (_parse(e.get("datetime_utc")) for e in res.data) if at is not None]
     events = []
-    for e in res.data or []:
+    for e in res.data:
         at = _parse(e.get("datetime_utc"))
         if at is None or not start <= at < end or e.get("country") not in ECO_COUNTRIES \
                 or e.get("impact") not in ECO_IMPACTS:
@@ -958,6 +993,8 @@ async def _economic(now: datetime) -> dict:
                        "reel": e.get("actual"), "statut": e.get("status")})
     return {"evenements": sorted(events, key=lambda e: e["at"]), "source": res.source, "attribution": res.attribution,
             "maj": res.updated_at, "stale": res.stale, "message": res.message,
+            # dernier jour (Paris) que la source couvre : au-delà, le calendrier est inconnu, pas vide
+            "couvre_jusqu_au": max(dated).astimezone(PARIS).date().isoformat() if dated else None,
             "filtre": "impact fort ou moyen ; États-Unis, zone euro, France, Allemagne (comme le point du matin)"}
 
 
@@ -996,26 +1033,38 @@ async def _sec_filings(now: datetime, symbols: list[str]) -> dict:
         return {"manque": f"{edgar.KEY_NAME} absent (nom et e-mail exigés par la SEC) : pas de 8-K", "depots": []}
     ciks = await _cached("sec:tickers", 86400, edgar.tickers)
     since = (now.astimezone(NEW_YORK).date() - timedelta(days=3)).isoformat()
-    out, errors, missing = [], [], []
-    for s in symbols[:SEC_MAX_SYMBOLS]:
-        cik = ciks.get(edgar.ticker(s))
-        if cik is None:
-            missing.append(s)
+    wanted = symbols[:SEC_MAX_SYMBOLS]
+    missing = [s for s in wanted if ciks.get(edgar.ticker(s)) is None]
+    gate = asyncio.Semaphore(SEC_CONCURRENCY)
+
+    async def read(cik: int) -> dict:
+        async with gate:
+            return await _cached(f"sec:{cik}", AGENDA_TTL_S["sec"], lambda: edgar.submissions(cik))
+
+    tasks = {s: asyncio.ensure_future(read(ciks[edgar.ticker(s)])) for s in wanted if s not in missing}
+    _, late = await asyncio.wait(tasks.values(), timeout=SEC_BUDGET_S) if tasks else (set(), set())
+    for t in late:
+        t.cancel()  # la lecture partagée continue (_cached) et sert au passage suivant
+    out, errors, read_ok, too_slow = [], [], [], []
+    for s, t in tasks.items():
+        if t in late:
+            too_slow.append(s)
             continue
-        try:
-            sub = await _cached(f"sec:{cik}", AGENDA_TTL_S["sec"], lambda cik=cik: edgar.submissions(cik))
-        except Exception as exc:  # une valeur en erreur n'efface pas les autres
-            errors.append(f"{s} : {type(exc).__name__}")
+        if t.exception() is not None:  # une valeur en erreur n'efface pas les autres
+            errors.append(f"{s} : {type(t.exception()).__name__}")
             continue
-        for f in sub["recent"]:
+        read_ok.append(s)
+        cik = ciks[edgar.ticker(s)]
+        for f in t.result()["recent"]:
             if (f.get("filing_date") or "") >= since and f["form"] in ("8-K", "8-K/A"):
                 out.append({"symbol": s, "form": f["form"], "date": f["filing_date"],
                             "accepte": _iso(f["accepted_ts"]), "heure_douteuse": f["suspect"],
                             "items": [{"code": i, "label": ITEMS_8K.get(i, "item " + i)} for i in f["items"]],
                             "lien": edgar.index_url(cik, f["accession"])})
+    # « lues » seulement : une valeur en erreur, trop lente, sans CIK ou au-delà du plafond n'a pas été vérifiée
     return {"depots": sorted(out, key=lambda f: (f["date"], f["accepte"] or ""), reverse=True),
-            "valeurs": symbols[:SEC_MAX_SYMBOLS], "sans_cik": missing, "erreurs": errors, "depuis": since,
-            "source": "SEC EDGAR",
+            "valeurs": wanted, "lues": read_ok, "sans_cik": missing, "erreurs": errors, "trop_lentes": too_slow,
+            "hors_plafond": symbols[SEC_MAX_SYMBOLS:], "depuis": since, "source": "SEC EDGAR",
             "note": "heure SEC indicative : le JSON d'EDGAR la donne parfois en retard de 4 à 5 h"}
 
 
@@ -1026,11 +1075,12 @@ async def agenda():
     15 min par société pour la SEC) : la vue se rafraîchit sans les solliciter. Jamais Twelve Data."""
     now = datetime.now(timezone.utc)
     symbols = agenda_symbols(now)
+    eco, res, sec = await asyncio.gather(_part("economique", lambda: _economic(now)),
+                                         _part("resultats", lambda: _earnings(now, symbols)),
+                                         _part("sec", lambda: _sec_filings(now, symbols)))
     return {"generated_at": now.isoformat(timespec="seconds"), "aujourd_hui": agenda_today(now),
             "seances": market_sessions(now), "valeurs_suivies": symbols,
-            "economique": await _part("economique", lambda: _economic(now)),
-            "resultats": await _part("resultats", lambda: _earnings(now, symbols)),
-            "sec8k": await _part("sec", lambda: _sec_filings(now, symbols))}
+            "economique": eco, "resultats": res, "sec8k": sec}
 
 
 def _trade_row(t: dict) -> dict:
@@ -1063,7 +1113,10 @@ async def journal(space: str = "paper", limit: int = Query(100, ge=1, le=1000)):
             "desaccords": T.disagreements(scheduler.book, slopes),
             "confirmations": {"lignes": rows[-60:][::-1], "total": len(rows),
                               "aujourd_hui": scheduler.confirm_state.get("gos"),
-                              "jour": scheduler.confirm_state.get("day")},
+                              "jour": scheduler.confirm_state.get("day"),
+                              # vidé seulement au scan suivant : le week-end, ce sont encore les GO de vendredi
+                              "du_jour": scheduler.confirm_state.get("day")
+                              == now.astimezone(NEW_YORK).date().isoformat()},
             "forward_test": {k: v for k, v in st.items() if k != "text"},
             "decisions": [p for p in reversed(PR.proposals.items) if p["status"] != "pending"][:50]}
 

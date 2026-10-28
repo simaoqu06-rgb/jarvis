@@ -85,8 +85,8 @@ aide `?`.
   KILL), suivie telle qu'envoyée ; **Mes trades** = tes vrais trades déclarés à JARVIS. On entre dans Mes trades par
   un appui maintenu de 1,1 s ; le serveur refuse toute écriture dans Mes trades sans ce verrou.
 - La page **n'envoie aucun ordre** (ni IBKR ni Alpaca) et ne touche aucune clé. La navigation ne dépense **aucun
-  crédit Twelve Data** (bougies du suivi, Kraken, Alpaca) ; seuls un plan, une prise, un avis ou une fiche, au clic,
-  en dépensent comme sur Discord, et l'écran le dit. Les vues Labo, Risque et Journal montrent aussi le texte exact
+  crédit Twelve Data** (bougies du suivi, Kraken, Alpaca) ; seuls un plan, une prise, une reprise, un avis, une fiche
+  ou les conseils en prix, au clic, en dépensent comme sur Discord, et l'écran le dit. Les vues Labo, Risque et Journal montrent aussi le texte exact
   des commandes Discord (`!grade`, `!frais`, `!strategies`, `!desaccords`…), par les mêmes fonctions.
 - Actions protégées (clôture, suppression, sortie réelle, reprise, approbation, veto, Killmode) : appui maintenu,
   jeton CSRF, mêmes fonctions que les routes et commandes `!…`, journal `data/cockpit_actions.jsonl`.

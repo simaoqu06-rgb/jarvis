@@ -231,8 +231,8 @@ Fréquence : `state` toutes les 5 s (sans appel réseau) ; vues lourdes toutes l
 
 | Carte | Source | Statut |
 |---|---|---|
-| Grade par marché | `state.risk.grades.{stock,crypto}` ← `lab_grade.risk_now` : lettre, `risque_propose`, `risque_grade`, plafond `risque_max`, `raison`, `observation`, `perime` ; « jamais calculé par le labo » si `non_note` | PR 3 ✓ |
-| Risque ouvert et arrêt du jour | `state.risk` : `risque_ouvert_pct` / `risque_ouvert_max_pct`, `r_du_jour_net` / `arret_jour_r`, `budget_libre_pct`, `risque_max_par_trade_eur`, `capital_declare_eur` (« déclaré ») ; rappel `risk.note` (risque au stop ≠ perte maximale) | PR 3 ✓ |
+| Grade par marché | `state.risk.grades.{stock,crypto}` ← `lab_grade.risk_now` : lettre, `risque_propose`, `risque_grade`, plafond `risque_max`, `raison`, `observation`, `perime` ; « jamais calculé par le labo » si `grade_age_h` est nul ; puce « non noté » si `non_note` (échantillon trop petit) | PR 3 ✓ |
+| Risque ouvert et arrêt du jour | `state.risk` : `risque_ouvert_pct` / `risque_ouvert_max_pct`, `r_du_jour_net` / `arret_jour_r`, budget libre calculé par la page (`risque_ouvert_max_pct` − `risque_ouvert_pct`), `risque_max_par_trade_eur`, `capital_declare_eur` (« déclaré ») ; rappel `risk.note` (risque au stop ≠ perte maximale) | PR 3 ✓ |
 | Dernier calcul de taille | `sizing` et `grade` du dernier plan calculé **dans ce navigateur** (action `plan`, gardé en `localStorage` `cockpit.lastPlan`) : capital × % du grade, plafond de 20 €, taille ; sinon état vide « Aucun plan calculé » | PR 3 ✓ |
 | Frais IBKR | `state.risk.ibkr` ← `killmode.IBKR_PLANS`, `JARVIS_IBKR_PLAN`, `ibkr.single_exit()` : barème du compte, par action, minimum, plafond, frais de place, plancher d'un aller-retour en $ et en R à 20 € ; frais du dernier plan (`plan.ibkr`) | PR 3 ✓ |
 | Grade détaillé, « Ta mise de 20 € chez IBKR » | `GET /api/cockpit/texte/grade` et `/texte/frais` (mêmes fonctions que `!grade`, `!frais`) | PR 3 ✓ |
@@ -242,7 +242,8 @@ Fréquence : `state` toutes les 5 s (sans appel réseau) ; vues lourdes toutes l
 `GET /api/cockpit/lab` (cache 60 s) : `statut` (`lab_status.status` : rejeu, direct, méthode, déclaration en cours,
 battement), `declarations` (`council.load`), `regles` (`validator.counts`), `grade` (`payload` + historique),
 `lecons` (`lessons.counts`), `gemini` (`summary` j0 / j1), `killmode` (actif, KILL et témoins, derniers r_20e),
-`forward_test` (`paper.stats`), `propositions` (labo, grade, promotion), `veto`, `base` (taille de `lab.db`).
+`forward_test` (`paper.stats`), `propositions` (labo, grade, promotion), `veto` ; `base` = `{"erreur"}` seulement quand
+`lab.db` manque (sa taille est `statut.db_size_mb`).
 
 | Carte | Source | Statut |
 |---|---|---|
@@ -260,11 +261,12 @@ La page `/cockpit/labo` reste servie (lien « page Labo actuelle ») jusqu'à va
 |---|---|---|
 | Aujourd'hui (frise) | `agenda.aujourd_hui` (horaires internes de JARVIS, = `state.agenda_today`) + événements économiques du jour, fusionnés par heure de Paris ; passé atténué, ligne « maintenant » | PR 3 ✓ |
 | Résultats du jour | `agenda.resultats` ← `finnhub.earnings_calendar` (clé `FINNHUB_API_KEY`) : valeurs suivies (BPA estimé / réel, avant ouverture / après clôture) et total de la cote par moment | PR 3 ✓ |
-| 8-K des trois derniers jours | `agenda.sec8k` ← `edgar.tickers` + `edgar.submissions` (`SEC_USER_AGENT`) : formulaire, items traduits, heure d'acceptation (« douteuse » si EDGAR l'a mal datée), lien EDGAR | PR 3 ✓ |
-| Cette semaine | `agenda.economique` ← `needs.economic_calendar` (Helious, impact fort ou moyen, US / zone euro / France / Allemagne, comme le point du matin) + résultats suivis par jour | PR 3 ✓ |
+| 8-K des trois derniers jours | `agenda.sec8k` ← `edgar.tickers` + `edgar.submissions` (`SEC_USER_AGENT`) : formulaire, items traduits, heure d'acceptation (« douteuse » si EDGAR l'a mal datée), lien EDGAR ; « aucun 8-K » compté sur les valeurs **lues** seulement, les autres listées comme « non vérifiées » (erreur, SEC trop lente, sans CIK, au-delà du plafond) | PR 3 ✓ |
+| Cette semaine | `agenda.economique` ← `needs.economic_calendar` (Helious, impact fort ou moyen, US / zone euro / France / Allemagne, comme le point du matin) + résultats suivis par jour ; un jour au-delà de `couvre_jusqu_au`, un calendrier en panne ou des résultats sans clé s'affichent « inconnus », jamais « rien de notable » | PR 3 ✓ |
 
-Valeurs suivies (`agenda.valeurs_suivies`) : `JARVIS_WATCHLIST_STOCKS`, actions en position (deux espaces), plans du
-jour ; 20 au plus pour la SEC.
+Valeurs suivies (`agenda.valeurs_suivies`), les plus importantes d'abord : actions en position (deux espaces), plans du
+scan du jour (pas ceux d'une séance passée), `JARVIS_WATCHLIST_STOCKS` ; 20 au plus pour la SEC, le plafond coupe la
+watchlist en premier.
 
 ### 3.8 Journal (7)
 
@@ -355,7 +357,8 @@ snapshots Alpaca IEX groupés (un appel par minute au plus).
 
 ### 4.6 `GET /api/cockpit/lab` (cache 60 s)
 `{"statut", "declarations", "regles", "grade", "lecons", "gemini", "killmode", "forward_test", "propositions",
-"veto", "base", "modules": {"<nom>": "/api/cockpit/texte/<nom>"}}` ; chaque partie peut valoir `{"erreur": "…"}` sans
+"veto", "base"?, "modules": {"<nom>": "/api/cockpit/texte/<nom>"}}` (`base` seulement si `lab.db` manque) ; chaque partie
+peut valoir `{"erreur": "…"}` sans
 casser les autres.
 
 ### 4.7 `GET /api/cockpit/journal?space=&limit=100`
@@ -430,10 +433,15 @@ la vue. La page rend le Markdown de Discord (gras, `code`, blocs, citations) san
 "resultats": {"suivies": [{"symbol", "date", "heure", "trimestre", "bpa_estime", "bpa_reel", "ca_estime",
 "ca_reel"}], "jours": {"<date>": {"total", "avant_ouverture", "apres_cloture", "pendant", "heure_inconnue"}},
 "source"} | {"manque"}, "sec8k": {"depots": [{"symbol", "form", "date", "accepte", "heure_douteuse", "items":
-[{"code", "label"}], "lien"}], "valeurs", "sans_cik", "erreurs", "depuis", "source", "note"} | {"manque"}}`.
+[{"code", "label"}], "lien"}], "valeurs", "lues", "sans_cik", "erreurs", "trop_lentes", "hors_plafond", "depuis",
+"source", "note"} | {"manque"}}` ; `economique` porte aussi `couvre_jusqu_au` (dernier jour, heure de Paris, que la
+source publie).
 Sources gratuites en cache côté serveur : calendrier économique 1 h (`needs.resolve`), résultats 1 h par jour de New
-York, liste des CIK 24 h, dépôts 15 min par société, erreur retentée après 1 min. Une partie en panne rend
-`{"erreur"}` sans effacer les autres. **Jamais Twelve Data** (testé).
+York, liste des CIK 24 h, dépôts 15 min par société, erreur retentée après 1 min ; une lecture en cours est partagée
+entre les requêtes et va au bout même si la vue n'attend plus. Les trois parties sont lues en parallèle ; les dépôts
+SEC par 4 au plus, 12 s en tout (le reste est « trop lent » et sera en cache au passage suivant). Une partie en panne
+ou un calendrier économique sans aucune valeur connue rend `{"erreur"}` sans effacer les autres. **Jamais Twelve
+Data** (testé).
 
 ---
 
@@ -454,7 +462,7 @@ York, liste des CIK 24 h, dépôts 15 min par société, erreur retentée après
 | Délais estimés des TP Papier | le MP de confirmation n'en donne pas | repris du plan du scanner (minutes de cotation, gardées par `confirm.register`) et repartis de l'heure du déclenchement ; KILL : « délai non estimé » |
 | CSP sur `/cockpit*` | l'ancien cockpit a des scripts et styles en ligne | PR 2 ✓ : en-têtes sur `/cockpit`, `/cockpit/app.*`, `/cockpit-static/*` et `/api/cockpit/*` ; jamais sur `/cockpit/ancien`, `/cockpit/labo`, `/docs`. Lightweight Charts insère une balise `<style>` pour son logo : la page lui rend un gabarit inerte et ses règles sont recopiées dans `app.css` (zéro violation CSP vérifiée dans Chromium) |
 | Actions de §9.4 | l'avis (touche A, inspecteur) et la fiche société n'y figurent pas | **ajoutées** (`opinion`, `company`) : mêmes fonctions que `!avis` et `!societe`, sans écriture |
-| « la page ne déclenche jamais Twelve Data » | un plan, une prise, une reprise, un avis, une fiche et le scanner lisent l'historique | la **navigation** n'en déclenche aucun (testé) ; ces actions, au clic seulement, en dépensent comme sur Discord, et l'écran le dit à côté du bouton |
+| « la page ne déclenche jamais Twelve Data » | un plan, une prise, une reprise, un avis, une fiche et les conseils en prix lisent l'historique (le scanner lit Alpaca) | la **navigation** n'en déclenche aucun (testé) ; ces actions, au clic seulement, en dépensent comme sur Discord, et l'écran le dit à côté du bouton |
 | Vue Marchés en PR 3 (§15) | le graphique porte les SL / TP des positions, cœur de la PR 2 | **livrée en PR 2** avec Cockpit et Positions ; les cinq autres vues ont un état vide qui renvoie vers la page Labo, l'ancien cockpit ou le diagnostic |
 | Agenda : résultats, 8-K, « Cette semaine » | sources existent, pas dans le cockpit | **PR 3 ✓** : `GET /api/cockpit/agenda` (Helious, Finnhub, SEC EDGAR, en cache) |
 | Labo : « déclarations, n° 12, Gemini, leçons, autopsie, ratés, 8-K, Polymarket » en cartes | chaque module a déjà sa commande Discord, qui est la référence de Simão | **PR 3 ✓** : le cockpit montre le texte exact de la commande (`/texte/{module}`, même fonction) plutôt qu'une seconde mise en forme qui pourrait diverger ; chiffres clés en tuiles à côté |
@@ -518,8 +526,11 @@ zéro erreur JavaScript, zéro violation CSP, aucun débordement horizontal, app
 
 PR 3 (`tests/test_cockpit_api.py`) : `state.risk.ibkr` porte les barèmes de Killmode et le plancher en R ; `/texte` :
 module hors liste → 400, même texte que la fonction du bot, cache de 2 min, base illisible → 200 avec `erreur`, chaque
-module répond sur `data/` vide ; `/agenda` : filtres (impact, pays, 7 jours ; 8-K seulement, trois jours), valeurs
-suivies, items traduits, lien EDGAR, cache par société, aucune clé dans la réponse, clés absentes → `manque`, source
-en panne → `erreur` sans effacer le reste, et toujours aucun appel Twelve Data (garde du `client`). Contrôle à la main
+module répond sur `data/` vide ; `/agenda` : filtres (impact, pays, 7 jours ; 8-K seulement, trois jours), ordre des
+valeurs suivies (positions, plans du jour, watchlist ; pas les plans d'une séance passée), items traduits, lien EDGAR,
+cache par société, valeurs lues séparées des valeurs non vérifiées (erreur, sans CIK, au-delà du plafond, SEC trop
+lente), calendrier sans aucune valeur connue → `erreur`, `couvre_jusqu_au`, aucune clé dans la réponse, clés absentes
+→ `manque`, source en panne → `erreur` sans effacer le reste, et toujours aucun appel Twelve Data (garde du `client`) ;
+`/journal` : GO d'une séance passée marqués `du_jour: false`. Contrôle à la main
 des huit vues dans Chromium à 1440, 1100 et 390 px, dans les deux espaces : zéro erreur JavaScript, zéro violation
 CSP, zéro requête en échec, aucun débordement horizontal.
