@@ -243,7 +243,7 @@ def position_block(t: dict, space: str, now: datetime, qty: int | None = None, q
         "last_price": price, "as_of": _iso(as_of), "price_source": quote["source"], "freshness": fresh,
         "move_pct": round(move / entry * 100, 2) if move is not None and entry else None,
         "r_now": r_now, "unrealized": unreal, "fees_est": fees,
-        "exit_signals": list(t.get("exit_signals") or []),
+        "eurusd": _eurusd(t), "exit_signals": list(t.get("exit_signals") or []),
         "ibkr_orders": _ibkr_orders(t, space, qty),
         "conseil": (t.get("conseils") or [None])[-1],
         "events": list(t.get("events") or []),
@@ -308,6 +308,17 @@ def _period(rows: list[dict], now: datetime) -> dict:
     return {"jour": pick(lambda d: d == today), "semaine": pick(lambda d: d.isocalendar()[:2] == week)}
 
 
+def _curve(rows: list[dict], key: str, since: date | None = None) -> list:
+    """Courbe cumulée [heure, cumul] des clôtures (depuis `since`, jour de Paris), dans l'ordre des sorties."""
+    pts, total = [], 0.0
+    for r in sorted((r for r in rows if r.get(key) is not None and _parse(r["at"])), key=lambda r: _parse(r["at"])):
+        if since and _parse(r["at"]).astimezone(PARIS).date() < since:
+            continue
+        total += r[key]
+        pts.append([r["at"], round(total, 3)])
+    return pts
+
+
 def portfolio(space: str, now: datetime, positions: list[dict]) -> dict:
     rows = _closed_rows(space)
     latent = [p["unrealized"] for p in positions if p["unrealized"]]
@@ -319,11 +330,23 @@ def portfolio(space: str, now: datetime, positions: list[dict]) -> dict:
            **_period(rows, now)}
     if space == "trades":
         return out | {"capital": {"eur": _capital(), "etiquette": "déclaré (JARVIS_CAPITAL)"},
+                      "courbe": {"unite": "R", "titre": "R nets cumulés des clôtures du jour",
+                                 "points": _curve(rows, "r_net", now.astimezone(PARIS).date())},
                       "note": "JARVIS ne connaît ni l'équité ni la trésorerie IBKR : seulement le capital déclaré."}
     b = RECO.bilan(scheduler.reco_book, _capital())
     today = now.astimezone(NEW_YORK).date().isoformat()
     day = [r for r in scheduler.reco_book.recos if r["day"] == today]
-    return out | {"si_tout_suivi": b, "recos_du_jour": {s: sum(r["status"] == s for r in day) for s in RECO.STATUS_FR},
+    eur = any(r.get("eur") is not None for r in rows)
+    waiting = [{"id": r["id"], "symbol": r["symbol"], "market": r["market"], "type_fr": RECO.KINDS[r["kind"]],
+                "entry": r["message"]["entry"], "stop": r["message"]["stop"], "qty": r["message"].get("qty"),
+                "sent_at": r["sent_at"], "valid_until": r["message"].get("valid_until")}
+               for r in scheduler.reco_book.recos if r["status"] == "attente"]
+    return out | {"si_tout_suivi": b, "en_attente": waiting,
+                  "courbe": {"unite": "€" if eur else "R",
+                             "titre": "€ nets cumulés depuis la mise en service" if eur else
+                                      "R nets cumulés depuis la mise en service",
+                             "points": _curve(rows, "eur" if eur else "r_net")},
+                  "recos_du_jour": {s: sum(r["status"] == s for r in day) for s in RECO.STATUS_FR},
                   "go_en_attente_de_confirmation": sum(g["status"] in CONFIRM.PENDING
                                                        for g in (scheduler.confirm_state.get("gos") or {}).values())
                   if scheduler.confirm_state.get("day") == today else 0}

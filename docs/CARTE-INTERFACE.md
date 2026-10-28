@@ -170,8 +170,9 @@ pré-enregistrée) → essais contre témoin aléatoire → council autonome (d�
 dans la vue Labo, pas comme un bouton.
 
 **Verrou de Mes trades** (choix de Simão du 28/10, contre l'avis de JARVIS, pari noté) : ouverture sur Papier, appui
-maintenu 1,1 s pour entrer dans Mes trades ; le serveur exigera `"confirm": "MES_TRADES"` sur les actions de cet espace
-(PR 2, `POST /api/cockpit/actions`).
+maintenu 1,1 s pour entrer dans Mes trades ; le serveur exige `"space": "trades"` et `"confirm": "MES_TRADES"` sur
+les actions qui écrivent dans cet espace (PR 2 ✓, `POST /api/cockpit/actions`, §4.10). Depuis le Papier, « Je prends ce
+trade… » d'un plan demande le même appui maintenu, puis ouvre Mes trades et y déclare le trade.
 
 ---
 
@@ -186,8 +187,8 @@ Fréquence : `state` toutes les 5 s (sans appel réseau) ; vues lourdes toutes l
 | Pastille « JARVIS · suivi il y a 40 s » | `state.jarvis.suivi` ← `scheduler.last_runs["suivi des trades et cockpit Discord"]` | `at`, `age_s`, `stale` | à exposer (PR 1 ✓) |
 | Pastille du labo | `state.lab` ← `heartbeat.read` | `etape`, `age_s`, `stale` (> 30 min) | à exposer (PR 1 ✓) |
 | Horloge Paris | horloge du navigateur | — | disponible |
-| Bascule d'espace | `?space=trades|paper` | — | PR 2 |
-| Bannière API muette | échec de `GET /api/cockpit/state` | — | PR 2 |
+| Bascule d'espace | `?space=trades|paper` | — | PR 2 ✓ (appui maintenu vers Mes trades, touche M) |
+| Bannière API muette | échec de `GET /api/cockpit/state` (délai 8 s) | message d'erreur, âge des dernières données | PR 2 ✓ |
 
 ### 3.2 Cockpit (1)
 
@@ -195,7 +196,8 @@ Fréquence : `state` toutes les 5 s (sans appel réseau) ; vues lourdes toutes l
 |---|---|---|---|
 | Résumé · Mes trades | `state.portfolio` (space=trades) ← `realized_r`, `realized_r_net`, `sizing.risk_amount_eur`, positions | `latent{r,eur}`, `jour{r,r_net,eur,fees_eur}`, `semaine{…}`, `positions_ouvertes`, `capital.eur` « déclaré » | à exposer (PR 1 ✓) |
 | Résumé · Papier | `state.portfolio` (space=paper) ← `reco.bilan` | `si_tout_suivi{equite_eur, eur_net, r_net, taux_reussite, par_etat}`, `recos_du_jour`, `go_en_attente_de_confirmation` | à exposer (PR 1 ✓) |
-| Courbe du P&L cumulé du jour | sorties du jour (`_closed_rows`) | heure, R net, € | à exposer (PR 2, calculée côté page depuis `journal`) |
+| Courbe du P&L cumulé | `state.portfolio.courbe` ← `_closed_rows` | Mes trades : R nets cumulés des clôtures du jour ; Papier : € nets (R sans taille) depuis la mise en service | à exposer (PR 2 ✓, calculée par le serveur) |
+| Recommandations en attente du déclenchement (Papier) | `state.portfolio.en_attente` ← recos `attente` | `symbol`, `type_fr`, `entry`, `stop`, `qty`, `valid_until` | à exposer (PR 2 ✓) |
 | Séances (cadran) | `state.market_sessions` ← `calendar.py` | `etat`, `aujourd_hui{premarche, ouverture, cloture, fin_apres_bourse}`, `prochain_changement`, `prochaine_ouverture`, `raison_fermeture`, `demi_seance`, `ecart_paris_new_york_h` | à exposer (PR 1 ✓) |
 | Trades ouverts | `state.positions_open` (bloc §4.9) | piste stop → objectif, prochain TP + délai, P&L latent | à exposer (PR 1 ✓) |
 | Risque (3 jauges) | `state.risk` ← `lab_grade` | `risque_ouvert_pct` / `risque_ouvert_max_pct`, `r_du_jour_net` / `arret_jour_r`, `grades.{stock,crypto}` | à exposer (PR 1 ✓) |
@@ -211,7 +213,7 @@ Fréquence : `state` toutes les 5 s (sans appel réseau) ; vues lourdes toutes l
 | Lignes SL / TP / entrée, zones, délais | `instrument.positions[]` (bloc §4.9) | à exposer (PR 1 ✓) |
 | Bandeau « En position » | `state.positions_open` | à exposer (PR 1 ✓) |
 | Watchlist | `GET /api/cockpit/instruments` ← `JARVIS_WATCHLIST_*` + symboles en position | à exposer (PR 1 ✓) |
-| Avis JARVIS, Nouveau plan | `GET /api/trading/opinion`, `POST /api/trading/plan` (via `POST /api/cockpit/actions`) | PR 2 |
+| Avis JARVIS (touche A), Fiche société, Nouveau plan (`+`) | actions `opinion`, `company`, `plan` (mêmes fonctions que `!avis`, `!societe`, `POST /api/trading/plan`) : **seules dépenses Twelve Data venues de la page, au clic, et l'écran le dit** | PR 2 ✓ |
 | Conseil « stop à … » (ligne info) | `position.conseil` (dernier conseil gardé) | à exposer (PR 1 ✓) |
 
 ### 3.4 Positions (3)
@@ -221,7 +223,8 @@ Fréquence : `state` toutes les 5 s (sans appel réseau) ; vues lourdes toutes l
 | Trades sur le graphique | `GET /api/cockpit/positions/charts?tf=15m` (70 bougies) | à exposer (PR 1 ✓) |
 | Tableau des ouverts, ordres IBKR en prix | `positions_open[].ibkr_orders` (plan enregistré / message) | à exposer (PR 1 ✓) |
 | Clôturés récemment | `GET /api/cockpit/journal?space=` `clotures` | à exposer (PR 1 ✓) |
-| Conseils en prix | `GET /api/trading/advice` (action `advice`) | PR 2 |
+| Conseils en prix, « J'ai vendu à… », « Rouvrir un trade arrêté » | actions `advice`, `exit`, `reopen` (Mes trades seulement) | PR 2 ✓ |
+| Clôturer, Supprimer (par trade) | actions `close`, `delete` (appui maintenu) | PR 2 ✓ |
 
 ### 3.5 Risque (4)
 
@@ -259,7 +262,7 @@ le diagnostic » : `GET /api/cockpit/diagnostics`.
 ### 3.10 Inspecteur
 
 Prix, variation, état de séance : `instruments` ; mini-graphique avec SL / TP : `instrument/{symbol}` ; dernier plan :
-`instrument.plan_du_jour` ; dernier avis : `GET /api/trading/opinion` à la demande (PR 2).
+`instrument.plan_du_jour` ; avis : action `opinion` à la demande (PR 2 ✓).
 
 ---
 
@@ -280,6 +283,8 @@ dates en **ISO-8601 UTC**. Valeur inconnue = `null` (jamais 0). En-têtes de sé
                "jour": {"n": 1, "r": 1.5, "r_net": 1.41, "eur": 28.07, "fees_eur": 1.72, "eur_inconnus": 0},
                "semaine": {"…": "…"},
                "capital": {"eur": 1000, "etiquette": "déclaré (JARVIS_CAPITAL)"},          // trades
+               "courbe": {"unite": "R|€", "titre": "…", "points": [["<iso>", 1.41]]},       // cumul des clôtures
+               "en_attente": [{"id", "symbol", "market", "type_fr", "entry", "stop", "qty", "sent_at", "valid_until"}],  // paper
                "si_tout_suivi": {"depuis": "…", "equite_eur": 1028.07, "eur_net": 28.07, "r_net": 1.413,
                                  "taux_reussite": 1.0, "par_etat": {"attente": 0, "ouvert": 1, "clos": 1, "pas_declenche": 0},
                                  "par_type": {"go_confirme": 2, "kill": 0}, "latent_r": 0.6, "latent_eur": 12.1},  // paper
@@ -347,7 +352,7 @@ secret, aucune valeur de variable (testé).
  "stop": {"price": 171.6, "initial": 171.6, "kind": "fixed|breakeven", "source": "IBKR, posé par toi · suivi par JARVIS"},
  "targets": [{"name": "TP2", "price": 189.0, "pct": 6.84, "r_multiple": 2.28, "role": "exit|repere", "hit_at": null,
               "eta_text": "…", "eta_median": "…", "eta_latest": "…", "late": false}],
- "sortie_unique": 1, "targets_hit": 0, "last_price": 180.0, "as_of": "…", "price_source": "Twelve Data",
+ "sortie_unique": 1, "targets_hit": 0, "last_price": 180.0, "as_of": "…", "price_source": "Twelve Data", "eurusd": 1.16,
  "freshness": {"age_s": 30, "stale": false, "etat": "frais"}, "move_pct": 1.75, "r_now": 0.58,
  "unrealized": {"r": 0.58, "usd": 12.4, "eur": 10.69},
  "fees_est": {"usd": 2.0, "r": 0.09, "bareme": "degressif"},
@@ -358,12 +363,35 @@ secret, aucune valeur de variable (testé).
 null (les commissions sont dans le résultat), `stop.source` « message Discord · suivi par JARVIS », `reco_id`.
 Les SL et TP viennent du trade enregistré (ou du message), jamais d'un calcul de l'interface.
 
-### 4.10 Actions (PR 2)
-`POST /api/cockpit/actions`, liste blanche de §9.4 du prompt, CSRF par cookie `jarvis_csrf` + `X-CSRF-Token` en plus
-de `reject_cross_site`, `"confirm": "MES_TRADES"` exigé dans l'espace Mes trades. Chaque action appelle la même
-fonction que sa route ou sa commande Discord : `_plan` / `build_plan`, `book.add`, `record_exit`, `book.close`,
-`book.remove`, `reopen`, `advise_book`, `scanner.scan(save=False)`, `proposals.decide`, `method.enqueue_veto`,
-`killmode.set_active`.
+### 4.10 Actions (PR 2 ✓, `app/web/cockpit_actions.py`)
+`POST /api/cockpit/actions` avec `{"action", "space": "paper|trades", "confirm": "MES_TRADES"?, "args": {…}}`.
+
+Gardes, dans l'ordre : `reject_cross_site` (Origin / Sec-Fetch-Site) ; jeton CSRF (cookie `jarvis_csrf` posé par
+`GET /cockpit`, `SameSite=Strict`, `Secure`, lisible par la page, renvoyé dans `X-CSRF-Token`, comparé à temps
+constant) sinon **403** ; action hors liste → **400** ; `space` invalide → **400** ; action qui écrit dans Mes trades
+sans `space: trades` **et** `confirm: MES_TRADES` → **403**. Arguments contrôlés (symbole, nombres > 0 avec virgule
+acceptée, `id` `^[A-Za-z0-9_.:-]{1,64}$`, 5 objectifs au plus, note de 300 caractères) → **400**. Erreur inattendue →
+**500** « Action X en échec : Type » (sans détail). Réponse : `{"ok": true, "action", "at", "text", …}` = le résultat
+réel de la fonction, jamais « en attente ».
+
+| Action | Mes trades | Appui maintenu | Même fonction que |
+|---|---|---|---|
+| `plan` | — | — | `POST /api/trading/plan` (`main.trading_plan`, sans envoi Discord) |
+| `take` | ✓ | — (verrou d'espace) | `POST /api/trading/trades` (`main.trading_open` → `book.add`) |
+| `exit` | ✓ | ✓ | `!sortie` (`service.record_exit` sous `scheduler._lock`, `exit_text`) |
+| `close` | ✓ | ✓ | `POST /api/trading/trades/{id}/close` (`book.close`) |
+| `delete` | ✓ | ✓ | `DELETE /api/trading/trades/{id}` (`book.remove`) |
+| `reopen` | ✓ | ✓ | `!rouvre` (`build_plan` puis `service.reopen` sous le verrou) |
+| `advice` | ✓ | — | `GET /api/trading/advice` (garde le conseil sur le trade) |
+| `scan_now` | — | — | `GET /api/trading/scan` (rien enregistré, aucun ordre fictif) |
+| `proposal_approve` / `proposal_refuse` | — | ✓ / — | `POST /api/trading/proposals/{id}/{choice}` (`proposals.decide`) |
+| `veto` | — | ✓ | `!veto` (`lab.method.enqueue_veto`) |
+| `killmode_on` / `killmode_off` | — | ✓ | `!kill on` / `!kill off` (`killmode.set_active`) ; l'interface offre « Annuler » 6 s |
+| `opinion`, `company` | — | — | `!avis` (`main.trading_opinion`), `!societe` (`main.trading_company`) |
+
+Journal : une ligne JSON par appel dans `data/cockpit_actions.jsonl` (`JARVIS_COCKPIT_ACTIONS_PATH`) : heure, action,
+espace, arguments (textes coupés à 120 caractères), `ok`, statut HTTP, résultat (300 caractères). Aucune action ne
+passe d'ordre (ni IBKR ni Alpaca) ni ne touche une clé.
 
 ---
 
@@ -382,7 +410,10 @@ fonction que sa route ou sa commande Discord : `_plan` / `build_plan`, `book.add
 | Taille du KILL | le MP de `!kill` affiche les brackets au change de l'analyse, que le journal ne garde pas | change du jour lu à la reprise (BCE, 1,15 si muette) ; écart possible d'une action, noté ici |
 | Mise en service du journal | — | `depuis` = premier passage de `tick_reco` ; aucun KILL ni GO d'avant n'est repris (pas de reconstitution de tailles non gardées) |
 | Délais estimés des TP Papier | le MP de confirmation n'en donne pas | repris du plan du scanner (minutes de cotation, gardées par `confirm.register`) et repartis de l'heure du déclenchement ; KILL : « délai non estimé » |
-| CSP sur `/cockpit*` | `/cockpit` sert l'ancien cockpit (scripts et styles en ligne) | PR 1 : en-têtes sur `/api/cockpit/*` seulement ; `/cockpit` en PR 2 avec la nouvelle page ; `/cockpit/labo`, `/docs` jamais |
+| CSP sur `/cockpit*` | l'ancien cockpit a des scripts et styles en ligne | PR 2 ✓ : en-têtes sur `/cockpit`, `/cockpit/app.*`, `/cockpit-static/*` et `/api/cockpit/*` ; jamais sur `/cockpit/ancien`, `/cockpit/labo`, `/docs`. Lightweight Charts insère une balise `<style>` pour son logo : la page lui rend un gabarit inerte et ses règles sont recopiées dans `app.css` (zéro violation CSP vérifiée dans Chromium) |
+| Actions de §9.4 | l'avis (touche A, inspecteur) et la fiche société n'y figurent pas | **ajoutées** (`opinion`, `company`) : mêmes fonctions que `!avis` et `!societe`, sans écriture |
+| « la page ne déclenche jamais Twelve Data » | un plan, une prise, une reprise, un avis, une fiche et le scanner lisent l'historique | la **navigation** n'en déclenche aucun (testé) ; ces actions, au clic seulement, en dépensent comme sur Discord, et l'écran le dit à côté du bouton |
+| Vue Marchés en PR 3 (§15) | le graphique porte les SL / TP des positions, cœur de la PR 2 | **livrée en PR 2** avec Cockpit et Positions ; les cinq autres vues ont un état vide qui renvoie vers la page Labo, l'ancien cockpit ou le diagnostic |
 | Agenda : résultats, 8-K, « Cette semaine » | sources existent, pas dans le cockpit | PR 3 |
 | Challenger Gemini et potentiel +10 envoient aussi des plans sur Discord | choix de Simão : Papier = GO confirmés + KILL | **exclus** du Papier, montrés au Labo ; à revoir si Simão veut les compter |
 | Graphique : bougies 1 m à 1 j de toute action | actions hors suivi : Alpaca 16 min de retard | dit dans `source` (« Alpaca (16 min de retard) ») ; sans clés Alpaca : état vide |
@@ -399,28 +430,29 @@ visibilité Finnhub (audit anti-fuite) → Labo ; veille des routines Claude →
 
 | Fonction actuelle | Route utilisée aujourd'hui | Place dans le nouveau | PR |
 |---|---|---|---|
-| KPI : trades ouverts, latent, prochain objectif, journal | `/api/trading/trades`, `/api/trading/live` | Cockpit · Résumé et Trades ouverts (`state`) | 2 |
-| Planificateur de plan (crypto/action, long/short, entrée, stop, TP) | `POST /api/trading/plan` | formulaire « Nouveau plan » (`+`) → action `plan` | 2 |
-| « Je prends ce trade » (avec note) | `POST /api/trading/trades` | action `take` | 2 |
-| Propositions Approuver / Refuser | `/api/trading/proposals` | Cockpit · Propositions → actions `proposal_*` | 2 |
-| Conseils en prix | `GET /api/trading/advice` | Positions · Conseils → action `advice` | 2 |
-| Clôture avec prix | `POST /api/trading/trades/{id}/close` | action `close` (appui maintenu) | 2 |
-| Suppression | `DELETE /api/trading/trades/{id}` | action `delete` (appui maintenu) | 2 |
+| KPI : trades ouverts, latent, prochain objectif, journal | `/api/trading/trades`, `/api/trading/live` | Cockpit · Résumé et Trades ouverts (`state`) | 2 ✓ |
+| Planificateur de plan (crypto/action, long/short, entrée, stop, TP) | `POST /api/trading/plan` | formulaire « Nouveau plan » (`+`) → action `plan` | 2 ✓ |
+| « Je prends ce trade » (avec note) | `POST /api/trading/trades` | action `take` | 2 ✓ |
+| Propositions Approuver / Refuser | `/api/trading/proposals` | Cockpit · Propositions → actions `proposal_*` | 2 ✓ |
+| Conseils en prix | `GET /api/trading/advice` | Positions · Conseils → action `advice` | 2 ✓ |
+| Clôture avec prix | `POST /api/trading/trades/{id}/close` | action `close` (appui maintenu) | 2 ✓ |
+| Suppression | `DELETE /api/trading/trades/{id}` | action `delete` (appui maintenu) | 2 ✓ |
 | Journal des trades clôturés | `/api/trading/trades` | Journal (`journal?space=trades`) | 3 |
-| Mini-graphes 10 s | `/api/trading/live` | Positions · Trades sur le graphique (`positions/charts`) | 2 |
-| Chip NYSE | `/api/markets/us/status` | cadran de séance (`state.market_sessions`) | 2 |
-| Échelle des TP, alertes de retard, signes de sortie | trades | lignes de trade, piste, puces « en retard » | 2 |
-| Toasts, vibration, pause quand l'onglet est masqué | — | toasts, scrutation arrêtée onglet masqué | 2 |
+| Mini-graphes 10 s | `/api/trading/live` | Positions · Trades sur le graphique (`positions/charts`) | 2 ✓ |
+| Chip NYSE | `/api/markets/us/status` | cadran de séance (`state.market_sessions`) | 2 ✓ |
+| Échelle des TP, alertes de retard, signes de sortie | trades | lignes de trade, piste, puces « en retard » | 2 ✓ |
+| Toasts, vibration, pause quand l'onglet est masqué | — | toasts, scrutation arrêtée onglet masqué | 2 ✓ |
 
-L'ancien cockpit reste servi sous `/cockpit` jusqu'à la PR 2, puis sous `/cockpit/ancien` jusqu'à validation par
-Simão. Le message Discord épinglé (`cockpit_text`) et les commandes `!…` ne changent pas.
+Depuis la PR 2, `/cockpit` sert le nouveau cockpit et l'ancien reste sous `/cockpit/ancien` (lien dans le rail et
+la palette) jusqu'à validation par Simão. Le message Discord épinglé (`cockpit_text`) et les commandes `!…` ne
+changent pas.
 
 ---
 
-## 7. Garde-fous vérifiés par les tests (PR 1)
+## 7. Garde-fous vérifiés par les tests (PR 1 et 2)
 
 `tests/test_cockpit_api.py` : toutes les routes répondent sur `data/` vide ; en-têtes de sécurité sur `/api/cockpit/*`
-seulement (pas sur `/api/health`, `/cockpit`, `/cockpit/labo`) ; `space`, symbole, `tf`, `market` invalides → 400 ;
+et `/cockpit` (pas sur `/api/health`, `/cockpit/ancien`, `/cockpit/labo`, `/docs`) ; `space`, symbole, `tf`, `market` invalides → 400 ;
 diagnostic sans secret ni valeur de variable ; erreurs récentes sans clé ; blocs position long en sortie unique et
 short au point mort ; cotation périmée → pas de latent ; espaces séparés ; **aucun appel Twelve Data** depuis les
 routes du cockpit ; cadran un jour férié, un week-end, une demi-séance et pendant la semaine de décalage (ouverture
@@ -428,3 +460,12 @@ routes du cockpit ; cadran un jour férié, un week-end, une demi-séance et pen
 ordre au-dessus de l'ouverture, stop sur gap, non déclenché à 11 h 30, sans taille, KILL (entrée dès TP1, vente à la
 clôture), reprise des KILL depuis la mise en service, une lecture par bougie close, lien avec Mes trades, taille du MP
 reprise par `tick_confirm`, bilan.
+
+`tests/test_cockpit_actions.py` (PR 2) : `GET /cockpit` pose le cookie CSRF (`SameSite=Strict`, `Secure`) et sert des
+fichiers versionnés ; polices, Lightweight Charts, `app.js` et `app.css` servis en local avec la CSP ; aucune ressource
+externe, aucun style ni script en ligne, ni `innerHTML` ni `eval` dans la page ; CSRF absent, faux ou sans cookie →
+403 ; autre site → 403 même avec le jeton ; action ou espace inconnus → 400 ; les six actions qui écrivent dans Mes
+trades refusées en Papier ou sans `MES_TRADES` (403, rien d'écrit) ; liste des actions protégées ; clôture, suppression,
+sortie réelle, reprise, propositions, veto et Killmode passent par les mêmes fonctions que les routes et `!…` ; erreur
+inattendue sans détail ; journal des actions. Contrôle à la main dans Chromium (1440, 1100 et 390 px, deux espaces) :
+zéro erreur JavaScript, zéro violation CSP, aucun débordement horizontal, appui maintenu au doigt et au clavier.
