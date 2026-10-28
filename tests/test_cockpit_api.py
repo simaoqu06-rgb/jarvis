@@ -56,8 +56,9 @@ def test_en_tetes_de_securite_sur_le_cockpit_seulement(client):
     assert r.headers["content-security-policy"].startswith("default-src 'self'; script-src 'self'")
     assert r.headers["x-frame-options"] == "DENY" and r.headers["cache-control"] == "no-store"
     assert r.headers["referrer-policy"] == "no-referrer" and r.headers["x-content-type-options"] == "nosniff"
-    for url in ("/api/health", "/cockpit", "/cockpit/labo"):
-        assert "content-security-policy" not in client.get(url).headers, url  # ancien cockpit : styles en ligne
+    for url in ("/api/health", "/cockpit/ancien", "/cockpit/labo", "/docs"):
+        assert "content-security-policy" not in client.get(url).headers, url  # styles et scripts en ligne, CDN
+    assert client.get("/cockpit").headers["content-security-policy"].startswith("default-src 'self'")
 
 
 def test_espace_symbole_et_intervalle_invalides(client):

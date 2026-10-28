@@ -58,3 +58,12 @@ def journal_des_recos_en_memoire(monkeypatch):
     from app.trading import reco
 
     monkeypatch.setattr(scheduler, "reco_book", reco.RecoBook(None))
+
+
+@pytest.fixture(autouse=True)
+def journal_des_actions_du_cockpit_coupe(monkeypatch):
+    """Le journal des actions du cockpit (data/cockpit_actions.jsonl) n'est jamais écrit par les tests ;
+    test_cockpit_actions.py le dirige vers un fichier temporaire."""
+    from app.web import cockpit_actions
+
+    monkeypatch.setattr(cockpit_actions, "ACTIONS_LOG", None)

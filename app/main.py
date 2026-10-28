@@ -3,11 +3,13 @@
 Lancer : uvicorn app.main:app --reload
 """
 import asyncio
+import hashlib
 import hmac
 import ipaddress
 import json
 import logging
 import os
+import secrets
 import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -15,7 +17,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -124,8 +126,8 @@ async def internet_only_lab(request: Request, call_next):
     return await call_next(request)
 
 
-# En-têtes de sécurité du nouveau cockpit (§9.1 du prompt de refonte) : seulement sur ses routes. /cockpit sert encore
-# l'ancien cockpit (scripts et styles en ligne) jusqu'à la PR 2 ; /cockpit/labo et /docs ne sont pas concernés.
+# En-têtes de sécurité du nouveau cockpit (§9.1 du prompt de refonte) : seulement sur ses routes. /cockpit/ancien (scripts
+# et styles en ligne), /cockpit/labo (styles en ligne) et /docs (CDN) ne sont pas concernés.
 COCKPIT_HEADERS = {
     "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
                                "connect-src 'self'; font-src 'self'; manifest-src 'self'; object-src 'none'; "
@@ -135,13 +137,20 @@ COCKPIT_HEADERS = {
 }
 
 
+COCKPIT_LEGACY = ("/cockpit/labo", "/cockpit/ancien")
+
+
 @app.middleware("http")
 async def cockpit_security_headers(request: Request, call_next):
     response = await call_next(request)
     path = request.url.path
-    if path == "/api/cockpit" or path.startswith("/api/cockpit/"):
+    api = path == "/api/cockpit" or path.startswith("/api/cockpit/")
+    page = path in ("/cockpit", "/cockpit/") or path.startswith("/cockpit-static/") or (
+        path.startswith("/cockpit/") and path not in COCKPIT_LEGACY)
+    if api or page:
         for k, v in COCKPIT_HEADERS.items():
             response.headers[k] = v
+    if api:
         response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -1024,12 +1033,14 @@ def lab_research_bilan():
     return b | {"text": research.bilan_text(b)}
 
 
-COCKPIT_HTML = Path(__file__).parent / "web" / "cockpit.html"
+COCKPIT_HTML = Path(__file__).parent / "web" / "cockpit.html"  # l'ancien cockpit, servi sous /cockpit/ancien
+COCKPIT_DIR = Path(__file__).parent / "web" / "cockpit"         # le nouveau : index.html, app.css, app.js
 
-# Nouveau cockpit : contrat /api/cockpit/* (lecture), hors OpenAPI.
-from app.web import cockpit_api  # noqa: E402  (importé après les routes : il lit scheduler, déjà chargé)
+# Nouveau cockpit : contrat /api/cockpit/* (lecture et actions de la liste blanche), hors OpenAPI.
+from app.web import cockpit_actions, cockpit_api  # noqa: E402  (après les routes : les actions les appellent)
 
 app.include_router(cockpit_api.router)
+app.include_router(cockpit_actions.router)
 
 
 # Icônes et manifeste : le cockpit s'installe comme une appli sur l'écran d'accueil du téléphone.
@@ -1056,7 +1067,33 @@ def cockpit_lab(request: Request):
                                         lab_grade.current()))
 
 
+def _asset_version(name: str) -> str:
+    return hashlib.sha256((COCKPIT_DIR / name).read_bytes()).hexdigest()[:12]
+
+
 @app.get("/cockpit", response_class=HTMLResponse, include_in_schema=False)
-async def cockpit():
-    """Le Trading Cockpit : trades suivis, TP/SL touchés, délais, journal (rafraîchi toutes les 30 s)."""
+async def cockpit(request: Request):
+    """Le Trading Cockpit (Mes trades / Papier). Pose le cookie CSRF que les actions renvoient dans X-CSRF-Token."""
+    html = (COCKPIT_DIR / "index.html").read_text(encoding="utf-8")
+    for name in ("app.css", "app.js"):
+        html = html.replace(f"{{{{{name}}}}}", _asset_version(name))
+    response = HTMLResponse(html, headers={"Cache-Control": "no-cache"})
+    token = request.cookies.get(cockpit_actions.CSRF_COOKIE) or ""
+    if not cockpit_actions.TOKEN_RE.match(token):  # jeton absent ou d'une autre forme : un neuf
+        token = secrets.token_urlsafe(32)
+    response.set_cookie(cockpit_actions.CSRF_COOKIE, token, samesite="strict", secure=True, httponly=False, path="/")
+    return response
+
+
+@app.get("/cockpit/app.{ext}", include_in_schema=False)
+async def cockpit_asset(ext: str):
+    if ext not in ("css", "js"):
+        raise HTTPException(404)
+    media = "text/css" if ext == "css" else "text/javascript"
+    return FileResponse(COCKPIT_DIR / f"app.{ext}", media_type=media, headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/cockpit/ancien", response_class=HTMLResponse, include_in_schema=False)
+async def cockpit_old():
+    """L'ancien cockpit, gardé jusqu'à ce que Simão valide le nouveau."""
     return HTMLResponse(COCKPIT_HTML.read_text(encoding="utf-8"))
