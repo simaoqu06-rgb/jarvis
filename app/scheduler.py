@@ -25,6 +25,7 @@ from app.trading import gemini as GEMINI
 from app.trading import plus10 as PLUS10
 from app.trading import visibilite as VIS
 from app.trading import confirm as CONFIRM
+from app.trading import reco as RECO
 from app.trading import proposals as PR
 from app.trading import research
 from app.trading.proposals import proposals
@@ -44,6 +45,8 @@ book = trading.Book()
 trading.taken_trades = lambda: book.trades  # le grade tient compte du risque déjà ouvert et du jour
 paper_book = paper.PaperBook()
 confirm_state = CONFIRM.load()
+reco_book = RECO.RecoBook()  # « si j'avais suivi JARVIS » : GO confirmés et KILL envoyés, suivis tels qu'envoyés
+last_runs: dict[str, dict] = {}  # dernier passage de chaque boucle (cockpit : /api/cockpit/state et /health)
 outbox = Outbox(config.OUTBOX_PATH, discord.split_message)
 _background: set[asyncio.Task] = set()
 _lock = asyncio.Lock()  # un seul job modifie l'état à la fois
@@ -375,12 +378,46 @@ async def tick_confirm(now: datetime | None = None) -> None:
                 size = _size_rule(now)  # une fois par passage
             g, risk_eur = size or (None, trading.rule_eur())
             texts.append(CONFIRM.event_text(s, go, ev, now, risk_eur, rate, g))
+            if ev["kind"] == "confirmé":
+                _reco_go(s, go, ev, now, risk_eur, rate, g)
     async with _lock:
         CONFIRM.save(confirm_state)
         if texts:
             _queue(texts, "scanner", expires_at=close)
             _dm_trades(texts)
             _kick_outbox()
+
+
+def _reco_go(symbol: str, go: dict, ev: dict, now: datetime, risk_eur: float | None, rate: float | None,
+             g: dict | None) -> None:
+    """Le GO confirmé entre au journal des recommandations avec la taille de son MP (confirm.event_text) ; un échec
+    ne retient jamais le message."""
+    try:
+        risk_usd = risk_eur * rate if rate and risk_eur else None
+        qty = CONFIRM.shares(ev["trigger"], go["stop"], risk_usd)
+        note = None if qty else ("pas de taille : " + (CONFIRM.portfolio_stop(g) or "aucun risque proposé")
+                                 if risk_eur is None else "pas de taille : une action dépasse le risque"
+                                 if qty == 0 else "pas de taille : change EUR/USD indisponible")
+        reco_book.add(RECO.go_from_confirm(symbol, go, ev, confirm_state["day"], now, qty, risk_eur, rate, note))
+    except Exception:
+        log.exception("Journal des recommandations : GO confirmé %s pas noté", symbol)
+
+
+async def tick_reco(now: datetime | None = None) -> None:
+    """Journal des recommandations : reprend les KILL notés, fait avancer les GO confirmés et les KILL sur les bougies
+    5 min (déclenchement, objectifs, stop, vente à la clôture d'un KILL). Rien n'est envoyé. Lectures hors du verrou."""
+    now = now or datetime.now(timezone.utc)
+    rate = await _usd_per_eur() if any(_new_kills()) else None
+    await RECO.tick(reco_book, now, lock=_lock, usd_per_eur=rate)
+
+
+def _new_kills():
+    """KILL du jour pas encore au journal (le change n'est lu que pour eux)."""
+    from app.trading import killmode as K  # import tardif : killmode tire le labo
+
+    since = datetime.fromisoformat(reco_book.since).timestamp()
+    return (c for c in K.calls() if K._group_of(c) == "kill" and c.get("at", 0) >= since
+            and not reco_book.get(f"kill-{c['id']}"))
 
 
 async def tick_plus10(now: datetime | None = None) -> None:
@@ -528,6 +565,7 @@ CORE_JOBS = [
     ("potentiel +10 confirmé", tick_plus10, MINUTE, False),  # n° 9 ; prend le verrou lui-même pour envoyer
     ("challenger Gemini", tick_gemini, MINUTE, False),  # prend le verrou lui-même pour envoyer
     ("visibilité des actus Finnhub", tick_visibilite, MINUTE, False),  # mesure seule, rien n'est envoyé
+    ("journal des recommandations", tick_reco, MINUTE, False),  # Papier du cockpit ; prend le verrou pour écrire
 ]
 # Seulement avec les notifications actives.
 JOBS = [
@@ -554,10 +592,15 @@ async def _run(job, locked: bool) -> None:
 
 async def _loop(name: str, job, every: int, locked: bool = True) -> None:
     while True:
+        started = datetime.now(timezone.utc)
         try:
             await _run(job, locked)
-        except Exception:  # une alerte en échec ne doit jamais arrêter les autres
+            last_runs[name] = {"at": started.isoformat(timespec="seconds"), "ok": True, "every_s": every,
+                               "duree_s": round((datetime.now(timezone.utc) - started).total_seconds(), 1)}
+        except Exception as exc:  # une alerte en échec ne doit jamais arrêter les autres
             log.exception("Notification « %s » en échec", name)
+            last_runs[name] = {"at": started.isoformat(timespec="seconds"), "ok": False, "every_s": every,
+                               "erreur": type(exc).__name__}
         await asyncio.sleep(every)
 
 

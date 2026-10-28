@@ -1,0 +1,430 @@
+# Carte de l'interface : le nouveau Trading Cockpit de JARVIS
+
+Phase 1 de la refonte (prompt corrigé du 28/10/2026, `/mnt/project-files/cockpit/prompt-cockpit-corrige-2026-10-28.md`).
+Ce document relie chaque écran du futur cockpit à une donnée réelle de JARVIS : fonction, fichier, route, fréquence.
+Il est la référence des PR 2 et 3 : **une valeur affichée qui n'est pas ici n'a pas le droit d'exister**.
+
+Statuts : **disponible** (lu tel quel), **à exposer** (existe dans JARVIS, la PR 1 l'expose sous `/api/cockpit/*`,
+sauf mention « PR 2/3 »), **manque** (n'existe pas : état vide qui dit pourquoi).
+
+Rappel de fond : **JARVIS ne passe aucun ordre réel.** Il propose des plans ; Simão passe ses ordres lui-même chez
+IBKR (aucune API). Le seul compte que JARVIS touche est le compte fictif Alpaca du forward-test. Le cockpit est un
+tableau de bord et un journal, pas un terminal d'ordres.
+
+---
+
+## 1. Inventaire
+
+### 1.1 Processus et boucles
+
+Deux conteneurs (`docker-compose.yml`) : `jarvis` (FastAPI + planificateur + bot Discord, `127.0.0.1:8000`) et
+`jarvis-lab` (`python -m app.lab.worker`, sans port). Le cockpit vit dans `jarvis`, qui tient l'état en mémoire.
+
+Boucles du planificateur (`app/scheduler.py`, `CORE_JOBS` tournent toujours, `JOBS` seulement avec
+`DISCORD_WEBHOOK_URL` et `JARVIS_NOTIFICATIONS` ≠ off ; plus `tick_lab` et le bot) :
+
+| Boucle (`name`) | Fonction | Période | Verrou global | Ce qu'elle fait |
+|---|---|---|---|---|
+| suivi des trades et cockpit Discord | `tick_trades` | 60 s | oui | rejoue les bougies 1 min des trades de `data/trades.json` (`service.check_trades`), TP/SL, signaux de sortie ; réécrit le message épinglé (`cockpit_text`) |
+| scanner pré-ouverture | `tick_scan` | 60 s | pour écrire | à `scan_time_ny` (09:10 NY) les jours de séance : `scanner.scan`, message, GO enregistrés pour la confirmation, picks sur le compte fictif |
+| conseil avant la clôture | `tick_closing` | 60 s | pour écrire | 30 min avant la clôture (`JARVIS_CLOSE_ADVICE_MINUTES`) : sortir / alléger / garder ; rappel de vente des KILL |
+| forward-test sur le compte fictif | `tick_paper` | 120 s | oui | relit les ordres Alpaca fictifs ; bilan du vendredi et propositions de réglages |
+| contrôle des GO après l'ouverture | `tick_confirm` | 60 s | pour écrire | de 09:45 à 11:30 NY, bougies 5 min Twelve Data : GO confirmé (MP avec l'ordre), annulé, expiré ; mesure à la clôture (`confirmations.jsonl`) ; **depuis la PR 1, note chaque GO confirmé au journal des recommandations** |
+| potentiel +10 confirmé | `tick_plus10` | 60 s | pour envoyer | n° 9 : listes de 09:46 et 10:01 NY (mesurées, jamais des GO) |
+| challenger Gemini | `tick_gemini` | 60 s | pour envoyer | passages A 09:36, B 12:36, C 15:31 NY ; solde le lendemain contre le témoin |
+| visibilité des actus Finnhub | `tick_visibilite` | 60 s | non | audit anti-fuite, rien n'est envoyé |
+| **journal des recommandations** (nouveau) | `tick_reco` | 60 s | pour écrire | reprend les KILL, fait avancer GO confirmés et KILL sur les bougies 5 min (`app/trading/reco.py`) ; rien n'est envoyé |
+| labo : message du matin | `tick_lab` | 60 s | oui | message du matin du labo, annonces du worker, propositions de grade et de méthode |
+| file d'envoi Discord | `tick_outbox` | 60 s | non | vide `data/outbox.json` |
+| point du matin | `tick_brief` | 60 s | oui | 09:00 NY |
+| mouvements de cours / séismes / actus / disque / veille des routines | `tick_moves`, `tick_quakes`, `tick_news`, `tick_disk`, `tick_routines` | 5, 5, 15, 30, 5 min | oui | alertes Discord |
+
+**Dernière exécution** : n'existait pas. La PR 1 l'ajoute (`scheduler.last_runs[name] = {at, ok, every_s, duree_s |
+erreur}`, posé par `_loop`). Péremption du suivi : 3 min sans passage (`LOOP_STALE_S`).
+
+Worker du labo : battement `lab.heartbeat` dans le dossier de `JARVIS_LAB_DB` (`app/lab/heartbeat.py`,
+`{le, etape}`), lu par `heartbeat.read` (`il_y_a_s`). Périmé au-delà de 30 min (même règle que le healthcheck de
+`jarvis-lab`).
+
+### 1.2 Marchés
+
+- Actions US : calendrier NYSE calculé sans réseau (`app/trading/calendar.py` : fériés de la règle 7.2, demi-séances
+  à 13 h, `SPECIAL_CLOSURES`, `JARVIS_NYSE_EXTRA_CLOSED`). Pré-marché 04:00–09:30, séance 09:30–16:00, après-bourse
+  16:00–20:00 (17:00 une demi-séance), heure de New York. `cockpit_api.market_sessions` en tire l'état, la prochaine
+  bascule et l'écart Paris − New York (5 h pendant les semaines de décalage : ouverture 14 h 30 à Paris du 25/10 au
+  1/11/2026, testé).
+- Crypto : 24/7, Kraken (bougies 1 min, cache 15 s ; 1 h, 4 h, 1 j).
+
+### 1.3 Modules (entrées → sorties)
+
+| Module | Fichier | Entrées | Sorties |
+|---|---|---|---|
+| Plan EmperorBTC | `trading/service.py` (`build_plan`, `plan_from_bars`), `plan.py`, `levels.py` | bougies (Kraken / Twelve Data, Alpaca en secours), catalyseur | entrée, stop (`stop_source`, plancher 1/3 ATR jour), TP1-3 avec `pct`, `r_multiple`, `hit_rate`, délais (`eta_text`, `eta_median`, `eta_latest`, `minutes_*`), checklist, note composite (`score`), grade, taille (`sizing` / `sizing_regle`), brackets IBKR (`ibkr`) |
+| Note composite + catalyseur | `score.py`, `catalyst.py` | plan, journalier, actus Finnhub | `score.go` (GO / NO GO), `composite`, sous-notes, raisons ; « priorité, pas une probabilité » |
+| Scanner pré-ouverture | `scanner.py` | Alpaca (screeners, bougies), réglages | picks (plan + `features`), `data/scans.jsonl` |
+| Confirmation des GO | `confirm.py` | GO du jour, bougies 5 min | état (`attente`, `repli`, `confirmé`, `annulé`, `expiré`), déclencheur, MP d'ordre, `data/confirmations.json(l)` |
+| **Journal des recommandations** (PR 1) | `reco.py` | GO confirmés (MP), KILL (`killmode_calls.json`), bougies 5 min | `data/reco.json` : état, entrée exécutée, objectifs touchés, R brut, $ / € nets à la taille du message |
+| Killmode | `killmode.py` | `!kill`, données Alpaca, Finnhub | verdict KILL / PRÊT / non, journal des appels, bilan (`!kill bilan`) ; interrupteur `data/killmode.json` |
+| Avis et conseils en prix | `advice.py` | trade ou symbole, bougies | `!avis` (entrer, attendre), conseils par trade (sortir / alléger / garder, ventes, stop suiveur, renforts) gardés dans `trade["conseils"]` |
+| Fiche société | `company.py` | Finnhub, SEC | `!societe` |
+| Désaccords | `service.disagreements` | trades suivis, pente de la note au labo | avec / contre l'avis de JARVIS, taille à la règle |
+| Forward-test Alpaca | `paper.py` | picks du scanner (GO et NO GO) | ordres fictifs 3 brackets, `data/paper.json`, bilan et propositions |
+| Challenger Gemini | `gemini.py` | Alpaca, scans A/B/C | plans, soldes j0/j1 contre témoin, `data/gemini_challenger.json` |
+| Potentiel +10 | `plus10.py` | gappers | listes 09:46 / 10:01 NY |
+| Grade | `lab/grade.py` | labo (`lab_grade.json`), trades pris | lettre par marché, risque proposé, risque ouvert, arrêt du jour |
+| Labo | `app/lab/*` | rejeu, direct, déclarations | statut, déclarations (n° 12 « ouverture »), council, `!veto`, leçons, autopsie, ratés +10, 8-K, Polymarket Fed |
+| Propositions | `trading/proposals.py` | forward-test, labo, grade | `data/trading_proposals.json`, Approuver / Refuser |
+| Recherche avant l'ouverture | `trading/research.py` | routine Claude | verdicts soutient / neutre / contre |
+
+### 1.4 SL et TP d'un trade suivi (`data/trades.json`, `Book.add`)
+
+Champs exacts : `entry`, `stop` (initial, sur la structure), `stop_current` (suivi : remonté à l'entrée **après TP2**,
+**après TP1 pour un KILL**, ou par un conseil `advice.record` quand il dit de remonter), `stop_moved_at`, `stop_pct`,
+`targets[]` (`name`, `price`, `pct`, `r_multiple`, `hit_rate`, `eta_text`, `eta_median`, `eta_latest`,
+`minutes_median`, …), `targets_hit`, `sortie_unique` (indice de l'objectif de sortie : 1 = TP2 par défaut depuis le
+25/10 ; `null` avec `JARVIS_IBKR_BRACKETS=3`, pour la crypto, un plan sans 3 objectifs ou un KILL), `events[]`
+(`tp1`…, `stop` au pire du stop et de l'ouverture sur un gap, `close` avec `reason`, `corrige` après `!sortie`),
+`exit_signals`, `late_warned`, `last_price`, `last_check`, `killmode`, `policy` (`go_confirme`), `side` (`short`
+possible : SL au-dessus, TP en dessous). Objectif touché = franchi d'un pas de cotation. Aucun stop suiveur n'est un
+ordre : seulement des conseils en prix (`conseils`).
+
+### 1.5 Comptabilité
+
+- **Réel (Mes trades)** : `service.realized_r` (R brut, sortie unique ou un tiers par objectif), `realized_r_net`
+  (frais IBKR estimés, `fees.py`, barème `JARVIS_IBKR_PLAN`), € = R net × `sizing.risk_amount_eur` (inconnu sans
+  taille). Capital : `JARVIS_CAPITAL`, **déclaré**, en euros. **Manque** : équité, trésorerie et exécutions IBKR
+  (aucune connexion) → jamais affichées.
+- **Papier (recommandations)** : `reco.result` : R brut du moteur, puis $ brut, commissions IBKR et $ / € nets à la
+  quantité envoyée ; R net = $ net / (quantité × risque). « Si j'avais tout suivi » = capital déclaré + somme des €
+  nets (`reco.bilan`).
+- **Forward-test Alpaca** (labo) : `paper.stats`, en R, 3 brackets, sans frais. Ce n'est **pas** l'espace Papier.
+
+### 1.6 Risque
+
+`lab_grade.risk_now(market, trades)` : grade (lettre, `risque_grade`, `risque_propose`, `raison`, `perime`),
+risque ouvert (`open_risk`, ≤ 3 % `RISQUE_OUVERT_MAX`), R du jour net (`day_r`, arrêt à −3 R `ARRET_JOUR_R`),
+fraîcheur (`age_h`, périmé au-delà de 6 h `JARVIS_GRADE_MAX_AGE_H`). Taille : min(capital × % du grade, 20 €
+`JARVIS_RISK_EUR`) (`service.recommended_eur`), actions entières (`euro_sizing`). Grade F partout aujourd'hui → 0 %.
+
+### 1.7 Journal
+
+Trades terminés (`book.trades`, statut `closed`), désaccords (`service.disagreements`), confirmations
+(`confirm.read_log`), forward-test (`paper.stats`), propositions décidées (`proposals.items`), conseils mesurés
+(`advice.advice_stats`), recommandations closes (`reco.json`).
+
+### 1.8 Intégrations, quotas, preuve de bon fonctionnement
+
+| Source | Usage | Quota / cache | Preuve |
+|---|---|---|---|
+| Twelve Data | bougies actions temps réel (suivi, confirmation, plans) | 8 crédits/min (`_spend`), 800/jour en gratuit ; **compteur du jour ajouté** (`twelvedata.credits_today`, ce processus seulement) | `sources_health` (nouveau) |
+| Alpaca données | scanner, secours, Killmode, cockpit hors suivi | SIP 16 min de retard (IEX en secours), gratuit | idem |
+| Alpaca compte fictif | forward-test | — | idem |
+| Kraken | crypto | cache 15 s (1 min) | idem |
+| Finnhub, SEC EDGAR, Frankfurter (BCE), CoinLore / CoinPaprika, Nager.Date, Polymarket | catalyseur, 8-K, change, crypto, fériés, Fed | caches `fallback.store` | idem |
+
+**Écart majeur** : `GET /api/health` existe mais renvoie seulement `{"status": "ok"}`. La santé des sources n'existait
+pas : la PR 1 ajoute `app/core/sources_health.py`, alimenté par `core/http._get` et `alpaca._request` (dernier
+succès, dernière erreur en texte court, latence, compteurs ; ni URL ni paramètre gardés). Le worker du labo n'y est
+pas visible (autre processus).
+
+### 1.9 Stockage
+
+Tout sous `data/` (écrit par `jarvis` sous `scheduler._lock`) : `trades.json`, `reco.json` (nouveau), `paper.json`,
+`trading_proposals.json`, `trading_settings.json`, `confirmations.json(l)`, `scans.jsonl`, `killmode*.json`,
+`killmode_bars/`, `killmode_ticks/`, `gemini_challenger.json`, `plus10_*`, `research.json`, `outbox.json`,
+`alerts_state.json`, `last_known.json`, `lab_morning.json`. Labo : `data/lab.db` (≈ 4,7 Go, écrit **seulement** par le
+worker ; lu par `lab.db.open_readonly`), `lab_grade.json`, `lab.heartbeat`.
+
+### 1.10 Configuration (noms seulement)
+
+Clés : `TWELVEDATA_API_KEY`, `FINNHUB_API_KEY`, `ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `ALPACA_PAPER`,
+`DISCORD_WEBHOOK_URL`, `DISCORD_BOT_TOKEN`, `JARVIS_DISCORD_OWNER_ID`, `JARVIS_LAB_API_KEY`. Réglages :
+`JARVIS_CAPITAL`, `JARVIS_RISK_EUR`, `JARVIS_RISK_PCT`, `JARVIS_IBKR_PLAN`, `JARVIS_IBKR_BRACKETS`,
+`JARVIS_WATCHLIST_STOCKS`, `JARVIS_WATCHLIST_CRYPTO`, `JARVIS_STOCK_CHECK_SECONDS`, `JARVIS_GRADE_MAX_AGE_H`,
+`JARVIS_MP_TAILLE_APRES_ARRET`, `JARVIS_NOTIFICATIONS`, `JARVIS_TRADE_DM`, `JARVIS_DISCORD_COCKPIT`,
+`JARVIS_NYSE_EXTRA_CLOSED`, `JARVIS_ALLOWED_ORIGINS`, `JARVIS_LAB_*`, chemins `JARVIS_*_PATH` (dont
+`JARVIS_RECO_PATH`, nouveau), `TWELVEDATA_CREDITS_PER_MINUTE`, `TWELVEDATA_CREDITS_PER_DAY` (nouveau, 800).
+Réglages de la note et du scanner : `data/trading_settings.json` (`settings`, `GET /api/trading/settings`).
+
+---
+
+## 2. Mes trades / Papier
+
+| | **Mes trades** (braise) | **Papier** (lavande) |
+|---|---|---|
+| Ce que c'est | trades IBKR que Simão **déclare** (`!prends`, « Je prends ce trade ») | chaque recommandation **actionnable** envoyée sur Discord, prise ou non, suivie **telle qu'envoyée** |
+| Source | `data/trades.json` (`scheduler.book`) | `data/reco.json` (`scheduler.reco_book`, PR 1) |
+| Entrée | prix déclaré | déclenchement de l'ordre stop du message (pire de l'ordre et de l'ouverture) |
+| Gestion | stop fixe, à l'entrée après TP2 (TP1 pour un KILL), sortie unique TP2 par défaut, pas de sortie au temps, `!sortie` pour le vrai prix | celle du message : GO confirmé = sortie unique TP2, stop à l'entrée après TP2, pas de sortie au temps ; KILL = un bracket par objectif, stop à l'entrée dès TP1, vendu à la clôture |
+| Taille | `sizing` / `sizing_regle` du plan | la quantité du message (sans taille dans le message : R seulement, € inconnus) |
+| Résultat | R brut, R net de frais estimés, € | R brut, $ et € nets de commissions IBKR, R net |
+| Contenu exclu | — | NO GO, GO annulés / expirés, ordres non déclenchés (comptés « pas déclenché »), `!avis`, `!plan`, témoins Killmode, Gemini, potentiel +10 |
+| Lien | — | `reco.linked_trade` : trade de Mes trades du même jour pris via `!prends … go` / `kill` → l'écart mesure l'exécution |
+
+**Commun aux deux** : signaux et plans du jour (scanner, GO / NO GO, confirmations), séances, agenda, labo, risque
+(grade, calculé sur Mes trades), santé, propositions.
+
+**Pas de « promotion papier → réel » dans JARVIS.** Le chemin réel d'une méthode : déclaration au labo (une par fil,
+pré-enregistrée) → essais contre témoin aléatoire → council autonome (déclare, approuve, promeut ; `!veto` de Simão)
+→ grade mesuré → risque proposé (les **hausses** de lettre restent à Simão, en proposition). Le cockpit le montre
+dans la vue Labo, pas comme un bouton.
+
+**Verrou de Mes trades** (choix de Simão du 28/10, contre l'avis de JARVIS, pari noté) : ouverture sur Papier, appui
+maintenu 1,1 s pour entrer dans Mes trades ; le serveur exigera `"confirm": "MES_TRADES"` sur les actions de cet espace
+(PR 2, `POST /api/cockpit/actions`).
+
+---
+
+## 3. Table écran ↔ données
+
+Fréquence : `state` toutes les 5 s (sans appel réseau) ; vues lourdes toutes les 10 s quand elles sont affichées.
+
+### 3.1 Barre du haut et rail
+
+| Élément | Source | Champs | Statut |
+|---|---|---|---|
+| Pastille « JARVIS · suivi il y a 40 s » | `state.jarvis.suivi` ← `scheduler.last_runs["suivi des trades et cockpit Discord"]` | `at`, `age_s`, `stale` | à exposer (PR 1 ✓) |
+| Pastille du labo | `state.lab` ← `heartbeat.read` | `etape`, `age_s`, `stale` (> 30 min) | à exposer (PR 1 ✓) |
+| Horloge Paris | horloge du navigateur | — | disponible |
+| Bascule d'espace | `?space=trades|paper` | — | PR 2 |
+| Bannière API muette | échec de `GET /api/cockpit/state` | — | PR 2 |
+
+### 3.2 Cockpit (1)
+
+| Carte | Source | Champs | Statut |
+|---|---|---|---|
+| Résumé · Mes trades | `state.portfolio` (space=trades) ← `realized_r`, `realized_r_net`, `sizing.risk_amount_eur`, positions | `latent{r,eur}`, `jour{r,r_net,eur,fees_eur}`, `semaine{…}`, `positions_ouvertes`, `capital.eur` « déclaré » | à exposer (PR 1 ✓) |
+| Résumé · Papier | `state.portfolio` (space=paper) ← `reco.bilan` | `si_tout_suivi{equite_eur, eur_net, r_net, taux_reussite, par_etat}`, `recos_du_jour`, `go_en_attente_de_confirmation` | à exposer (PR 1 ✓) |
+| Courbe du P&L cumulé du jour | sorties du jour (`_closed_rows`) | heure, R net, € | à exposer (PR 2, calculée côté page depuis `journal`) |
+| Séances (cadran) | `state.market_sessions` ← `calendar.py` | `etat`, `aujourd_hui{premarche, ouverture, cloture, fin_apres_bourse}`, `prochain_changement`, `prochaine_ouverture`, `raison_fermeture`, `demi_seance`, `ecart_paris_new_york_h` | à exposer (PR 1 ✓) |
+| Trades ouverts | `state.positions_open` (bloc §4.9) | piste stop → objectif, prochain TP + délai, P&L latent | à exposer (PR 1 ✓) |
+| Risque (3 jauges) | `state.risk` ← `lab_grade` | `risque_ouvert_pct` / `risque_ouvert_max_pct`, `r_du_jour_net` / `arret_jour_r`, `grades.{stock,crypto}` | à exposer (PR 1 ✓) |
+| Plans du jour | `state.plans_today` ← `research.last_scan`, `scheduler.confirm_state` | picks GO / NO GO, `composite`, `raisons`, `confirmation`, `declencheur` | à exposer (PR 1 ✓) |
+| À venir aujourd'hui | `state.agenda_today` ← horaires internes de JARVIS | `at`, `titre`, `categorie`, `source`, `passe` | à exposer (PR 1 ✓) ; calendrier économique et résultats : PR 3 |
+| Propositions en attente | `state.proposals_pending` ← `PR.proposals.pending()` | `id`, `kind`, `key`, `value`, `current`, `why` | disponible |
+
+### 3.3 Marchés (2)
+
+| Carte | Source | Statut |
+|---|---|---|
+| Graphique bougies + volume | `GET /api/cockpit/instrument/{symbol}?tf=` ← crypto Kraken ; action : cache du suivi, sinon Alpaca (16 min de retard). **Jamais Twelve Data** | à exposer (PR 1 ✓) |
+| Lignes SL / TP / entrée, zones, délais | `instrument.positions[]` (bloc §4.9) | à exposer (PR 1 ✓) |
+| Bandeau « En position » | `state.positions_open` | à exposer (PR 1 ✓) |
+| Watchlist | `GET /api/cockpit/instruments` ← `JARVIS_WATCHLIST_*` + symboles en position | à exposer (PR 1 ✓) |
+| Avis JARVIS, Nouveau plan | `GET /api/trading/opinion`, `POST /api/trading/plan` (via `POST /api/cockpit/actions`) | PR 2 |
+| Conseil « stop à … » (ligne info) | `position.conseil` (dernier conseil gardé) | à exposer (PR 1 ✓) |
+
+### 3.4 Positions (3)
+
+| Carte | Source | Statut |
+|---|---|---|
+| Trades sur le graphique | `GET /api/cockpit/positions/charts?tf=15m` (70 bougies) | à exposer (PR 1 ✓) |
+| Tableau des ouverts, ordres IBKR en prix | `positions_open[].ibkr_orders` (plan enregistré / message) | à exposer (PR 1 ✓) |
+| Clôturés récemment | `GET /api/cockpit/journal?space=` `clotures` | à exposer (PR 1 ✓) |
+| Conseils en prix | `GET /api/trading/advice` (action `advice`) | PR 2 |
+
+### 3.5 Risque (4)
+
+Grade par marché (lettre, plafond `risque_max`, fraîcheur `grade_age_h`, raison), risque ouvert, arrêt du jour,
+budget, dernier calcul de taille (champs `sizing` / `grade` d'un plan, PR 2), frais IBKR (`ibkr.fees` d'un plan ;
+barème `JARVIS_IBKR_PLAN`), rappel « risque au stop ≠ perte maximale » (`risk.note`). Source : `state.risk`.
+Statut : à exposer (PR 1 ✓) ; calcul de taille en étapes : PR 2 (vient d'un plan calculé).
+
+### 3.6 Labo (5)
+
+`GET /api/cockpit/lab` (cache 60 s) : `statut` (`lab_status.status` : rejeu, direct, méthode, déclaration en cours,
+battement), `declarations` (`council.load`), `regles` (`validator.counts`), `grade` (`payload` + historique),
+`lecons` (`lessons.counts`), `gemini` (`summary` j0 / j1), `killmode` (actif, KILL et témoins, derniers r_20e),
+`forward_test` (`paper.stats`), `propositions` (labo, grade, promotion), `veto`. Modules lourds (stratégies, n° 12
+ouverture, autopsie, ratés, 8-K, étude 8-K, Polymarket, potentiel, filtres) : listés dans `modules`, détaillés en
+PR 3 par leurs fonctions `cached(conn)`. Interrupteur Killmode et veto : PR 2 (actions protégées).
+
+### 3.7 Agenda (6)
+
+Frise du jour : `state.agenda_today` (PR 1 ✓). Résultats et 8-K du jour, « Cette semaine » : **manque** dans l'API du
+cockpit ; sources existantes `needs.economic_calendar`, `catalyst` (résultats Finnhub), `lab/sec8k` → PR 3.
+
+### 3.8 Journal (7)
+
+`GET /api/cockpit/journal?space=` : `clotures` (Mes trades : raison, R, R net, € ; Papier : recommandations closes
+et pas déclenchées), `desaccords`, `confirmations` (60 dernières lignes, état du jour), `forward_test`, `decisions`.
+
+### 3.9 Santé (8)
+
+`GET /api/cockpit/health` : `sources.lectures` (statut prouvé par la dernière lecture réussie, latence),
+`sources.twelve_data` (crédits du jour), `planificateur` (chaque boucle, âge, péremption), `labo` (battement),
+`discord` (file d'attente), `disque`, `erreurs_recentes` (50 derniers WARNING+, clés masquées). Bouton « Télécharger
+le diagnostic » : `GET /api/cockpit/diagnostics`.
+
+### 3.10 Inspecteur
+
+Prix, variation, état de séance : `instruments` ; mini-graphique avec SL / TP : `instrument/{symbol}` ; dernier plan :
+`instrument.plan_du_jour` ; dernier avis : `GET /api/trading/opinion` à la demande (PR 2).
+
+---
+
+## 4. Contrat d'API (`/api/cockpit/*`, hors OpenAPI)
+
+Unités : prix en **USD**, risque et résultats de règle en **EUR**, résultats en **R**, pourcentages en **%**,
+dates en **ISO-8601 UTC**. Valeur inconnue = `null` (jamais 0). En-têtes de sécurité (§9.1 du prompt) et
+`Cache-Control: no-store` sur toutes ces routes. `space` vaut `trades` ou `paper` (défaut `paper`), autre valeur →
+**400**. Symbole : `^[A-Z0-9.\-]{1,12}$` après mise en majuscules, sinon 400 ; `tf` ∈ `1m 5m 15m 1h 1j`, sinon 400.
+
+### 4.1 `GET /api/cockpit/state?space=` (5 s, aucun appel réseau)
+```json
+{"generated_at": "…", "space": "paper",
+ "jarvis": {"boucles": {"<nom>": {"at": "…", "ok": true, "every_s": 60, "duree_s": 0.4, "age_s": 12, "stale": false}},
+            "suivi": {"at": "…", "age_s": 12, "stale": false}},
+ "lab": {"etape": "direct stock", "le": "…", "age_s": 40, "stale": false},
+ "portfolio": {"positions_ouvertes": 1, "latent": {"r": 0.6, "eur": 12.1, "inconnus": 0},
+               "jour": {"n": 1, "r": 1.5, "r_net": 1.41, "eur": 28.07, "fees_eur": 1.72, "eur_inconnus": 0},
+               "semaine": {"…": "…"},
+               "capital": {"eur": 1000, "etiquette": "déclaré (JARVIS_CAPITAL)"},          // trades
+               "si_tout_suivi": {"depuis": "…", "equite_eur": 1028.07, "eur_net": 28.07, "r_net": 1.413,
+                                 "taux_reussite": 1.0, "par_etat": {"attente": 0, "ouvert": 1, "clos": 1, "pas_declenche": 0},
+                                 "par_type": {"go_confirme": 2, "kill": 0}, "latent_r": 0.6, "latent_eur": 12.1},  // paper
+               "recos_du_jour": {"…": 0}, "go_en_attente_de_confirmation": 0},                // paper
+ "positions_open": ["<bloc position §4.9>"],
+ "risk": {"grades": {"stock": {"grade": "F", "risque_propose": 0.0, "raison": "…", "risque_propose_eur": null}, "crypto": {}},
+          "grade_age_h": 1.2, "grade_max_age_h": 6, "risque_ouvert_pct": 0.0, "risque_ouvert_max_pct": 3.0,
+          "r_du_jour_net": 0.0, "arret_jour_r": -3.0, "risque_max_par_trade_eur": 20, "capital_declare_eur": 1000,
+          "note": "risque au stop ≠ perte maximale : …"},
+ "proposals_pending": [{"id": 3, "kind": "labo", "key": "…", "value": "…", "current": "…", "why": "…"}],
+ "market_sessions": {"nyse": {"etat": "premarche|seance|apres_bourse|ferme", "prochain_changement": "…",
+                              "prochaine_ouverture": "…", "aujourd_hui": {"premarche": "…", "ouverture": "…", "cloture": "…",
+                              "fin_apres_bourse": "…", "demi_seance": false}, "raison_fermeture": null,
+                              "ecart_paris_new_york_h": 5.0, "decalage_inhabituel": true},
+                     "crypto": {"etat": "ouvert", "label": "24/7"}},
+ "sources": {"lectures": {"Twelve Data": {"statut": "ok", "dernier_succes": "…", "latence_ms": 230, "ok": 41, "erreurs": 0}},
+             "twelve_data": {"jour_new_york": "2026-10-28", "depenses": 212, "par_jour": 800, "par_minute": 8},
+             "alpaca_configure": true, "twelve_data_configure": true},
+ "agenda_today": [{"at": "…", "titre": "Ouverture NYSE", "categorie": "marche", "source": "calendar.py", "importance": "haute", "passe": true}],
+ "plans_today": {"du_jour": true, "scan_at": "…", "picks": [{"symbol": "…", "verdict": "GO", "composite": 7.1,
+                 "raisons": [], "entry": 0, "stop": 0, "targets": [], "confirmation": "confirmé", "declencheur": 0}],
+                 "note_composite": "priorité, pas une probabilité"},
+ "killmode": {"actif": false, "depuis": "…"}}
+```
+
+### 4.2 `GET /api/cockpit/instruments?space=`
+`{"instruments": [{"symbol", "market": "stock|crypto", "price" (USD), "change_pct" (% sur la clôture de la veille),
+"source", "as_of", "freshness": {"age_s", "stale", "etat": "frais|perime|cloture"}, "spark": [clôtures 1 min],
+"en_position": bool}], "manque": null | "…"}`. Crypto : Kraken (cache 15 s) ; action : cache du suivi, sinon
+snapshots Alpaca IEX groupés (un appel par minute au plus).
+
+### 4.3 `GET /api/cockpit/instrument/{symbol}?space=&tf=&market=`
+`{"symbol", "market", "tf", "source", "manque", "bars": [[t (s UTC), o, h, l, c, v]] (130 avec un trade, 300 sinon),
+"as_of", "positions": [bloc §4.9], "plan_du_jour": pick | null}`.
+
+### 4.4 `GET /api/cockpit/positions/charts?space=&tf=15m`
+`{"charts": [{"position": bloc §4.9, "source", "manque", "bars": [70 bougies]}]}`.
+
+### 4.5 `GET /api/cockpit/reco?days=30`
+`{"recos": [{"id", "type": "go_confirme|kill", "type_fr", "symbol", "day", "sent_at", "message": {"entry", "stop",
+"targets", "qty", "risk_eur", "eurusd", "size_note", "sortie_unique", "valid_until", "brackets"?}, "status":
+"attente|ouvert|clos|pas_declenche", "status_fr", "fill": {"price", "at"}, "targets_hit", "stop_current",
+"last_price", "events", "result": {"r", "r_net", "usd_brut", "fees_usd", "usd", "eur", "raison", "closed_at",
+"taille"}, "unrealized": {"r", "usd", "eur"}, "mes_trades": {"id", "entry", "status", "r_net"} | null}],
+"bilan": reco.bilan, "gestion": {…}}`.
+
+### 4.6 `GET /api/cockpit/lab` (cache 60 s)
+`{"statut", "declarations", "regles", "grade", "lecons", "gemini", "killmode", "forward_test", "propositions",
+"veto", "modules": {"<nom>": "/api/lab/<nom>"}}` ; chaque partie peut valoir `{"erreur": "…"}` sans casser les autres.
+
+### 4.7 `GET /api/cockpit/journal?space=&limit=100`
+`{"clotures": [Mes trades : {"id", "symbol", "side", "entry", "exit_price", "raison", "corrige", "r", "r_net",
+"eur", "verdict", "against_jarvis", "closed_at"} | Papier : vue reco §4.5], "desaccords", "confirmations":
+{"lignes", "total", "aujourd_hui", "jour"}, "forward_test", "decisions"}`.
+
+### 4.8 `GET /api/cockpit/health` et `GET /api/cockpit/diagnostics`
+Santé : voir §3.9. Diagnostic : pièce jointe JSON (`Content-Disposition: attachment`) : boucles, labo, sources,
+compteurs, `cles_presentes` (booléens), `variables_jarvis_definies` (**noms seulement**), erreurs récentes. Aucun
+secret, aucune valeur de variable (testé).
+
+### 4.9 Bloc position (commun)
+```json
+{"id": "t1", "symbol": "NVDA", "market": "stock", "side": "long", "qty": 4, "entry": 176.9,
+ "created_at": "…", "verdict": "GO|NO GO|KILL|null", "against_jarvis": false,
+ "stop": {"price": 171.6, "initial": 171.6, "kind": "fixed|breakeven", "source": "IBKR, posé par toi · suivi par JARVIS"},
+ "targets": [{"name": "TP2", "price": 189.0, "pct": 6.84, "r_multiple": 2.28, "role": "exit|repere", "hit_at": null,
+              "eta_text": "…", "eta_median": "…", "eta_latest": "…", "late": false}],
+ "sortie_unique": 1, "targets_hit": 0, "last_price": 180.0, "as_of": "…", "price_source": "Twelve Data",
+ "freshness": {"age_s": 30, "stale": false, "etat": "frais"}, "move_pct": 1.75, "r_now": 0.58,
+ "unrealized": {"r": 0.58, "usd": 12.4, "eur": 10.69},
+ "fees_est": {"usd": 2.0, "r": 0.09, "bareme": "degressif"},
+ "exit_signals": [], "ibkr_orders": [{"quantity": 4, "entry": 176.9, "stop": 171.6, "name": "TP2", "take_profit": 189.0}],
+ "conseil": {"decision": "GARDER", "…": "…"}, "events": []}
+```
+`unrealized` vaut `null` quand la cotation est périmée ; `usd` / `eur` `null` sans quantité. En Papier : `fees_est`
+null (les commissions sont dans le résultat), `stop.source` « message Discord · suivi par JARVIS », `reco_id`.
+Les SL et TP viennent du trade enregistré (ou du message), jamais d'un calcul de l'interface.
+
+### 4.10 Actions (PR 2)
+`POST /api/cockpit/actions`, liste blanche de §9.4 du prompt, CSRF par cookie `jarvis_csrf` + `X-CSRF-Token` en plus
+de `reject_cross_site`, `"confirm": "MES_TRADES"` exigé dans l'espace Mes trades. Chaque action appelle la même
+fonction que sa route ou sa commande Discord : `_plan` / `build_plan`, `book.add`, `record_exit`, `book.close`,
+`book.remove`, `reopen`, `advise_book`, `scanner.scan(save=False)`, `proposals.decide`, `method.enqueue_veto`,
+`killmode.set_active`.
+
+---
+
+## 5. Écarts prompt ↔ JARVIS et décisions
+
+| Le prompt dit | JARVIS | Décision |
+|---|---|---|
+| « Santé des sources : `GET /api/health` (existe déjà) » | renvoie `{"status": "ok"}` seulement | **Ajouter** `core/sources_health.py` (dernier succès / erreur par source) ; `/api/health` inchangé |
+| « quota Twelve Data du jour » | seul un plafond par minute existait | **Ajouter** un compteur par jour de New York (ce processus) |
+| « dernier passage de chaque boucle » | absent | **Ajouter** `scheduler.last_runs` (posé par `_loop`) |
+| §9.3 : Papier = « équité, trésorerie, P&L du compte Alpaca fictif » | contredit §1 (Papier = recommandations ; Alpaca = labo) | **Papier = journal des recommandations** ; le compte Alpaca va dans la vue Labo (`lab.forward_test`) ; son équité n'est pas lue (appel réseau) |
+| Suivi « en direct » des recommandations | seulement à la clôture (`confirmations.jsonl`, `settle` Killmode) et un bracket par objectif | **Ajouté** : `reco.py` + `tick_reco`, gestion du message (sortie unique TP2 pour les GO) |
+| Suivi des recos par bougies | bougies 1 min du suivi ou 5 min | **Bougies 5 min**, une lecture Twelve Data par bougie close et par action suivie (≈ 78 crédits par action et par séance), Alpaca en secours. Côté serveur seulement : la page n'en déclenche aucune |
+| Entrée Papier « exactement telle qu'envoyée » | une exécution peut être plus haute que l'ordre (gap) | entrée = pire de l'ordre et de l'ouverture de la bougie ; le prix du message reste dans `message.entry` |
+| GO confirmé « 3 brackets si `JARVIS_IBKR_BRACKETS=3` » | `ibkr.single_target` | identique, figé à la confirmation (`message.sortie_unique`) |
+| Taille du KILL | le MP de `!kill` affiche les brackets au change de l'analyse, que le journal ne garde pas | change du jour lu à la reprise (BCE, 1,15 si muette) ; écart possible d'une action, noté ici |
+| Mise en service du journal | — | `depuis` = premier passage de `tick_reco` ; aucun KILL ni GO d'avant n'est repris (pas de reconstitution de tailles non gardées) |
+| Délais estimés des TP Papier | le MP de confirmation n'en donne pas | repris du plan du scanner (minutes de cotation, gardées par `confirm.register`) et repartis de l'heure du déclenchement ; KILL : « délai non estimé » |
+| CSP sur `/cockpit*` | `/cockpit` sert l'ancien cockpit (scripts et styles en ligne) | PR 1 : en-têtes sur `/api/cockpit/*` seulement ; `/cockpit` en PR 2 avec la nouvelle page ; `/cockpit/labo`, `/docs` jamais |
+| Agenda : résultats, 8-K, « Cette semaine » | sources existent, pas dans le cockpit | PR 3 |
+| Challenger Gemini et potentiel +10 envoient aussi des plans sur Discord | choix de Simão : Papier = GO confirmés + KILL | **exclus** du Papier, montrés au Labo ; à revoir si Simão veut les compter |
+| Graphique : bougies 1 m à 1 j de toute action | actions hors suivi : Alpaca 16 min de retard | dit dans `source` (« Alpaca (16 min de retard) ») ; sans clés Alpaca : état vide |
+| Équité / trésorerie IBKR | aucune connexion IBKR | **jamais affichées** ; capital `JARVIS_CAPITAL` étiqueté « déclaré » |
+| `TrustedHostMiddleware` | absent | non ajouté (casserait le healthcheck et le Funnel) |
+
+Modules de JARVIS que le prompt ne montrait pas : recherche avant l'ouverture (verdicts) → Journal / Labo ;
+visibilité Finnhub (audit anti-fuite) → Labo ; veille des routines Claude → Santé (alertes) ; conseils mesurés
+(`advice_stats`) → Journal ; propositions de grade et de méthode → Cockpit et Labo.
+
+---
+
+## 6. Parité avec le cockpit actuel (`app/web/cockpit.html`)
+
+| Fonction actuelle | Route utilisée aujourd'hui | Place dans le nouveau | PR |
+|---|---|---|---|
+| KPI : trades ouverts, latent, prochain objectif, journal | `/api/trading/trades`, `/api/trading/live` | Cockpit · Résumé et Trades ouverts (`state`) | 2 |
+| Planificateur de plan (crypto/action, long/short, entrée, stop, TP) | `POST /api/trading/plan` | formulaire « Nouveau plan » (`+`) → action `plan` | 2 |
+| « Je prends ce trade » (avec note) | `POST /api/trading/trades` | action `take` | 2 |
+| Propositions Approuver / Refuser | `/api/trading/proposals` | Cockpit · Propositions → actions `proposal_*` | 2 |
+| Conseils en prix | `GET /api/trading/advice` | Positions · Conseils → action `advice` | 2 |
+| Clôture avec prix | `POST /api/trading/trades/{id}/close` | action `close` (appui maintenu) | 2 |
+| Suppression | `DELETE /api/trading/trades/{id}` | action `delete` (appui maintenu) | 2 |
+| Journal des trades clôturés | `/api/trading/trades` | Journal (`journal?space=trades`) | 3 |
+| Mini-graphes 10 s | `/api/trading/live` | Positions · Trades sur le graphique (`positions/charts`) | 2 |
+| Chip NYSE | `/api/markets/us/status` | cadran de séance (`state.market_sessions`) | 2 |
+| Échelle des TP, alertes de retard, signes de sortie | trades | lignes de trade, piste, puces « en retard » | 2 |
+| Toasts, vibration, pause quand l'onglet est masqué | — | toasts, scrutation arrêtée onglet masqué | 2 |
+
+L'ancien cockpit reste servi sous `/cockpit` jusqu'à la PR 2, puis sous `/cockpit/ancien` jusqu'à validation par
+Simão. Le message Discord épinglé (`cockpit_text`) et les commandes `!…` ne changent pas.
+
+---
+
+## 7. Garde-fous vérifiés par les tests (PR 1)
+
+`tests/test_cockpit_api.py` : toutes les routes répondent sur `data/` vide ; en-têtes de sécurité sur `/api/cockpit/*`
+seulement (pas sur `/api/health`, `/cockpit`, `/cockpit/labo`) ; `space`, symbole, `tf`, `market` invalides → 400 ;
+diagnostic sans secret ni valeur de variable ; erreurs récentes sans clé ; blocs position long en sortie unique et
+short au point mort ; cotation périmée → pas de latent ; espaces séparés ; **aucun appel Twelve Data** depuis les
+routes du cockpit ; cadran un jour férié, un week-end, une demi-séance et pendant la semaine de décalage (ouverture
+14 h 30 à Paris). `tests/test_reco.py` : GO confirmé tel qu'envoyé (sortie unique, € au centime, commissions),
+ordre au-dessus de l'ouverture, stop sur gap, non déclenché à 11 h 30, sans taille, KILL (entrée dès TP1, vente à la
+clôture), reprise des KILL depuis la mise en service, une lecture par bougie close, lien avec Mes trades, taille du MP
+reprise par `tick_confirm`, bilan.

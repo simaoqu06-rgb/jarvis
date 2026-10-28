@@ -1,9 +1,11 @@
 """Appels HTTP communs : délai de 8 secondes, User-Agent identifiant, erreurs uniformes."""
+import time
 from typing import Any
 
 import httpx
 
 from app.config import TIMEOUT_SECONDS, USER_AGENT
+from app.core import sources_health
 
 
 class SourceError(Exception):
@@ -11,6 +13,18 @@ class SourceError(Exception):
 
 
 async def _get(url: str, params: dict | None, headers: dict | None, accept: str) -> httpx.Response:
+    """Lecture notée dans la santé des sources (cockpit), par hôte, sans l'URL ni ses paramètres."""
+    started = time.monotonic()
+    try:
+        response = await _get_raw(url, params, headers, accept)
+    except SourceError as exc:
+        sources_health.fail(url, exc, started)
+        raise
+    sources_health.ok(url, started)
+    return response
+
+
+async def _get_raw(url: str, params: dict | None, headers: dict | None, accept: str) -> httpx.Response:
     base_headers = {"User-Agent": USER_AGENT, "Accept": accept}
     if headers:
         base_headers.update(headers)
