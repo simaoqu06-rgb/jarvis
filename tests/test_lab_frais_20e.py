@@ -124,6 +124,16 @@ def test_brief_un_bracket_au_degressif(rep, monkeypatch):
     assert BRIEF._strategies(None)["marches"]["crypto"]["pullback"]["un_bracket_degressif"] is None
 
 
+def test_brief_ic_de_la_meme_esperance(rep, monkeypatch):
+    """Soirée du 27/10/2026 : en actions, l'espérance du brief est après commission ; son IC doit l'être aussi."""
+    monkeypatch.setattr(SS, "cached", lambda conn: rep)
+    got = BRIEF._strategies(None)["marches"]
+    stock, crypto = rep["strategies"]["stock"]["pullback"], rep["strategies"]["crypto"]["pullback"]
+    assert stock["ic95_ibkr"] and got["stock"]["pullback"]["ic95"] == stock["ic95_ibkr"]
+    assert got["stock"]["pullback"]["esperance_r"] == stock["esperance_ibkr_r"]
+    assert got["crypto"]["pullback"]["ic95"] == crypto["ic95"]       # crypto : pas de commission
+
+
 def test_par_rang_a_20_euros_au_degressif():
     """4e échange avec GPT (Q3) : par tranche de rang, l'espérance après toutes les commissions à 20 €."""
     db = LabDB(":memory:")
