@@ -7,12 +7,14 @@ Seul le compte fictif est utilisé (ALPACA_PAPER doit rester à true) : JARVIS n
 """
 import os
 import re
+import time as _time
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import httpx
 
 from app.config import TIMEOUT_SECONDS, USER_AGENT, secret
+from app.core import sources_health
 from app.core.http import SourceError
 
 DATA = "https://data.alpaca.markets"
@@ -37,6 +39,18 @@ async def _request(method: str, url: str, params: dict | None = None, body: dict
                    transport: httpx.AsyncBaseTransport | None = None):
     if not configured():
         raise SourceError(f"clés {KEY_NAME} / {SECRET_NAME} absentes")
+    started = _time.monotonic()
+    try:
+        out = await _request_raw(method, url, params, body, transport)
+    except SourceError as exc:
+        sources_health.fail(url, exc, started)
+        raise
+    sources_health.ok(url, started)
+    return out
+
+
+async def _request_raw(method: str, url: str, params: dict | None, body: dict | None,
+                       transport: httpx.AsyncBaseTransport | None):
     headers = {"APCA-API-KEY-ID": secret(KEY_NAME), "APCA-API-SECRET-KEY": secret(SECRET_NAME),
                "User-Agent": USER_AGENT, "Accept": "application/json"}
     try:

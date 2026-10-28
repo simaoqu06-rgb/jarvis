@@ -83,6 +83,10 @@ def register(state: dict, result: dict, day: str) -> list[str]:
             "last_bar": None, "events": [],
             "features": {k: features.get(k) for k in ("rsi", "rvol", "gap_pct")},
             "parts": {k: v["score"] for k, v in (plan["score"].get("parts") or {}).items()},
+            # Délais du plan (minutes de cotation) : le journal des recommandations (reco.py) les repart du déclenchement.
+            "plan_targets": [{k: t.get(k) for k in ("minutes_median", "minutes_p75", "reached_by_p75",
+                                                     "reached_by_p75_given_prev", "still_after_p75")}
+                             for t in plan["targets"]],
         }
     state.clear()
     state.update({"day": day, "gos": gos, "closed": False})

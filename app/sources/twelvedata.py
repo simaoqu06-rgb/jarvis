@@ -16,6 +16,23 @@ log = logging.getLogger(__name__)
 # Offre gratuite : 8 crédits par minute (1 crédit par symbole et par appel). Plan payant : à relever.
 PER_MINUTE = max(1, int(os.getenv("TWELVEDATA_CREDITS_PER_MINUTE", "8") or 8))
 _calls: deque[float] = deque()  # heures (monotones) des appels de la dernière minute
+# Crédits dépensés par ce processus et par jour de New York (cockpit : quota du jour, 800 en gratuit). Le worker du
+# labo a son propre compteur, invisible ici.
+DAILY_CREDITS = int(os.getenv("TWELVEDATA_CREDITS_PER_DAY", "800") or 800)
+credits: dict = {"day": None, "n": 0}
+
+
+def count_credit(now: datetime | None = None) -> None:
+    day = (now or datetime.now(timezone.utc)).astimezone(ZoneInfo("America/New_York")).date().isoformat()
+    if credits["day"] != day:
+        credits.update(day=day, n=0)
+    credits["n"] += 1
+
+
+def credits_today(now: datetime | None = None) -> dict:
+    day = (now or datetime.now(timezone.utc)).astimezone(ZoneInfo("America/New_York")).date().isoformat()
+    return {"jour_new_york": day, "depenses": credits["n"] if credits["day"] == day else 0, "par_jour": DAILY_CREDITS,
+            "par_minute": PER_MINUTE, "portee": "processus web seulement (le worker du labo compte à part)"}
 
 
 MAX_WAIT = 2.0  # au-delà, on n'attend pas : la source de secours prend le relais
@@ -33,6 +50,7 @@ async def _spend() -> None:
             _calls.popleft()
         if len(_calls) < PER_MINUTE:
             _calls.append(now)
+            count_credit()
             return
         wait = 60 - (now - _calls[0]) + 0.1
         if wait > MAX_WAIT:

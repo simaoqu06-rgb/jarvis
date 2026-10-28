@@ -48,3 +48,13 @@ def un_bracket_par_objectif(monkeypatch):
     """Les tests d'origine décrivent un bracket par objectif (JARVIS_IBKR_BRACKETS=3) ; ceux de la sortie unique sur
     TP2, défaut depuis le 25/10/2026 (test_ibkr.py, test_sortie_unique.py), retirent la variable."""
     monkeypatch.setenv("JARVIS_IBKR_BRACKETS", "3")
+
+
+@pytest.fixture(autouse=True)
+def journal_des_recos_en_memoire(monkeypatch):
+    """Le journal des recommandations (data/reco.json) n'est jamais écrit par les tests : tick_confirm y note les GO
+    confirmés."""
+    from app import scheduler
+    from app.trading import reco
+
+    monkeypatch.setattr(scheduler, "reco_book", reco.RecoBook(None))

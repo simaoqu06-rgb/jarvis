@@ -124,6 +124,28 @@ async def internet_only_lab(request: Request, call_next):
     return await call_next(request)
 
 
+# En-têtes de sécurité du nouveau cockpit (§9.1 du prompt de refonte) : seulement sur ses routes. /cockpit sert encore
+# l'ancien cockpit (scripts et styles en ligne) jusqu'à la PR 2 ; /cockpit/labo et /docs ne sont pas concernés.
+COCKPIT_HEADERS = {
+    "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
+                               "connect-src 'self'; font-src 'self'; manifest-src 'self'; object-src 'none'; "
+                               "base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+    "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY",
+    "Cross-Origin-Opener-Policy": "same-origin", "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+}
+
+
+@app.middleware("http")
+async def cockpit_security_headers(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    if path == "/api/cockpit" or path.startswith("/api/cockpit/"):
+        for k, v in COCKPIT_HEADERS.items():
+            response.headers[k] = v
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 def _list(value: str) -> list[str]:
     items = [v for v in value.split(",") if v.strip()]
     if not items:
@@ -1003,6 +1025,11 @@ def lab_research_bilan():
 
 
 COCKPIT_HTML = Path(__file__).parent / "web" / "cockpit.html"
+
+# Nouveau cockpit : contrat /api/cockpit/* (lecture), hors OpenAPI.
+from app.web import cockpit_api  # noqa: E402  (importé après les routes : il lit scheduler, déjà chargé)
+
+app.include_router(cockpit_api.router)
 
 
 # Icônes et manifeste : le cockpit s'installe comme une appli sur l'écran d'accueil du téléphone.
