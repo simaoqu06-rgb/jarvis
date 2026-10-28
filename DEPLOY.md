@@ -64,9 +64,9 @@ Les routes ne sont ouvertes que sur le serveur lui-même (127.0.0.1), pas sur In
 
 ## Ouvrir le Trading Cockpit sur ton PC et ton téléphone (Tailscale)
 
-Le cockpit est à l'adresse `/cockpit` du serveur (page du labo : `/cockpit/labo`), qui n'est pas ouvert sur Internet. Tailscale
-(gratuit pour un usage personnel) crée un réseau privé entre tes appareils : le cockpit n'est
-visible que par toi, sans ouvrir de port dans le firewall.
+Le cockpit est à l'adresse `/cockpit` du serveur (ancien cockpit : `/cockpit/ancien` ; page du labo : `/cockpit/labo`),
+qui n'est pas ouvert sur Internet. Tailscale (gratuit pour un usage personnel) crée un réseau privé entre tes
+appareils : le cockpit n'est visible que par toi, sans ouvrir de port dans le firewall.
 
 1. Crée un compte sur https://login.tailscale.com/start et installe l'application Tailscale sur
    ton PC et ton téléphone (connecte-les au même compte).
@@ -81,7 +81,20 @@ visible que par toi, sans ouvrir de port dans le firewall.
    Si la commande `serve` affiche un lien pour activer HTTPS sur ton réseau Tailscale, ouvre-le et
    accepte, puis relance la commande.
 3. `tailscale serve status` affiche l'adresse, du type `https://<nom-du-serveur>.<ton-réseau>.ts.net:4443`.
-   Ouvre `https://<…>.ts.net:4443/cockpit` sur ton PC ou ton téléphone (ajoute-la à l'écran d'accueil).
+   Ouvre `https://<…>.ts.net:4443/cockpit` sur ton PC ou ton téléphone. Sur l'iPhone : Safari > Partager > « Sur
+   l'écran d'accueil » ; le cockpit s'ouvre alors comme une appli, barre d'onglets en bas.
+
+Le cockpit exige **HTTPS** (port 4443) : le jeton qui protège ses actions est un cookie sécurisé, que le navigateur
+ne renvoie pas en HTTP. Il ne fonctionne donc ni en `http://<ip>:8000` ni sur le port 443, réservé au Funnel public
+du labo (`/api/lab/*` seulement, voir plus bas).
+
+**La page ne s'ouvre pas sur l'iPhone ?** Coupe le **Relais privé iCloud** (Réglages > ton nom > iCloud > Relais
+privé, ou dans les réglages du réseau Wi-Fi utilisé) et vérifie que l'appli Tailscale est connectée : le relais peut
+contourner le DNS de Tailscale, et l'adresse `.ts.net:4443` ne répond plus.
+
+Après une mise à jour du cockpit, recharge la page une fois (les fichiers sont versionnés, le navigateur prend la
+nouvelle version). Si une vue reste vide, le bouton « Télécharger le diagnostic » de la vue Santé (touche `8`)
+produit un JSON sans aucune clé ni valeur de variable, à transmettre tel quel.
 
 Le message « Trading Cockpit » apparaît aussi sur Discord dès le premier trade suivi : épingle-le
 une fois (clic droit > Épingler), JARVIS le réécrit chaque minute.
@@ -293,8 +306,12 @@ Change la clé (`JARVIS_LAB_API_KEY`, puis `docker compose up -d`) si elle a pu 
 ## Mettre à jour
 
 ```bash
-cd jarvis && git pull && docker compose up -d --build && docker image prune -f
+ssh root@2.31.19.106
+cd /root/jarvis && git pull && docker compose up -d --build && docker image prune -f
 ```
+
+Puis ouvre `https://jarvis.tail420262.ts.net:4443/cockpit` pour vérifier (la pastille « JARVIS » en haut passe au
+vert dès le premier passage du suivi, une minute environ, et la vue Santé montre chaque boucle).
 
 `docker image prune -f` efface les anciennes versions de l'image que chaque mise à jour laisse derrière elle
 (images « sans nom », plus utilisées par aucun conteneur). Les données de `data/` ne sont pas touchées.

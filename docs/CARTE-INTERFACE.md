@@ -3,6 +3,7 @@
 Phase 1 de la refonte (prompt corrigé du 28/10/2026, `/mnt/project-files/cockpit/prompt-cockpit-corrige-2026-10-28.md`).
 Ce document relie chaque écran du futur cockpit à une donnée réelle de JARVIS : fonction, fichier, route, fréquence.
 Il est la référence des PR 2 et 3 : **une valeur affichée qui n'est pas ici n'a pas le droit d'exister**.
+Depuis la PR 3, les huit vues sont en place ; « PR 3 ✓ » marque ce qu'elle a ajouté.
 
 Statuts : **disponible** (lu tel quel), **à exposer** (existe dans JARVIS, la PR 1 l'expose sous `/api/cockpit/*`,
 sauf mention « PR 2/3 »), **manque** (n'existe pas : état vide qui dit pourquoi).
@@ -202,7 +203,7 @@ Fréquence : `state` toutes les 5 s (sans appel réseau) ; vues lourdes toutes l
 | Trades ouverts | `state.positions_open` (bloc §4.9) | piste stop → objectif, prochain TP + délai, P&L latent | à exposer (PR 1 ✓) |
 | Risque (3 jauges) | `state.risk` ← `lab_grade` | `risque_ouvert_pct` / `risque_ouvert_max_pct`, `r_du_jour_net` / `arret_jour_r`, `grades.{stock,crypto}` | à exposer (PR 1 ✓) |
 | Plans du jour | `state.plans_today` ← `research.last_scan`, `scheduler.confirm_state` | picks GO / NO GO, `composite`, `raisons`, `confirmation`, `declencheur` | à exposer (PR 1 ✓) |
-| À venir aujourd'hui | `state.agenda_today` ← horaires internes de JARVIS | `at`, `titre`, `categorie`, `source`, `passe` | à exposer (PR 1 ✓) ; calendrier économique et résultats : PR 3 |
+| À venir aujourd'hui | `state.agenda_today` ← horaires internes de JARVIS | `at`, `titre`, `categorie`, `source`, `passe` | à exposer (PR 1 ✓) ; calendrier économique, résultats et 8-K : vue Agenda (PR 3 ✓) |
 | Propositions en attente | `state.proposals_pending` ← `PR.proposals.pending()` | `id`, `kind`, `key`, `value`, `current`, `why` | disponible |
 
 ### 3.3 Marchés (2)
@@ -228,36 +229,57 @@ Fréquence : `state` toutes les 5 s (sans appel réseau) ; vues lourdes toutes l
 
 ### 3.5 Risque (4)
 
-Grade par marché (lettre, plafond `risque_max`, fraîcheur `grade_age_h`, raison), risque ouvert, arrêt du jour,
-budget, dernier calcul de taille (champs `sizing` / `grade` d'un plan, PR 2), frais IBKR (`ibkr.fees` d'un plan ;
-barème `JARVIS_IBKR_PLAN`), rappel « risque au stop ≠ perte maximale » (`risk.note`). Source : `state.risk`.
-Statut : à exposer (PR 1 ✓) ; calcul de taille en étapes : PR 2 (vient d'un plan calculé).
+| Carte | Source | Statut |
+|---|---|---|
+| Grade par marché | `state.risk.grades.{stock,crypto}` ← `lab_grade.risk_now` : lettre, `risque_propose`, `risque_grade`, plafond `risque_max`, `raison`, `observation`, `perime` ; « jamais calculé par le labo » si `non_note` | PR 3 ✓ |
+| Risque ouvert et arrêt du jour | `state.risk` : `risque_ouvert_pct` / `risque_ouvert_max_pct`, `r_du_jour_net` / `arret_jour_r`, `budget_libre_pct`, `risque_max_par_trade_eur`, `capital_declare_eur` (« déclaré ») ; rappel `risk.note` (risque au stop ≠ perte maximale) | PR 3 ✓ |
+| Dernier calcul de taille | `sizing` et `grade` du dernier plan calculé **dans ce navigateur** (action `plan`, gardé en `localStorage` `cockpit.lastPlan`) : capital × % du grade, plafond de 20 €, taille ; sinon état vide « Aucun plan calculé » | PR 3 ✓ |
+| Frais IBKR | `state.risk.ibkr` ← `killmode.IBKR_PLANS`, `JARVIS_IBKR_PLAN`, `ibkr.single_exit()` : barème du compte, par action, minimum, plafond, frais de place, plancher d'un aller-retour en $ et en R à 20 € ; frais du dernier plan (`plan.ibkr`) | PR 3 ✓ |
+| Grade détaillé, « Ta mise de 20 € chez IBKR » | `GET /api/cockpit/texte/grade` et `/texte/frais` (mêmes fonctions que `!grade`, `!frais`) | PR 3 ✓ |
 
 ### 3.6 Labo (5)
 
 `GET /api/cockpit/lab` (cache 60 s) : `statut` (`lab_status.status` : rejeu, direct, méthode, déclaration en cours,
 battement), `declarations` (`council.load`), `regles` (`validator.counts`), `grade` (`payload` + historique),
 `lecons` (`lessons.counts`), `gemini` (`summary` j0 / j1), `killmode` (actif, KILL et témoins, derniers r_20e),
-`forward_test` (`paper.stats`), `propositions` (labo, grade, promotion), `veto`. Modules lourds (stratégies, n° 12
-ouverture, autopsie, ratés, 8-K, étude 8-K, Polymarket, potentiel, filtres) : listés dans `modules`, détaillés en
-PR 3 par leurs fonctions `cached(conn)`. Interrupteur Killmode et veto : PR 2 (actions protégées).
+`forward_test` (`paper.stats`), `propositions` (labo, grade, promotion), `veto`, `base` (taille de `lab.db`).
+
+| Carte | Source | Statut |
+|---|---|---|
+| Labo (méthode, rejeu, règles, leçons) + texte de `!labo` | `lab.statut`, `lab.regles`, `lab.lecons`, `lab.base` ; `GET /api/cockpit/texte/labo` | PR 3 ✓ |
+| Killmode (interrupteur, derniers KILL, journal complet) | `lab.killmode` ; interrupteur : actions `killmode_on/off` (appui maintenu) ; journal : `/texte/killmode` (`killmode.bilan_text`, **sans solder** : `!kill bilan` solde avec les bougies de la séance) | PR 3 ✓ |
+| Modules du labo (onglets) | `/texte/{strategies, ouverture, gemini, lecons, autopsie, rates, etude8k, sec8k, polyfed, potentiel}` = le texte exact de `!strategies`, `!ouverture`, `!gemini`, `!lecons`, `!autopsie`, `!rates`, `!etude8k`, `!8k`, `!fed`, `!potentiel` ; onglet gardé en `localStorage` | PR 3 ✓ |
+| Council et veto | `lab.propositions` (labo, grade, promotion ; statut) ; `!veto` : action `veto` (appui maintenu) | PR 3 ✓ |
+| Déclarations du council | `lab.declarations` (les plus récentes : nom, marché, soirée) | PR 3 ✓ |
+
+La page `/cockpit/labo` reste servie (lien « page Labo actuelle ») jusqu'à validation par Simão.
 
 ### 3.7 Agenda (6)
 
-Frise du jour : `state.agenda_today` (PR 1 ✓). Résultats et 8-K du jour, « Cette semaine » : **manque** dans l'API du
-cockpit ; sources existantes `needs.economic_calendar`, `catalyst` (résultats Finnhub), `lab/sec8k` → PR 3.
+| Carte | Source | Statut |
+|---|---|---|
+| Aujourd'hui (frise) | `agenda.aujourd_hui` (horaires internes de JARVIS, = `state.agenda_today`) + événements économiques du jour, fusionnés par heure de Paris ; passé atténué, ligne « maintenant » | PR 3 ✓ |
+| Résultats du jour | `agenda.resultats` ← `finnhub.earnings_calendar` (clé `FINNHUB_API_KEY`) : valeurs suivies (BPA estimé / réel, avant ouverture / après clôture) et total de la cote par moment | PR 3 ✓ |
+| 8-K des trois derniers jours | `agenda.sec8k` ← `edgar.tickers` + `edgar.submissions` (`SEC_USER_AGENT`) : formulaire, items traduits, heure d'acceptation (« douteuse » si EDGAR l'a mal datée), lien EDGAR | PR 3 ✓ |
+| Cette semaine | `agenda.economique` ← `needs.economic_calendar` (Helious, impact fort ou moyen, US / zone euro / France / Allemagne, comme le point du matin) + résultats suivis par jour | PR 3 ✓ |
+
+Valeurs suivies (`agenda.valeurs_suivies`) : `JARVIS_WATCHLIST_STOCKS`, actions en position (deux espaces), plans du
+jour ; 20 au plus pour la SEC.
 
 ### 3.8 Journal (7)
 
 `GET /api/cockpit/journal?space=` : `clotures` (Mes trades : raison, R, R net, € ; Papier : recommandations closes
 et pas déclenchées), `desaccords`, `confirmations` (60 dernières lignes, état du jour), `forward_test`, `decisions`.
+Chaque carte ouvre aussi le texte complet de la commande Discord : `/texte/desaccords` (`!desaccords`),
+`/texte/confirmations` (`!confirmations`), `/texte/bilan` (`!bilan`). PR 3 ✓.
 
 ### 3.9 Santé (8)
 
 `GET /api/cockpit/health` : `sources.lectures` (statut prouvé par la dernière lecture réussie, latence),
 `sources.twelve_data` (crédits du jour), `planificateur` (chaque boucle, âge, péremption), `labo` (battement),
 `discord` (file d'attente), `disque`, `erreurs_recentes` (50 derniers WARNING+, clés masquées). Bouton « Télécharger
-le diagnostic » : `GET /api/cockpit/diagnostics`.
+le diagnostic » : `GET /api/cockpit/diagnostics`. PR 3 ✓ (grille des sources, crédits Twelve Data du jour, Alpaca,
+JARVIS et labo, boucles, erreurs récentes).
 
 ### 3.10 Inspecteur
 
@@ -333,7 +355,8 @@ snapshots Alpaca IEX groupés (un appel par minute au plus).
 
 ### 4.6 `GET /api/cockpit/lab` (cache 60 s)
 `{"statut", "declarations", "regles", "grade", "lecons", "gemini", "killmode", "forward_test", "propositions",
-"veto", "modules": {"<nom>": "/api/lab/<nom>"}}` ; chaque partie peut valoir `{"erreur": "…"}` sans casser les autres.
+"veto", "base", "modules": {"<nom>": "/api/cockpit/texte/<nom>"}}` ; chaque partie peut valoir `{"erreur": "…"}` sans
+casser les autres.
 
 ### 4.7 `GET /api/cockpit/journal?space=&limit=100`
 `{"clotures": [Mes trades : {"id", "symbol", "side", "entry", "exit_price", "raison", "corrige", "r", "r_net",
@@ -393,6 +416,25 @@ Journal : une ligne JSON par appel dans `data/cockpit_actions.jsonl` (`JARVIS_CO
 espace, arguments (textes coupés à 120 caractères), `ok`, statut HTTP, résultat (300 caractères). Aucune action ne
 passe d'ordre (ni IBKR ni Alpaca) ni ne touche une clé.
 
+### 4.11 `GET /api/cockpit/texte/{module}` (PR 3 ✓, cache 2 min)
+Le texte exact d'une commande Discord, par la même fonction que le bot, en lecture seule. Liste blanche
+`TEXT_MODULES` (module inconnu → **400**) : `labo` (`!labo`), `strategies`, `ouverture`, `gemini`, `killmode`
+(`!kill bilan`, lu sans solder), `lecons`, `grade`, `frais`, `autopsie`, `rates`, `sec8k` (`!8k`), `etude8k`,
+`polyfed` (`!fed`), `potentiel`, `bilan`, `confirmations`, `desaccords`. Réponse : `{"module", "titre", "commande",
+"texte", "erreur", "at", "note"}` ; une base illisible rend `texte: null` et `erreur` (200, gardé 15 s), sans casser
+la vue. La page rend le Markdown de Discord (gras, `code`, blocs, citations) sans `innerHTML`.
+
+### 4.12 `GET /api/cockpit/agenda` (PR 3 ✓)
+`{"generated_at", "aujourd_hui", "seances", "valeurs_suivies", "economique": {"evenements": [{"at", "titre", "pays",
+"impact", "prevision", "precedent", "reel", "statut"}], "source", "attribution", "maj", "stale", "message", "filtre"},
+"resultats": {"suivies": [{"symbol", "date", "heure", "trimestre", "bpa_estime", "bpa_reel", "ca_estime",
+"ca_reel"}], "jours": {"<date>": {"total", "avant_ouverture", "apres_cloture", "pendant", "heure_inconnue"}},
+"source"} | {"manque"}, "sec8k": {"depots": [{"symbol", "form", "date", "accepte", "heure_douteuse", "items":
+[{"code", "label"}], "lien"}], "valeurs", "sans_cik", "erreurs", "depuis", "source", "note"} | {"manque"}}`.
+Sources gratuites en cache côté serveur : calendrier économique 1 h (`needs.resolve`), résultats 1 h par jour de New
+York, liste des CIK 24 h, dépôts 15 min par société, erreur retentée après 1 min. Une partie en panne rend
+`{"erreur"}` sans effacer les autres. **Jamais Twelve Data** (testé).
+
 ---
 
 ## 5. Écarts prompt ↔ JARVIS et décisions
@@ -414,7 +456,10 @@ passe d'ordre (ni IBKR ni Alpaca) ni ne touche une clé.
 | Actions de §9.4 | l'avis (touche A, inspecteur) et la fiche société n'y figurent pas | **ajoutées** (`opinion`, `company`) : mêmes fonctions que `!avis` et `!societe`, sans écriture |
 | « la page ne déclenche jamais Twelve Data » | un plan, une prise, une reprise, un avis, une fiche et le scanner lisent l'historique | la **navigation** n'en déclenche aucun (testé) ; ces actions, au clic seulement, en dépensent comme sur Discord, et l'écran le dit à côté du bouton |
 | Vue Marchés en PR 3 (§15) | le graphique porte les SL / TP des positions, cœur de la PR 2 | **livrée en PR 2** avec Cockpit et Positions ; les cinq autres vues ont un état vide qui renvoie vers la page Labo, l'ancien cockpit ou le diagnostic |
-| Agenda : résultats, 8-K, « Cette semaine » | sources existent, pas dans le cockpit | PR 3 |
+| Agenda : résultats, 8-K, « Cette semaine » | sources existent, pas dans le cockpit | **PR 3 ✓** : `GET /api/cockpit/agenda` (Helious, Finnhub, SEC EDGAR, en cache) |
+| Labo : « déclarations, n° 12, Gemini, leçons, autopsie, ratés, 8-K, Polymarket » en cartes | chaque module a déjà sa commande Discord, qui est la référence de Simão | **PR 3 ✓** : le cockpit montre le texte exact de la commande (`/texte/{module}`, même fonction) plutôt qu'une seconde mise en forme qui pourrait diverger ; chiffres clés en tuiles à côté |
+| Risque : « dernier calcul de taille en étapes » | aucun plan n'est gardé côté serveur sans prise | **PR 3 ✓** : dernier plan calculé dans ce navigateur (`localStorage`) ; sinon état vide qui l'explique |
+| Killmode : journal | `!kill bilan` solde les appels avec les bougies de la séance (Twelve Data) | la page lit le journal **sans solder** et le dit ; le solde reste sur Discord |
 | Challenger Gemini et potentiel +10 envoient aussi des plans sur Discord | choix de Simão : Papier = GO confirmés + KILL | **exclus** du Papier, montrés au Labo ; à revoir si Simão veut les compter |
 | Graphique : bougies 1 m à 1 j de toute action | actions hors suivi : Alpaca 16 min de retard | dit dans `source` (« Alpaca (16 min de retard) ») ; sans clés Alpaca : état vide |
 | Équité / trésorerie IBKR | aucune connexion IBKR | **jamais affichées** ; capital `JARVIS_CAPITAL` étiqueté « déclaré » |
@@ -437,7 +482,8 @@ visibilité Finnhub (audit anti-fuite) → Labo ; veille des routines Claude →
 | Conseils en prix | `GET /api/trading/advice` | Positions · Conseils → action `advice` | 2 ✓ |
 | Clôture avec prix | `POST /api/trading/trades/{id}/close` | action `close` (appui maintenu) | 2 ✓ |
 | Suppression | `DELETE /api/trading/trades/{id}` | action `delete` (appui maintenu) | 2 ✓ |
-| Journal des trades clôturés | `/api/trading/trades` | Journal (`journal?space=trades`) | 3 |
+| Journal des trades clôturés | `/api/trading/trades` | Journal (`journal?space=trades`) | 3 ✓ |
+| Page du labo (lecture seule) | `/cockpit/labo`, `/api/lab/*` | vue Labo (`lab`, `texte/{module}`) ; `/cockpit/labo` reste servie | 3 ✓ |
 | Mini-graphes 10 s | `/api/trading/live` | Positions · Trades sur le graphique (`positions/charts`) | 2 ✓ |
 | Chip NYSE | `/api/markets/us/status` | cadran de séance (`state.market_sessions`) | 2 ✓ |
 | Échelle des TP, alertes de retard, signes de sortie | trades | lignes de trade, piste, puces « en retard » | 2 ✓ |
@@ -449,7 +495,7 @@ changent pas.
 
 ---
 
-## 7. Garde-fous vérifiés par les tests (PR 1 et 2)
+## 7. Garde-fous vérifiés par les tests (PR 1, 2 et 3)
 
 `tests/test_cockpit_api.py` : toutes les routes répondent sur `data/` vide ; en-têtes de sécurité sur `/api/cockpit/*`
 et `/cockpit` (pas sur `/api/health`, `/cockpit/ancien`, `/cockpit/labo`, `/docs`) ; `space`, symbole, `tf`, `market` invalides → 400 ;
@@ -469,3 +515,11 @@ trades refusées en Papier ou sans `MES_TRADES` (403, rien d'écrit) ; liste des
 sortie réelle, reprise, propositions, veto et Killmode passent par les mêmes fonctions que les routes et `!…` ; erreur
 inattendue sans détail ; journal des actions. Contrôle à la main dans Chromium (1440, 1100 et 390 px, deux espaces) :
 zéro erreur JavaScript, zéro violation CSP, aucun débordement horizontal, appui maintenu au doigt et au clavier.
+
+PR 3 (`tests/test_cockpit_api.py`) : `state.risk.ibkr` porte les barèmes de Killmode et le plancher en R ; `/texte` :
+module hors liste → 400, même texte que la fonction du bot, cache de 2 min, base illisible → 200 avec `erreur`, chaque
+module répond sur `data/` vide ; `/agenda` : filtres (impact, pays, 7 jours ; 8-K seulement, trois jours), valeurs
+suivies, items traduits, lien EDGAR, cache par société, aucune clé dans la réponse, clés absentes → `manque`, source
+en panne → `erreur` sans effacer le reste, et toujours aucun appel Twelve Data (garde du `client`). Contrôle à la main
+des huit vues dans Chromium à 1440, 1100 et 390 px, dans les deux espaces : zéro erreur JavaScript, zéro violation
+CSP, zéro requête en échec, aucun débordement horizontal.
