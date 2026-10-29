@@ -49,11 +49,15 @@ def up_to_date(**over) -> dict:
             "pr_en_retard": [], "code_touche": False, "erreur": None} | over
 
 
-def make_lab(path: Path, garde: dict | None = None, events: list[tuple] = ()) -> None:
+def make_lab(path: Path, garde: dict | None = None, events: list[tuple] = (), promoted: dict | None = None) -> None:
     conn = sqlite3.connect(path)
     conn.execute("CREATE TABLE progress (job TEXT NOT NULL, key TEXT NOT NULL, value TEXT, PRIMARY KEY (job, key))")
     conn.execute("CREATE TABLE lab_events (id INTEGER PRIMARY KEY, created_at TEXT NOT NULL, ts INTEGER NOT NULL, "
                  "kind TEXT NOT NULL, version TEXT, text TEXT NOT NULL, data TEXT)")
+    conn.execute("CREATE TABLE method_versions (version TEXT PRIMARY KEY, created_at TEXT NOT NULL, settings TEXT "
+                 "NOT NULL)")
+    for v, by in (promoted or {}).items():
+        conn.execute("INSERT INTO method_versions VALUES (?, ?, ?)", (v, iso(NOW), json.dumps({"promu_par": by})))
     if garde:
         conn.execute("INSERT INTO progress VALUES ('lab', 'garde_v1', ?)", (json.dumps(garde),))
     for e in events:
@@ -88,6 +92,7 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(bot, "status", {"connecte": True, "depuis": iso(NOW - timedelta(hours=1)),
                                         "derniere_erreur": None, "erreur_type": None, "erreur_le": None})
     monkeypatch.setattr(A, "STARTED", NOW - timedelta(hours=1))
+    monkeypatch.setattr(A, "_rebuild", {"since": None})
     monkeypatch.setattr(A, "book", A.AttentionBook(str(tmp_path / "attention.json")))
     monkeypatch.setattr(version, "snapshot", lambda: up_to_date())
     monkeypatch.setattr(API, "risk", lambda now: dict(HEALTHY_RISK))
@@ -98,6 +103,7 @@ def env(monkeypatch, tmp_path):
     make_lab(db)
     monkeypatch.setenv("JARVIS_LAB_DB", str(db))
     beat(tmp_path, NOW - timedelta(minutes=2))
+    monkeypatch.setattr(scheduler, "running", {})
     monkeypatch.setattr(scheduler, "last_runs", {
         name: {"at": iso(NOW - timedelta(seconds=20)), "ok": True, "every_s": every, "echecs_suite": 0}
         for name, every in A.expected_loops()})
@@ -206,9 +212,10 @@ def test_decisions_du_council_et_veto_sur_la_derniere(env):
         (1, iso(NOW - timedelta(hours=5)), ts - 3600, "council", None, "**Essai** de `rebond`"),
         (2, iso(NOW - timedelta(hours=2)), ts, "bascule", "v7", "Méthode v7 en place"),
         (3, iso(NOW - timedelta(days=5)), ts - 5 * 86400, "bascule", "v6", "trop vieux"),
-    ])
+    ], promoted={"v7": "council", "v6": "simao"})
     found = run()
     assert {"council:decision:1", "council:decision:2"} <= keys(found) and "council:decision:3" not in keys(found)
+    assert one(found, "council:decision:2")["title"] == "Le council a mis en place la méthode v7"
     assert [s.get("action") for s in one(found, "council:decision:2")["steps"] if s.get("action")] == ["veto"]
     assert not [s for s in one(found, "council:decision:1")["steps"] if s.get("action")]
     assert one(found, "council:decision:1")["detail"] == "Essai de rebond"
@@ -220,6 +227,18 @@ def test_decisions_du_council_et_veto_sur_la_derniere(env):
     conn.close()
     found = run()
     assert not [s for s in one(found, "council:decision:2")["steps"] if s.get("action")]
+
+
+def test_promotion_approuvee_par_simao_sans_veto(env):
+    (env / "lab.db").unlink()
+    ts = int((NOW - timedelta(hours=2)).timestamp())
+    make_lab(env / "lab.db", events=[
+        (1, iso(NOW - timedelta(hours=5)), ts - 3600, "council", None, "Essai de rebond"),
+        (2, iso(NOW - timedelta(hours=2)), ts, "bascule", "v7", "Méthode v7 en place (promotion approuvée par Simão)"),
+    ], promoted={"v7": "simao"})
+    found = run()
+    assert one(found, "council:decision:2")["title"] == "Méthode v7 en place (promotion que tu as approuvée)"
+    assert not [s for f in found for s in f["steps"] if s.get("action")]  # le veto viserait autre chose
 
 
 def test_boucle_du_suivi_bloquee_avec_un_trade_ouvert(env):
@@ -239,6 +258,17 @@ def test_boucle_bloquee_sans_trade_et_boucle_qui_echoue(env):
     assert "KeyError" in f["detail"] and f["evidence"]["échecs d'affilée"] == 3
     scheduler.last_runs["scanner pré-ouverture"] |= {"echecs_suite": 2}
     assert "loop:failing:scanner-pre-ouverture" not in keys(run())
+
+
+def test_passage_long_n_est_pas_un_blocage(env, monkeypatch):
+    name = "scanner pré-ouverture"
+    scheduler.last_runs[name] |= {"at": iso(NOW - timedelta(minutes=4)), "duree_s": 150.0}  # fini il y a 1 min 30
+    monkeypatch.setattr(scheduler, "running", {API.TRACKING_LOOP: iso(NOW - timedelta(minutes=10))})
+    scheduler.last_runs[API.TRACKING_LOOP]["at"] = iso(NOW - timedelta(minutes=11))
+    assert run() == []  # passage en cours depuis 10 min : on attend
+    scheduler.running[API.TRACKING_LOOP] = iso(NOW - timedelta(minutes=20))
+    f = one(run(), "loop:stuck:suivi-des-trades-et-cockpit-discord")
+    assert f["detail"].startswith("Un passage dure depuis 20 min")
 
 
 def test_delai_de_grace_garde_les_constats_ouverts(env, monkeypatch):
@@ -312,7 +342,8 @@ def test_cle_twelve_data_refusee_dans_une_reponse_200(env):
     assert f["kind"] == "action" and "td-cle" not in json.dumps(found)
     assert "nano .env" in [s.get("cmd") for s in f["steps"]]
     assert "docker compose up -d --force-recreate" in [s.get("cmd") for s in f["steps"]]
-    assert twelvedata.refusal({"code": 400, "message": "symbol XYZ not found"}) is None
+    assert twelvedata.refusal({"code": 400, "message": "symbol XYZ not found", "status": "error"}) is None
+    assert twelvedata.refusal({"code": 403, "message": "available starting with Grow", "status": "error"}) is None
     assert twelvedata.refusal({"close": "1.0"}) is None
 
 
@@ -350,6 +381,23 @@ def test_file_discord_bloquee(env):
                                    "derniere_erreur": "HTTPStatusError: 503 [adresse masquée]"})
     f = one(run(), "discord:outbox")
     assert "503" in f["detail"] and "abc" not in json.dumps(f)
+
+
+def test_webhook_supprime(env):
+    async def gone(text):
+        raise discord.DiscordError("HTTP 404 : Unknown Webhook", 0, 404)
+
+    async def back(text):
+        return 1
+
+    scheduler.outbox.add("alerte")
+    asyncio.run(scheduler.outbox.flush(gone, NOW - timedelta(minutes=1)))
+    assert scheduler.outbox.items == []  # refus définitif : le message n'est pas gardé
+    f = one(run(), "discord:webhook")
+    assert f["kind"] == "action" and "Unknown Webhook" in f["detail"]
+    scheduler.outbox.add("alerte")
+    asyncio.run(scheduler.outbox.flush(back, NOW))
+    assert run() == []
 
 
 def test_bot_deconnecte_jeton_refuse(env):
@@ -401,7 +449,8 @@ def test_deploiement_en_attente(env, monkeypatch):
 
 def test_deploiement_pull_sans_reconstruction_et_inconnu(env, monkeypatch):
     monkeypatch.setattr(version, "snapshot", lambda: up_to_date(code="different", empreinte_disque="e2"))
-    assert one(run(), "deploy:rebuild")["kind"] == "action"
+    assert run() == []  # construction sans doute en cours : 10 min de grâce
+    assert one(run(NOW + timedelta(minutes=11)), "deploy:rebuild")["kind"] == "action"
     monkeypatch.setattr(version, "snapshot", lambda: up_to_date(sur_le_disque=None, code=None,
                                                                 erreur_disque="dépôt du serveur non monté"))
     assert "non monté" in one(run(), "deploy:unknown")["detail"]
@@ -537,6 +586,17 @@ def test_cotation_perimee_en_seance(env):
     f = one(found, "quote:stale:trades")
     assert f["kind"] == "probleme" and f["evidence"]["valeurs"] == ["NVDA"]
     assert one(found, "tp:late:t1:tp1")["kind"] == "info"
+
+
+def test_cotation_de_la_veille_a_l_ouverture(env, monkeypatch):
+    opening = datetime(2026, 10, 28, 13, 32, tzinfo=timezone.utc)  # 9 h 32 à New York
+    monkeypatch.setattr(A, "STARTED", opening - timedelta(hours=1))
+    beat(env, opening)
+    scheduler.book.trades.append(trade(last_check=int((opening - timedelta(hours=17)).timestamp()), targets=[]))
+    for at, expected in ((opening, set()), (opening + timedelta(minutes=5), {"quote:stale:trades"})):
+        for r in scheduler.last_runs.values():
+            r["at"] = iso(at - timedelta(seconds=20))
+        assert keys(run(at)) == expected
 
 
 def test_conseil_et_signes_de_sortie(env):
@@ -761,5 +821,6 @@ def test_scheduler_compte_les_echecs_d_affilee(monkeypatch):
         task.cancel()
 
     monkeypatch.setattr(scheduler, "last_runs", {})
+    monkeypatch.setattr(scheduler, "running", {})
     asyncio.run(scenario())
     assert scheduler.last_runs["essai"]["echecs_suite"] >= 2 and scheduler.last_runs["essai"]["ok"] is False

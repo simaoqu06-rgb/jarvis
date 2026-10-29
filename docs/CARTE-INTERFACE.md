@@ -589,8 +589,8 @@ démarrage). Un JARVIS entièrement arrêté ne sert plus la page : c'est la ban
 | `lab:down` | action | commun | `lab_heartbeat` absent ou > 30 min | le worker rebat |
 | `lab:base` | problème | commun | base du labo illisible, ou absente alors que le worker bat | base relue |
 | `lab:v1_pause` | problème | commun | `progress.garde_v1` ≠ ok (Labo 1 en pause) | garde repassée |
-| `council:decision:<id>` | info | commun | `lab_events` (bascule, retrait, council, veto, reprise du Labo 1) des 72 h ; bouton `veto` sur la dernière décision vetable seulement | 72 h passées |
-| `loop:stuck:<boucle>` | problème (action pour le suivi s'il y a un trade crypto ouvert, ou un trade action en séance) | trades pour le suivi, paper pour le journal des recommandations, commun sinon | `last_runs` plus vieux que max(180 s, 3 × période) ; boucle jamais passée après ce délai | la boucle repasse |
+| `council:decision:<id>` | info | commun | `lab_events` (bascule, retrait, council, veto, reprise du Labo 1) des 72 h ; qui a décidé : `method_versions.settings.promu_par` pour une bascule. Bouton `veto` seulement si la décision la plus récente sur la méthode est une décision du council (une promotion que Simão a approuvée n'en a pas : `apply_veto` viserait autre chose) | 72 h passées |
+| `loop:stuck:<boucle>` | problème (action pour le suivi s'il y a un trade crypto ouvert, ou un trade action en séance) | trades pour le suivi, paper pour le journal des recommandations, commun sinon | aucun passage **fini** (`at` + `duree_s`) depuis max(180 s, 3 × période), sauf passage en cours depuis moins de 15 min (`scheduler.running` : le scanner du matin peut durer) ; passage en cours depuis plus de 15 min ; boucle jamais passée après ce délai | la boucle repasse |
 | `loop:failing:<boucle>` | problème | idem | `last_runs[].echecs_suite` ≥ 3 | un passage réussi |
 | `errors:<module>` | problème | commun | ≥ 3 ERROR/CRITICAL du même module en 30 min (`recent_errors`, hors planificateur et page À faire) | fenêtre passée |
 | `disk` | problème ≥ `JARVIS_DISK_ALERT_PCT`, action ≥ 90 % | commun | `shutil.disk_usage` de `data/` | place libérée |
@@ -601,17 +601,18 @@ démarrage). Un JARVIS entièrement arrêté ne sert plus la page : c'est la ban
 | `key:missing:<nom>` | action (info pour `SEC_USER_AGENT`) | commun | `config.secret` vide | clé ajoutée |
 | `notifications:off`, `discord:bot:off` | info | commun | `scheduler.enabled()` / `bot.enabled()` faux | réglage remis |
 | `discord:outbox` | problème | commun | message le plus ancien de la file en attente depuis > 10 min | file vidée |
+| `discord:webhook` | action | commun | dernier refus définitif de Discord en 401, 403 ou 404 (webhook supprimé), plus récent que le dernier envoi réussi : le message refusé n'est pas gardé, la file ne grossit pas | un envoi réussi |
 | `auth:discord`, `discord:intent`, `discord:bot` | action, action, problème | commun | `bot.status` déconnecté depuis > 5 min (`LoginFailure`, `PrivilegedIntentsRequired`, autre) | reconnexion |
 | `routine:soir` | action | commun | `routines_watch.soir_alert` (sans repère : pas d'avis) | dépôt du council |
 | `routine:recherche` | action | commun | `routines_watch.recherche_alert` | verdicts déposés |
-| `deploy:rebuild` | action | commun | empreinte du code de l'image ≠ celle du dépôt monté (`git pull` sans `--build`) | reconstruction |
+| `deploy:rebuild` | action | commun | empreinte du code de l'image ≠ celle du dépôt monté (`git pull` sans `--build`) depuis plus de 10 min (pendant une construction, l'ancien conteneur voit déjà le nouveau code) | reconstruction |
 | `deploy:pending` | action | commun | GitHub : `main` en avance sur le commit du disque, avec des fichiers de `app/`, `requirements.txt`, `Dockerfile` ou `docker-compose.yml` | déploiement |
 | `deploy:unknown`, `deploy:ahead` | info | commun | dépôt non monté, GitHub injoignable ou limité ; commit absent de `main` | lecture rétablie |
 | `exit:undeclared:<id>` | action | trades | trade fermé par le suivi (stop, TP) sans `corrige`, depuis moins de 7 jours | `!sortie` déclarée |
 | `kill:open_after_close:<id>` | action | trades | KILL encore ouvert 5 min après la clôture de sa séance | vente déclarée |
 | `advice:<id>` | action | trades | conseil du jour SORTIR ou ALLÉGER gardé dans le trade (`conseils`) | jour suivant ou trade fermé |
 | `exit:signals:<id>` | action | trades | `exit_signals` du trade ouvert | signes disparus |
-| `quote:stale:trades` | problème | trades | cotation périmée au double du seuil du cockpit (crypto 2 min, action 8 min **en séance**) | cotation revenue |
+| `quote:stale:trades` | problème | trades | cotation périmée au double du seuil du cockpit (crypto 2 min, action 8 min **en séance**, sauf les 5 premières minutes : la cotation date de la veille jusqu'à la première bougie) | cotation revenue |
 | `tp:late:<id>:<tp>` | info | trades | objectif au-delà de `eta_latest`, pas atteint | atteint ou trade fermé |
 | `risk:day_stop`, `risk:open` | info | trades | `risk()` : R net du jour ≤ −3 R ; risque ouvert > budget | lendemain ; risque redescendu |
 | `grade:stale` | info (pas encore calculé) ou problème (périmé) | commun | `risk().grade_age_h` > `grade_max_age_h` ; muet si `lab:down` | grade réécrit |
@@ -638,10 +639,13 @@ nommée), puis `docker compose up -d --force-recreate` (un `restart` ne relit pa
 - `core/sources_health.py` : `dernier_resultat` (le statut ne compare plus deux heures à la seconde), `echecs_suite`,
   `premier_echec`, `derniere_tentative`, `code` (HTTP) ; texte d'erreur expurgé (`scrub`).
 - `core/http.get_json(refusal=…)` et `twelvedata.refusal` : un refus de Twelve Data dans une réponse HTTP 200 (clé
-  refusée 401, crédits 429, panne 5xx) est noté comme un échec de la source ; une erreur de symbole (400, 404) non.
-- `scheduler._loop` : `echecs_suite` dans `last_runs` ; `_run(locked=None)`.
+  refusée 401, crédits 429, panne 5xx) est noté comme un échec de la source ; une erreur propre au symbole (400, 404,
+  et 403 « symbole hors de ton offre ») non.
+- `scheduler._loop` : `echecs_suite` et `duree_s` (aussi en échec) dans `last_runs`, passage en cours dans
+  `scheduler.running` ; `_run(locked=None)`.
 - `notify/bot.status` : connecté, depuis quand, dernière erreur (type et texte expurgé).
-- `core/outbox.py` : `derniere_erreur` de chaque message (adresse du webhook masquée), `oldest()`.
+- `core/outbox.py` : `derniere_erreur` de chaque message (adresse du webhook masquée), `oldest()`, dernier refus
+  définitif (`last_refusal`) et dernier envoi réussi (`last_ok_at`), en mémoire.
 - `core/version.py` : empreinte (SHA-256 de `app/` et `requirements.txt`, sans `__pycache__`) de l'image au
   démarrage contre celle du dépôt monté en lecture seule sous `/repo` (`docker-compose.yml`) ; `HEAD` lu sans git et
   sans jamais lire `.git/config` ; comparaison `GET /repos/{dépôt}/compare/{commit}...main` (API publique, jeton

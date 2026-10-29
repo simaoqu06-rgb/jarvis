@@ -47,6 +47,7 @@ paper_book = paper.PaperBook()
 confirm_state = CONFIRM.load()
 reco_book = RECO.RecoBook()  # « si j'avais suivi JARVIS » : GO confirmés et KILL envoyés, suivis tels qu'envoyés
 last_runs: dict[str, dict] = {}  # dernier passage de chaque boucle (cockpit : /api/cockpit/state et /health)
+running: dict[str, str] = {}  # passage en cours de chaque boucle (page À faire : un passage long n'est pas un blocage)
 outbox = Outbox(config.OUTBOX_PATH, discord.split_message)
 _background: set[asyncio.Task] = set()
 _lock = asyncio.Lock()  # un seul job modifie l'état à la fois
@@ -617,6 +618,7 @@ async def _run(job, locked: bool | None) -> None:
 async def _loop(name: str, job, every: int, locked: bool | None = True) -> None:
     while True:
         started = datetime.now(timezone.utc)
+        running[name] = started.isoformat(timespec="seconds")
         try:
             await _run(job, locked)
             last_runs[name] = {"at": started.isoformat(timespec="seconds"), "ok": True, "every_s": every,
@@ -626,7 +628,9 @@ async def _loop(name: str, job, every: int, locked: bool | None = True) -> None:
             log.exception("Notification « %s » en échec", name)
             failed = (last_runs.get(name) or {}).get("echecs_suite", 0) + 1  # page À faire : échecs d'affilée
             last_runs[name] = {"at": started.isoformat(timespec="seconds"), "ok": False, "every_s": every,
+                               "duree_s": round((datetime.now(timezone.utc) - started).total_seconds(), 1),
                                "erreur": type(exc).__name__, "echecs_suite": failed}
+        running.pop(name, None)
         await asyncio.sleep(every)
 
 

@@ -35,6 +35,10 @@ class Outbox:
         self.path = Path(path) if path else None
         self.split = split or (lambda text: [text])
         self.items: list[dict] = []
+        # Page À faire du cockpit : un refus définitif retire le message, la file ne grossit pas ; on garde donc le
+        # dernier refus (webhook supprimé : HTTP 404) et le dernier envoi réussi, en mémoire
+        self.last_refusal: dict | None = None
+        self.last_ok_at: str | None = None
         self._lock = asyncio.Lock()  # deux passages simultanés ne posteraient pas deux fois le même morceau
         if self.path and self.path.exists():
             try:
@@ -107,6 +111,8 @@ class Outbox:
                             item["sent"] + 1, len(item["parts"]), item["attempts"], exc)
                 if getattr(exc, "permanent", False) or item["attempts"] >= MAX_ATTEMPTS:
                     log.error("Message « %s » abandonné : %s", item["kind"], exc)
+                    self.last_refusal = {"at": now.isoformat(timespec="seconds"), "status": getattr(exc, "status", None),
+                                         "erreur": item["derniere_erreur"]}
                     self._drop(item)
                     self.save()
                     continue  # refus définitif : on passe au suivant
@@ -114,6 +120,7 @@ class Outbox:
                 break  # panne passagère : on garde l'ordre et on réessaie au prochain passage
             self._drop(item)
             self.save()
+            self.last_ok_at = now.isoformat(timespec="seconds")
             done += 1
         return done
 

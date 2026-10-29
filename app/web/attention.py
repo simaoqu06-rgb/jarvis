@@ -33,6 +33,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app import alerts, config, scheduler
 from app.core import sources_health, version
 from app.lab import db as lab_db
+from app.lab.method import COUNCIL
 from app.lab import routines_watch as RW
 from app.notify import bot
 from app.sources import twelvedata
@@ -58,6 +59,8 @@ STEP_ACTIONS = {"proposal_approve", "proposal_refuse", "veto"}  # seules actions
 
 # Seuils (constantes nommées : rien n'est caché dans le code des règles)
 GRACE_S = 180                # après le démarrage : ni boucles, ni sources, ni bot (last_runs et la santé sont vides)
+LOOP_BUSY_MAX_S = 900        # un passage en cours depuis plus de 15 min : boucle bloquée
+LOOP_MIN_FAILS = 3
 STALE_ENGINE_S = 180         # moteur sans passage : constat calculé à la lecture
 HISTORY_H = 72               # constats réglés renvoyés pendant 72 h
 KEEP_DAYS, MAX_ROWS = 30, 2000
@@ -72,7 +75,9 @@ QUOTA_INFO_PCT = 80
 UNDECLARED_DAYS = 7
 KILL_GRACE_S = 300           # après la clôture de sa séance, un KILL encore ouvert
 QUOTE_STALE_FACTOR = 2       # cotation périmée au double du seuil du cockpit (pas d'alerte sur un retard de bougie)
+QUOTE_OPEN_GRACE_S = 300     # à l'ouverture, la cotation d'une action date de la veille jusqu'à la première bougie
 COUNCIL_RECENT_H = 72
+REBUILD_GRACE_S = 600        # git pull puis --build : l'ancien conteneur voit le nouveau code pendant la construction
 PROPOSALS_MAX = 8
 MAX_ITEMS = 200
 
@@ -272,10 +277,11 @@ def r_lab_v1(ctx: dict, now: datetime) -> list[dict]:
                   "erreur": g.get("erreur"), "vérifié le": g.get("le")})]
 
 
-EVENT_TITLES = {"bascule": "Le council a mis en place la méthode {v}", "retrait": "Méthode {v} retirée par le labo",
-                "council": "Une règle part en essai (décision du council)", "veto": "Ton veto a été appliqué",
-                "labo1_reprise": "Labo 1 repris"}
-VETOABLE = ("bascule", "council")
+EVENT_TITLES = {"bascule": "Méthode {v} en place (promotion que tu as approuvée)",
+                "retrait": "Méthode {v} retirée par le labo", "council": "Une règle part en essai (décision du council)",
+                "veto": "Ton veto a été appliqué", "labo1_reprise": "Labo 1 repris"}
+COUNCIL_BASCULE = "Le council a mis en place la méthode {v}"
+DECISIONS = ("bascule", "council", "retrait", "veto")  # ce sur quoi porte `!veto` (method.apply_veto)
 
 
 def _clean(text: str) -> str:
@@ -287,19 +293,24 @@ def r_council(ctx: dict, now: datetime) -> list[dict]:
     if isinstance(lab, Exception):
         raise lab
     events = [e for e in lab.get("evenements") or [] if e.get("genre") in EVENT_TITLES]
-    last_decision = max((e["id"] for e in events if e["genre"] in VETOABLE), default=None)
-    last_veto = max((e["id"] for e in events if e["genre"] == "veto"), default=None)
+    # Le veto annule la dernière décision du council : bouton seulement si la décision la plus récente sur la méthode
+    # (promotion, mise en essai, retrait, veto) est une décision du council
+    last = max((e for e in events if e["genre"] in DECISIONS), key=lambda e: e["id"], default=None)
+    target = last["id"] if last and last.get("par") == COUNCIL else None
     out = []
     for e in events:
-        vetoable = e["id"] == last_decision and (last_veto is None or last_veto < e["id"])
+        vetoable = e["id"] == target
         steps = ([say("C'est sa dernière décision : un veto l'annule au prochain passage du labo (une méthode promue "
                       "par le council redevient l'ancienne, sinon le challenger en essai est retiré)."),
                   act("Mettre mon veto", "veto")] if vetoable else
                  [say("Rien à faire de ton côté.")])
+        council_bascule = e["genre"] == "bascule" and e.get("par") == COUNCIL
+        title = COUNCIL_BASCULE if council_bascule else EVENT_TITLES[e["genre"]]
         out.append(item(f"council:decision:{e['id']}", "info", "commun",
-                        EVENT_TITLES[e["genre"]].format(v=e.get("version") or "?"), _clean(e.get("texte") or ""),
+                        title.format(v=e.get("version") or "?"), _clean(e.get("texte") or ""),
                         steps + [go("Ouvrir Labo", "labo")],
-                        {"événement": e["id"], "genre": e["genre"], "version": e.get("version"), "le": e.get("le")}))
+                        {"événement": e["id"], "genre": e["genre"], "version": e.get("version"),
+                         "décidé par": e.get("par"), "le": e.get("le")}))
     return out
 
 
@@ -333,36 +344,46 @@ def _tracking_matters(now: datetime) -> bool:
 
 
 def r_loops(ctx: dict, now: datetime) -> list[dict] | None:
+    """Une boucle est bloquée quand elle n'a ni fini de passage depuis max(180 s, 3 × sa période), ni de passage en
+    cours depuis moins de 15 min : un passage long (scanner du matin) n'est pas un blocage."""
     if _uptime(ctx) < GRACE_S:
         return None
-    runs = API.loops(now)["boucles"]
     out = []
     for name, every in expected_loops():
-        run = runs.get(name)
+        run = scheduler.last_runs.get(name)
         limit = max(API.LOOP_STALE_S, 3 * every)
         space = LOOP_SPACE.get(name, "commun")
         impact = LOOP_IMPACT.get(name, "")
-        if run is None and _uptime(ctx) < limit:
+        busy = _parse(scheduler.running.get(name))
+        busy_s = (now - busy).total_seconds() if busy else None
+        if busy_s is not None and busy_s < LOOP_BUSY_MAX_S:
             continue
-        if run is None or run["stale"]:
-            kind = "action" if name == API.TRACKING_LOOP and _tracking_matters(now) else "probleme"
-            since = (f"depuis {_ago(run['age_s'])}" if run else
-                     f"depuis le démarrage de JARVIS il y a {_ago(_uptime(ctx))} (aucun passage terminé)")
-            out.append(item(
-                f"loop:stuck:{slug(name)}", kind, space, f"La boucle « {name} » ne tourne plus",
-                f"Aucun passage {since}. {impact}".strip(),
-                [say("Rien à faire si elle repart seule au passage suivant.")] + ssh_steps()
-                + [cmd("Sinon, redémarre JARVIS (le suivi reprend où il en était ; la page se recharge seule) :",
-                       "docker compose restart jarvis")] + diag_steps(),
-                {"boucle": name, "dernier passage": run["at"] if run else None,
-                 "âge (s)": run["age_s"] if run else None, "période (s)": every, "seuil (s)": limit}))
-        elif not run.get("ok") and run.get("echecs_suite", 0) >= 3:
-            out.append(item(
-                f"loop:failing:{slug(name)}", "probleme", space, f"La boucle « {name} » échoue à chaque passage",
-                f"{run['echecs_suite']} passages d'affilée en échec ({run.get('erreur') or 'erreur inconnue'}). JARVIS "
-                f"continue et la relance tout seul, mais c'est à corriger. {impact}".strip(),
-                diag_steps(), {"boucle": name, "échecs d'affilée": run["echecs_suite"], "erreur": run.get("erreur"),
-                               "dernier passage": run["at"]}))
+        ended = _parse(run["at"]) + timedelta(seconds=run.get("duree_s") or 0) if run else None
+        idle_s = (now - ended).total_seconds() if ended else _uptime(ctx)  # sans passage : depuis le démarrage
+        if busy_s is None and idle_s <= limit:  # passage fini récemment (ou premier passage pas encore fini)
+            if run and not run.get("ok") and run.get("echecs_suite", 0) >= LOOP_MIN_FAILS:
+                out.append(item(
+                    f"loop:failing:{slug(name)}", "probleme", space, f"La boucle « {name} » échoue à chaque passage",
+                    f"{run['echecs_suite']} passages d'affilée en échec ({run.get('erreur') or 'erreur inconnue'}). "
+                    f"JARVIS continue et la relance tout seul, mais c'est à corriger. {impact}".strip(),
+                    diag_steps(), {"boucle": name, "échecs d'affilée": run["echecs_suite"],
+                                   "erreur": run.get("erreur"), "dernier passage": run["at"]}))
+            continue
+        kind = "action" if name == API.TRACKING_LOOP and _tracking_matters(now) else "probleme"
+        if busy_s is not None:
+            since = f"un passage dure depuis {_ago(busy_s)} : la boucle est sans doute bloquée"
+        elif run is None:
+            since = f"aucun passage terminé depuis le démarrage de JARVIS il y a {_ago(_uptime(ctx))}"
+        else:
+            since = f"aucun passage depuis {_ago(idle_s)}"
+        out.append(item(
+            f"loop:stuck:{slug(name)}", kind, space, f"La boucle « {name} » ne tourne plus",
+            f"{since[0].upper()}{since[1:]}. {impact}".strip(),
+            [say("Rien à faire si elle repart seule au passage suivant.")] + ssh_steps()
+            + [cmd("Sinon, redémarre JARVIS (le suivi reprend où il en était ; la page se recharge seule) :",
+                   "docker compose restart jarvis")] + diag_steps(),
+            {"boucle": name, "dernier passage": run["at"] if run else None, "durée (s)": (run or {}).get("duree_s"),
+             "passage en cours depuis": scheduler.running.get(name), "période (s)": every, "seuil (s)": limit}))
     return out
 
 
@@ -529,7 +550,7 @@ KEYS = [
     ("JARVIS_LAB_API_KEY", "action", "les routines Claude (équipe du soir, recherche avant l'ouverture) ne peuvent ni "
                                      "lire le labo ni déposer leurs avis",
      "c'est la même clé que celle de l'environnement des routines Claude"),
-    ("SEC_USER_AGENT", "info", "plus de 8-K dans l'agenda ni dans la fiche société",
+    ("SEC_USER_AGENT", "info", "plus de 8-K dans l'agenda ni dans la fiche société, ni de collecte 8-K au labo",
      "c'est ton nom et ton e-mail, exigés par la SEC (ex. « Prénom Nom adresse@exemple.fr »)"),
 ]
 
@@ -551,11 +572,13 @@ def r_keys(ctx: dict, now: datetime) -> list[dict]:
 def r_discord(ctx: dict, now: datetime) -> list[dict] | None:
     out = []
     if not scheduler.enabled():
-        why = ("JARVIS_NOTIFICATIONS=off" if config.secret("DISCORD_WEBHOOK_URL") else "DISCORD_WEBHOOK_URL absente")
+        chosen = bool(config.secret("DISCORD_WEBHOOK_URL"))  # JARVIS_NOTIFICATIONS=off : ton choix
+        why = "JARVIS_NOTIFICATIONS=off" if chosen else "DISCORD_WEBHOOK_URL absente"
         out.append(item("notifications:off", "info", "commun", "Alertes du salon Discord coupées",
                         f"{why} : le point du matin, les alertes de cours, d'actus, de disque et la veille des routines "
                         "ne partent pas sur le salon. Le suivi de tes trades tourne quand même, et ses alertes "
-                        "partent en MP si le bot est actif.", env_steps("DISCORD_WEBHOOK_URL"), {"raison": why}))
+                        "partent en MP si le bot est actif.",
+                        env_steps("JARVIS_NOTIFICATIONS" if chosen else "DISCORD_WEBHOOK_URL"), {"raison": why}))
     else:
         old = scheduler.outbox.oldest()
         created = _parse((old or {}).get("created_at"))
@@ -565,13 +588,21 @@ def r_discord(ctx: dict, now: datetime) -> list[dict] | None:
             out.append(item("discord:outbox", "probleme", "commun", f"{_n(n, 'message', 'messages')} Discord en attente",
                             f"Le plus ancien attend depuis {_ago((now - created).total_seconds())} "
                             f"({old.get('attempts', 0)} tentatives ; dernière erreur : {err}). Tes alertes Discord ne "
-                            "partent plus ; elles sont gardées et partiront au retour (abandonnées après 3 jours).",
-                            [say("Rien à faire si Discord revient seul."),
-                             say("Si l'erreur dit HTTP 401 ou 404, le webhook a été supprimé : crée-en un nouveau "
-                                 "(Paramètres du salon → Intégrations → Webhooks) et remplace DISCORD_WEBHOOK_URL.")]
-                            + env_steps("DISCORD_WEBHOOK_URL"),
+                            "partent plus ; elles sont gardées et partiront au retour (un message est abandonné après environ 2 h "
+                            "d'échecs).",
+                            [say("Rien à faire si Discord revient seul.")] + diag_steps(),
                             {"en attente": n, "plus ancien": old.get("created_at"), "tentatives": old.get("attempts"),
                              "dernière erreur": err}))
+        refused = scheduler.outbox.last_refusal
+        if refused and refused.get("status") in (401, 403, 404) and refused["at"] > (scheduler.outbox.last_ok_at or ""):
+            out.append(item("discord:webhook", "action", "commun", "Discord refuse le webhook du salon",
+                            f"Dernier refus à {_paris(_parse(refused['at']), now)} ({refused.get('erreur')}) : le "
+                            "webhook a été supprimé ou son adresse a changé. Les messages refusés ne sont pas gardés : "
+                            "les alertes du salon sont perdues tant qu'il n'est pas remplacé. Nouveau webhook : "
+                            "Paramètres du salon → Intégrations → Webhooks → Nouveau webhook → « Copier l'URL ».",
+                            env_steps("DISCORD_WEBHOOK_URL"),
+                            {"refus": refused["at"], "code": refused.get("status"), "erreur": refused.get("erreur"),
+                             "dernier envoi réussi": scheduler.outbox.last_ok_at}))
     if not bot.enabled():
         out.append(item("discord:bot:off", "info", "commun", "Commandes Discord désactivées",
                         "DISCORD_BOT_TOKEN ou JARVIS_DISCORD_OWNER_ID absent : ni `!…`, ni MP de trades, ni boutons "
@@ -652,9 +683,14 @@ def _day(iso_day: str | None) -> str:
         return iso_day
 
 
+_rebuild = {"since": None}  # premier passage où le code du disque diffère de celui qui tourne
+
+
 def r_deploy(ctx: dict, now: datetime) -> list[dict] | None:
     v = version.snapshot()
     disk = v["sur_le_disque"]
+    if v["code"] != "different":
+        _rebuild["since"] = None
     ev = {"commit du disque": (disk or "")[:7] or None, "branche": v["branche"], "code": v["code"],
           "empreinte de l'image": v["empreinte_image"], "empreinte du disque": v["empreinte_disque"],
           "vérifié le": v["verifie_le"], "état GitHub": v["statut"]}
@@ -665,6 +701,9 @@ def r_deploy(ctx: dict, now: datetime) -> list[dict] | None:
                      "docker-compose.yml : il prend effet au prochain déploiement.",
                      [say("Rien d'autre à faire : déploie comme d'habitude.")], ev)]
     if v["code"] == "different":
+        _rebuild["since"] = _rebuild["since"] or now
+        if (now - _rebuild["since"]).total_seconds() < REBUILD_GRACE_S:
+            return None  # sans doute une construction en cours (git pull && docker compose up -d --build)
         return [item("deploy:rebuild", "action", "commun", "Code récupéré mais pas reconstruit",
                      f"Le dossier du serveur est à {disk[:7]}, mais le code qui tourne n'est pas celui-là : un « git "
                      "pull » a été fait sans reconstruire l'image (un redémarrage ne suffit pas).",
@@ -767,6 +806,8 @@ def r_positions(ctx: dict, now: datetime) -> list[dict] | None:
     today = now.astimezone(NEW_YORK).date().isoformat()
     by_id = {t["id"]: t for t in scheduler.book.open_trades()}
     out, stale = [], []
+    bounds = CAL.session_bounds(now.astimezone(NEW_YORK).date())
+    opening = bool(bounds) and 0 <= (now - bounds[0]).total_seconds() < QUOTE_OPEN_GRACE_S
     for p in positions:
         t = by_id.get(p["id"]) or {}
         sym = p["symbol"]
@@ -790,7 +831,9 @@ def r_positions(ctx: dict, now: datetime) -> list[dict] | None:
                             {"trade": p["id"], "signes": list(p["exit_signals"]), "dernier prix": p.get("last_price")}))
         fresh = p.get("freshness") or {}
         limit = QUOTE_STALE_FACTOR * API.STALE_S.get(p.get("market", "stock"), 240)
-        if fresh.get("stale") and (fresh.get("age_s") is None or fresh["age_s"] > limit):
+        if p.get("market", "stock") == "stock" and opening:
+            pass  # première bougie de la séance pas encore lue
+        elif fresh.get("stale") and (fresh.get("age_s") is None or fresh["age_s"] > limit):
             stale.append((sym, fresh.get("age_s"), p.get("price_source")))
         late = next((x for x in p.get("targets") or [] if x.get("late")), None)
         if late:
@@ -917,11 +960,25 @@ def lab_snapshot(now: datetime) -> dict:
                 "SELECT id, created_at, kind, version, text FROM lab_events WHERE ts >= ? ORDER BY id", (since,))]
         except sqlite3.OperationalError:  # base d'avant les événements
             events = []
+        for e in events:  # qui a décidé : le council (veto possible) ou Simão (promotion approuvée)
+            e["par"] = None
+            if e["genre"] == COUNCIL:
+                e["par"] = COUNCIL
+            elif e["genre"] == "bascule":
+                e["par"] = _promoted_by(conn, e["version"])
         return {"garde_v1": garde if isinstance(garde, dict) else None, "evenements": events, "chemin": path}
     except (sqlite3.Error, ValueError) as exc:
         return {"erreur": f"{type(exc).__name__}: {exc}"[:200], "chemin": path}
     finally:
         conn.close()
+
+
+def _promoted_by(conn: sqlite3.Connection, version: str | None) -> str | None:
+    try:
+        row = conn.execute("SELECT settings FROM method_versions WHERE version = ?", (version,)).fetchone()
+        return (json.loads(row[0]) or {}).get("promu_par") if row and row[0] else None
+    except (sqlite3.Error, ValueError, AttributeError):
+        return None
 
 
 # --- Stockage et synchronisation ---------------------------------------------------------------------------

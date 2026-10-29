@@ -58,7 +58,9 @@ async def _spend() -> None:
         await asyncio.sleep(wait)
 
 
-REFUSAL_CODES = {401, 403, 429}  # clé refusée, accès refusé, crédits épuisés : la source refuse, quel que soit le symbole
+# Clé refusée, crédits épuisés : la source refuse, quel que soit le symbole. Un 403 dit « symbole hors de ton offre » :
+# propre au symbole, comme un symbole inconnu (400, 404)
+REFUSAL_CODES = {401, 429}
 
 
 def refusal(payload) -> str | None:
