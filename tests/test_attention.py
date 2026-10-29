@@ -606,7 +606,7 @@ def test_conseil_et_signes_de_sortie(env):
          "why": "**Résultats** ce soir", "exit_r": 0.6}], targets=[]))
     found = run()
     a = one(found, "advice:t1")
-    assert a["title"] == "JARVIS conseille de sortir NVDA" and "Résultats ce soir" in a["detail"]
+    assert a["title"] == "JARVIS conseille de sortir NVDA" and "Résultats ce soir. C'est à toi" in a["detail"]
     assert "!sortie NVDA 180.0" in [s.get("cmd") for s in a["steps"]]
     assert "divergence RSI" in one(found, "exit:signals:t1")["detail"]
 
@@ -625,12 +625,14 @@ def test_grade_perime(env, monkeypatch):
 def test_propositions_avec_boutons_de_la_liste_blanche(env):
     store = PR.proposals
     for i in range(10):
-        store.items.append({"id": i + 1, "key": f"cle{i}", "value": 1, "current": 0, "why": "test",
+        store.items.append({"id": i + 1, "key": f"cle{i}", "value": 1, "current": 0, "why": "test." if i else "test",
                             "status": "pending", "created_at": iso(NOW), "decided_at": None})
     found = run()
     f = one(found, "proposal:1")
     assert [s.get("action") for s in f["steps"] if s.get("action")] == ["proposal_approve", "proposal_refuse"]
     assert f["steps"][0]["args"] == {"id": 1}
+    # un seul point entre la raison et la suite, que la raison en porte déjà un ou non
+    assert all(". Rien ne change" in x["detail"] and ".." not in x["detail"] for x in found if x["key"].startswith("proposal:"))
     assert len([x for x in found if x["key"].startswith("proposal:")]) == A.PROPOSALS_MAX
     assert "9, 10" in one(found, "proposals:more")["detail"]
 

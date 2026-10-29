@@ -288,6 +288,12 @@ def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", text.replace("**", "").replace("`", "")).strip()
 
 
+def _sentence(text: str) -> str:
+    """Le texte nettoyé, fini par un seul point (celui d'origine en porte parfois déjà un)."""
+    text = _clean(text)
+    return text if not text or text.endswith((".", "!", "?", "…")) else text + "."
+
+
 def r_council(ctx: dict, now: datetime) -> list[dict]:
     lab = ctx["lab"]
     if isinstance(lab, Exception):
@@ -815,7 +821,7 @@ def r_positions(ctx: dict, now: datetime) -> list[dict] | None:
         if c and c.get("day") == today and c.get("decision") in ("SORTIR", "ALLÉGER"):
             out.append(item(f"advice:{p['id']}", "action", "trades", f"JARVIS conseille de {c['decision'].lower()} {sym}",
                             f"Conseil de {_paris(_parse(c.get('at')), now)} vers {_price(c.get('price'))} : "
-                            f"{_clean(c.get('why') or '')}. C'est à toi de décider : tu passes tes ordres chez IBKR.",
+                            f"{_sentence(c.get('why') or '')} C'est à toi de décider : tu passes tes ordres chez IBKR.",
                             [cmd("Les ordres en prix (ventes, stop) :", "!positions"),
                              cmd("Une fois vendu, déclare ton prix :", f"!sortie {sym} {c.get('price')}"),
                              go("Ouvrir le trade", "positions", sym)],
@@ -917,7 +923,7 @@ def r_proposals(ctx: dict, now: datetime) -> list[dict]:
     pending = PR.proposals.pending()
     out = []
     for p in pending[:PROPOSALS_MAX]:
-        detail = _clean(PR.text(p)) + ". Rien ne change tant que tu n'as pas décidé."
+        detail = _sentence(PR.text(p)) + " Rien ne change tant que tu n'as pas décidé."
         if p.get("kind") == "grade":
             detail += " Une hausse du grade augmente le risque proposé par trade : c'est ta décision."
         out.append(item(f"proposal:{p['id']}", "action", "commun", _proposal_title(p), detail,
