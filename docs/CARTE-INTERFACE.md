@@ -674,7 +674,7 @@ d'exécution réel chez IBKR n'est connu que par `!sortie`.
 ### 8.7 Garde-fous vérifiés par les tests (`tests/test_attention.py`)
 
 Base saine → aucun constat ; un constat ne peut proposer qu'une action de la liste blanche ou une vue connue, et sa
-preuve ne garde aucune clé ; commande `ssh` sans adresse dans le code ; worker arrêté ou bloqué, base absente, garde
+preuve ne garde aucune clé ; commande `ssh` vers le serveur de `DEPLOY.md` (`JARVIS_SSH_CIBLE` conforme la remplace) ; worker arrêté ou bloqué, base absente, garde
 du Labo 1, décisions du council (veto sur la dernière seulement, plus après un veto) ; boucle du suivi bloquée (action
 avec un trade ouvert), boucle qui échoue, délai de grâce qui garde les constats ; erreurs répétées hors planificateur ;
 disque ; source seule en panne, grâce de 5 min, source plus appelée, trois sources → un seul constat réseau, 403 de la
