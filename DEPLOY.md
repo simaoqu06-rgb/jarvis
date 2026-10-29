@@ -323,8 +323,8 @@ tourne à celui du dossier (`git pull` fait sans `--build` → « Code récupér
 dossier à `main` sur GitHub, toutes les 30 min (« N PR fusionnées pas encore déployées », seulement si elles touchent
 au code). Il ne lit jamais `.git/config` ni `.env` dans ce montage. Le montage prend effet au premier
 `docker compose up -d --build` qui suit (le conteneur est recréé). Deux réglages facultatifs dans `.env` :
-- `JARVIS_SSH_CIBLE=root@<adresse du serveur>` : les commandes `ssh` de la page arrivent toutes prêtes (sinon elles
-  affichent `IP_DU_SERVEUR` à remplacer) ;
+- `JARVIS_SSH_CIBLE=root@<adresse du serveur>` : seulement si le serveur change ; sans elle, les commandes `ssh` de
+  la page visent `root@2.31.19.106` ;
 - `JARVIS_GITHUB_TOKEN` (jeton en **lecture seule**) : seulement si le dépôt redevient privé ; public, il ne sert pas.
 
 ## Ménage automatique

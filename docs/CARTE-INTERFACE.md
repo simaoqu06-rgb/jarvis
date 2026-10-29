@@ -619,8 +619,8 @@ démarrage). Un JARVIS entièrement arrêté ne sert plus la page : c'est la ban
 | `proposal:<id>`, `proposals:more` | action | commun | `PR.proposals.pending()` (8 au plus, le reste résumé) ; boutons `proposal_approve` / `proposal_refuse` | décision |
 | `rule:<nom>`, `attention:stale`, `attention:file` | problème | commun | §8.2 | règle réparée, moteur reparti |
 
-Commandes : `ssh` (cible `JARVIS_SSH_CIBLE` si posée, sinon `ssh root@IP_DU_SERVEUR` à compléter : aucune adresse
-dans le code), `cd /root/jarvis`, puis la commande du constat. Changer une clé : `nano .env` (seulement la ligne
+Commandes : `ssh root@2.31.19.106` (le serveur de `DEPLOY.md` ; `JARVIS_SSH_CIBLE` le remplace si elle est posée),
+`cd /root/jarvis`, puis la commande du constat. Changer une clé : `nano .env` (seulement la ligne
 nommée), puis `docker compose up -d --force-recreate` (un `restart` ne relit pas `.env`).
 
 ### 8.4 Contrat d'API

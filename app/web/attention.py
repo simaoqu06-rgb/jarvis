@@ -82,6 +82,7 @@ PROPOSALS_MAX = 8
 MAX_ITEMS = 200
 
 SSH_RE = re.compile(r"^[A-Za-z0-9._@:\-]{1,100}$")
+SSH_DEFAUT = "root@2.31.19.106"  # le serveur de DEPLOY.md ; JARVIS_SSH_CIBLE le remplace
 
 
 # --- Formes ------------------------------------------------------------------------------------------
@@ -182,13 +183,12 @@ def act(label: str, action: str, args: dict | None = None) -> dict:
 
 
 def ssh_steps() -> list[dict]:
+    """`ssh` vers `JARVIS_SSH_CIBLE` si elle est posée et propre, sinon vers le serveur écrit dans DEPLOY.md."""
     target = os.getenv("JARVIS_SSH_CIBLE", "").strip()
-    if target and SSH_RE.match(target):
-        first = cmd("Depuis PowerShell sur ton PC, connecte-toi au serveur :", f"ssh {target}")
-    else:
-        first = cmd("Depuis PowerShell sur ton PC, connecte-toi au serveur (remplace IP_DU_SERVEUR par son adresse ; "
-                    "avec JARVIS_SSH_CIBLE dans .env, la commande arrive ici toute prête) :", "ssh root@IP_DU_SERVEUR")
-    return [first, cmd("Place-toi dans le dossier de JARVIS :", "cd /root/jarvis")]
+    if not (target and SSH_RE.match(target)):
+        target = SSH_DEFAUT
+    return [cmd("Depuis PowerShell sur ton PC, connecte-toi au serveur :", f"ssh {target}"),
+            cmd("Place-toi dans le dossier de JARVIS :", "cd /root/jarvis")]
 
 
 def env_steps(*names: str) -> list[dict]:

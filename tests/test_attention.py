@@ -168,12 +168,12 @@ def test_un_constat_ne_propose_que_la_liste_blanche():
     assert f["steps"] == [{"text": "Rien à faire de ton côté : JARVIS reprend tout seul."}]
 
 
-def test_commande_ssh_sans_adresse_dans_le_code(env, monkeypatch):
-    assert A.ssh_steps()[0]["cmd"] == "ssh root@IP_DU_SERVEUR"
+def test_commande_ssh_vers_le_serveur_de_deploy(env, monkeypatch):
+    assert A.ssh_steps()[0]["cmd"] == "ssh root@2.31.19.106"
     monkeypatch.setenv("JARVIS_SSH_CIBLE", "root@mon-serveur")
     assert A.ssh_steps()[0]["cmd"] == "ssh root@mon-serveur"
     monkeypatch.setenv("JARVIS_SSH_CIBLE", "root@x; rm -rf /")
-    assert A.ssh_steps()[0]["cmd"] == "ssh root@IP_DU_SERVEUR"
+    assert A.ssh_steps()[0]["cmd"] == "ssh root@2.31.19.106"
 
 
 # --- JARVIS, labo, serveur --------------------------------------------------------------------------------
