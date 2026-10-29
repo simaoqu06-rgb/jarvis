@@ -982,7 +982,7 @@ async def _part(name: str, build) -> dict:
 async def _economic(now: datetime) -> dict:
     from app import needs
 
-    res = await needs.economic_calendar()  # cache d'une heure de needs.resolve
+    res = await needs.economic_calendar()  # 8 h avec la clé Helious, 24 h sans (needs.calendar_ttl, copie sur disque)
     if res.data is None:  # aucune source ni valeur connue : inconnu, pas « rien de notable »
         raise SourceError(res.message or "calendrier économique inconnu")
     start = datetime.combine(now.astimezone(PARIS).date(), time(0), PARIS)
@@ -1077,8 +1077,9 @@ async def _sec_filings(now: datetime, symbols: list[str]) -> dict:
 @router.get("/agenda")
 async def agenda():
     """Agenda : la frise du jour (horaires de JARVIS), le calendrier économique de la semaine (Helious), les résultats
-    (Finnhub) et les 8-K des trois derniers jours (SEC EDGAR) des valeurs suivies. Sources gratuites, en cache (1 h ;
-    15 min par société pour la SEC) : la vue se rafraîchit sans les solliciter. Jamais Twelve Data."""
+    (Finnhub) et les 8-K des trois derniers jours (SEC EDGAR) des valeurs suivies. Sources gratuites, en cache (Helious
+    8 h avec sa clé, 24 h sans ; résultats 1 h ; 15 min par société pour la SEC) : la vue se rafraîchit sans les
+    solliciter. Jamais Twelve Data."""
     now = datetime.now(timezone.utc)
     symbols = agenda_symbols(now)
     eco, res, sec = await asyncio.gather(_part("economique", lambda: _economic(now)),
@@ -1160,7 +1161,7 @@ def _attention_check() -> str | None:
 
 
 ENV_KEYS = ("TWELVEDATA_API_KEY", "FINNHUB_API_KEY", "ALPACA_API_KEY", "ALPACA_SECRET_KEY", "DISCORD_WEBHOOK_URL",
-            "DISCORD_BOT_TOKEN", "JARVIS_LAB_API_KEY")
+            "DISCORD_BOT_TOKEN", "JARVIS_LAB_API_KEY", "HELIOUS_API_KEY")
 
 
 def _attention_diag(now: datetime) -> dict:

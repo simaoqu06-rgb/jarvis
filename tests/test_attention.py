@@ -12,9 +12,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import alerts, scheduler
+from app.core import fallback
 from app.core import outbox as OB
 from app.core import sources_health, version
+from app.core.cache import Store
 from app.core.http import SourceError
+from app.core.result import Result
 from app.notify import bot, discord
 from app.sources import twelvedata
 from app.trading import paper
@@ -79,6 +82,8 @@ def env(monkeypatch, tmp_path):
         monkeypatch.setenv(k, v)
     monkeypatch.delenv("JARVIS_NOTIFICATIONS", raising=False)
     monkeypatch.delenv("JARVIS_SSH_CIBLE", raising=False)
+    monkeypatch.delenv("HELIOUS_API_KEY", raising=False)
+    monkeypatch.setattr(fallback, "store", Store(str(tmp_path / "last_known.json")))
     monkeypatch.setattr(scheduler, "book", T.Book(None))
     monkeypatch.setattr(scheduler, "reco_book", R.RecoBook(None))
     monkeypatch.setattr(scheduler, "paper_book", paper.PaperBook(None))
@@ -325,19 +330,127 @@ def test_trois_sources_en_panne_un_seul_constat_reseau(env):
 
 
 def test_limite_de_debit_429_est_une_info_et_pas_une_panne(env):
-    # Helious sans clé : quota partagé, refusé à chaque passage des actus (toutes les 15 min) ; Finnhub prend le relais
+    # quota par minute ou du mois : la source répond, elle refuse seulement ; JARVIS réessaie au passage suivant
     for _ in range(3):
-        sources_health.fail("https://api.helious.io/v1/feed?limit=20", SourceError("HTTP 429"), None)
-    sources_health._state["Helious"].update(premier_echec=iso(NOW - timedelta(minutes=30)),
-                                            derniere_tentative=iso(NOW - timedelta(seconds=20)))
+        sources_health.fail("https://api.coinpaprika.com/v1/tickers", SourceError("HTTP 429"), None)
+    sources_health._state["CoinPaprika"].update(premier_echec=iso(NOW - timedelta(minutes=30)),
+                                                derniere_tentative=iso(NOW - timedelta(seconds=20)))
     for name in ("Finnhub", "Kraken"):
         source(name, 5, first_ago_s=900, err="erreur réseau (ConnectError)", code=None)
     found = run()
     # deux vraies pannes + une limite : pas de constat « réseau coupé », la limite reste une info à part
-    assert keys(found) == {"limit:helious", "source:finnhub", "source:kraken"}
-    f = one(found, "limit:helious")
-    assert f["kind"] == "info" and f["title"] == "Helious limite ses appels (trop de demandes)"
-    assert "pas une panne" in f["detail"] and "Finnhub" in f["detail"] and not any(s.get("cmd") for s in f["steps"])
+    assert keys(found) == {"limit:coinpaprika", "source:finnhub", "source:kraken"}
+    f = one(found, "limit:coinpaprika")
+    assert f["kind"] == "info" and f["title"] == "CoinPaprika limite ses appels (trop de demandes)"
+    assert "pas une panne" in f["detail"] and "quota du mois" in f["detail"]
+    assert not any(s.get("cmd") for s in f["steps"])
+
+
+# --- Calendrier économique (Helious, sans secours) ---------------------------------------------------------
+
+def calendar_kept(age: timedelta, end_in: timedelta = timedelta(days=3)) -> None:
+    """Calendrier gardé sur disque, reçu il y a `age`, dont le dernier événement tombe `end_in` après sa réception."""
+    got = NOW - age
+    events = [{"datetime_utc": iso(got + timedelta(hours=h)), "title": "US: CPI", "country": "US", "impact": "High",
+               "forecast": None, "previous": None, "actual": None, "status": None} for h in (2, end_in / timedelta(hours=1))]
+    fallback.store.put("economic_calendar", Result("economic_calendar", events, "Helious", "Source : Helious", iso(got)))
+
+
+def helious_refuses(code: int | None, err: str, fails: int = 3, first_ago: timedelta = timedelta(days=2)) -> None:
+    for _ in range(fails):
+        sources_health.fail("https://api.helious.io/v1/calendar?days_back=1", SourceError(err), None)
+    sources_health._state["Helious"].update(premier_echec=iso(NOW - first_ago),
+                                            derniere_tentative=iso(NOW - timedelta(minutes=10)))
+    assert sources_health._state["Helious"]["code"] == code
+
+
+def test_calendrier_perime_quota_sans_cle_demande_une_cle(env):
+    calendar_kept(timedelta(days=26))
+    helious_refuses(429, "HTTP 429")
+    found = run()
+    assert keys(found) == {"calendar:helious"}  # ni limit:helious ni source:helious : un seul constat, sur l'effet
+    f = one(found, "calendar:helious")
+    assert f["kind"] == "action" and f["space"] == "commun"
+    assert f["title"] == "Calendrier économique périmé : quota Helious du mois épuisé"
+    assert "50 appels par mois partagés" in f["detail"] and "Le quota revient le 1er du mois" in f["detail"]
+    assert "Dernière version reçue : 02/10 à 17:00 ; elle couvre jusqu'au 05/10 à 17:00." in f["detail"]
+    assert "helious.io" in f["steps"][0]["text"]
+    assert any(s.get("cmd") == "nano .env" for s in f["steps"])
+    assert any("HELIOUS_API_KEY=" in s["text"] for s in f["steps"])
+    assert f["evidence"]["clé HELIOUS_API_KEY"] == "absente" and f["evidence"]["relu toutes les"] == "24 h"
+    assert f["evidence"]["code"] == 429
+
+
+def test_calendrier_frais_aucun_constat_malgre_les_refus(env):
+    calendar_kept(timedelta(hours=20))  # sans clé : relu une fois par jour, + 2 h de marge
+    helious_refuses(429, "HTTP 429")
+    assert run() == []
+
+
+def test_calendrier_jamais_recu_et_helious_en_panne(env):
+    helious_refuses(None, "erreur réseau (ConnectError)")
+    f = one(run(), "calendar:helious")
+    assert f["kind"] == "probleme" and f["title"] == "Calendrier économique périmé : Helious ne répond plus"
+    assert "Aucune version reçue jusqu'ici." in f["detail"] and "ConnectError" in f["detail"]
+
+
+def test_calendrier_quota_de_la_cle_epuise(env, monkeypatch):
+    monkeypatch.setenv("HELIOUS_API_KEY", "hel_secret_de_test")
+    calendar_kept(timedelta(hours=11))  # avec la clé : relu toutes les 8 h, + 2 h de marge
+    helious_refuses(429, "HTTP 429")
+    f = one(run(), "calendar:helious")
+    assert f["kind"] == "probleme" and f["title"] == "Calendrier économique périmé : quota de la clé Helious épuisé"
+    assert f["evidence"]["clé HELIOUS_API_KEY"] == "présente" and f["evidence"]["relu toutes les"] == "8 h"
+    assert "hel_secret_de_test" not in json.dumps(f, ensure_ascii=False)
+
+
+def test_calendrier_cle_refusee(env, monkeypatch):
+    monkeypatch.setenv("HELIOUS_API_KEY", "hel_secret_de_test")
+    calendar_kept(timedelta(days=2))
+    helious_refuses(401, "HTTP 401")
+    f = one(run(), "calendar:helious")
+    assert f["kind"] == "action" and f["title"] == "Calendrier économique périmé : clé Helious refusée"
+    assert any(s.get("cmd") == "nano .env" for s in f["steps"])
+    assert "hel_secret_de_test" not in json.dumps(f, ensure_ascii=False)
+
+
+def test_calendrier_redemarrage_garde_le_constat_ouvert_et_masque(env, monkeypatch):
+    calendar_kept(timedelta(days=3))
+    helious_refuses(429, "HTTP 429")
+    run()
+    row = A.book.open_rows()[0]
+    asyncio.run(A._ack(row["id"], True))
+    monkeypatch.setattr(sources_health, "_state", {})  # redémarrage : santé des sources vide, aucune lecture tentée
+    assert run() == []
+    rows = A.book.open_rows()
+    assert [(r["key"], r["id"], bool(r["ack_at"])) for r in rows] == [("calendar:helious", row["id"], True)]
+
+
+def test_calendrier_401_sans_cle_demande_une_cle(env):
+    calendar_kept(timedelta(days=3))
+    helious_refuses(401, "HTTP 401")
+    f = one(run(), "calendar:helious")
+    assert f["kind"] == "action" and f["title"] == "Calendrier économique périmé : Helious demande une clé"
+    assert any(s.get("cmd") == "nano .env" for s in f["steps"])
+
+
+def test_calendrier_garde_qui_couvre_encore_la_semaine(env):
+    # reçu il y a 30 h, couvre 8 jours : les annonces restent, seuls les chiffres publiés depuis manquent
+    calendar_kept(timedelta(hours=30), end_in=timedelta(days=8))
+    helious_refuses(429, "HTTP 429")
+    f = one(run(), "calendar:helious")
+    assert "gardent les annonces jusqu'au 04/11 à 10:00, mais sans les chiffres publiés depuis" in f["detail"]
+    assert "n'ont plus les annonces" not in f["detail"]
+    assert "Dernière version reçue : 27/10 à 10:00 ; elle couvre jusqu'au 04/11 à 10:00." in f["detail"]
+
+
+def test_calendrier_lecture_reussie_ferme_le_constat(env):
+    calendar_kept(timedelta(days=3))
+    helious_refuses(429, "HTTP 429")
+    assert keys(run()) == {"calendar:helious"}
+    sources_health.ok("https://api.helious.io/v1/calendar", None)
+    calendar_kept(timedelta(minutes=1))
+    assert run() == []
 
 
 def test_refus_403_de_la_sec_ou_d_alpaca_n_est_pas_une_cle(env):

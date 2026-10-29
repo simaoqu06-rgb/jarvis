@@ -7,6 +7,7 @@ from datetime import date, datetime, time, timezone
 from zoneinfo import ZoneInfo
 
 from app.config import secret
+from app.core import fallback
 from app.core.fallback import Source, resolve
 from app.core.http import SourceError
 from app.core.result import Result
@@ -24,7 +25,9 @@ DAY = 86400
 
 OPEN_METEO = "Données : Open-Meteo (CC BY 4.0)"
 OSM = "© OpenStreetMap"
-HELIOUS = "Source : Helious (https://helious.io)"
+# Crédits Helious comptés au mois (sources/helious.py) : 3 lectures par jour avec la clé (≈ 93 sur 100), une sans
+# (≈ 31 sur les 50 partagés par l'adresse du serveur)
+CALENDAR_TTL_KEY, CALENDAR_TTL_NO_KEY = 8 * HOUR, DAY
 
 
 def _symbols(symbols: list[str]) -> list[str]:
@@ -97,12 +100,10 @@ async def stock_quotes(symbols: list[str]) -> Result:
 
 
 async def market_news(limit: int = 20) -> Result:
+    # Finnhub seul, en direct : Helious (60 min de retard sans abonnement) garde ses crédits du mois pour le calendrier
     return await resolve(
         "market_news", f"market_news:{limit}",
-        [
-            Source("Helious", helious.market_news, HELIOUS),
-            Source("Finnhub", finnhub.market_news, "Données : Finnhub", "FINNHUB_API_KEY"),
-        ],
+        [Source("Finnhub", finnhub.market_news, "Données : Finnhub", "FINNHUB_API_KEY")],
         ttl=5 * MINUTE, limit=limit,
     )
 
@@ -139,13 +140,34 @@ async def space_news(query: str | None = None, limit: int = 20) -> Result:
     )
 
 
+def calendar_ttl() -> int:
+    return CALENDAR_TTL_KEY if secret(helious.KEY_NAME) else CALENDAR_TTL_NO_KEY
+
+
 async def economic_calendar() -> Result:
-    # Pas de secours sans clé : FRED sera ajouté quand sa clé sera disponible.
-    return await resolve(
+    # Pas de secours sans clé : FRED sera ajouté quand sa clé sera disponible. La dernière lecture réussie, gardée sur
+    # disque, sert tant qu'elle a moins de calendar_ttl() : un redémarrage ne dépense pas de crédit Helious.
+    ttl = calendar_ttl()
+    last = fallback.store.last_known("economic_calendar")
+    got = _utc(last.updated_at) if last else None
+    if got and 0 <= (datetime.now(timezone.utc) - got).total_seconds() < ttl:
+        return last
+    res = await resolve(
         "economic_calendar", "economic_calendar",
         [Source("Helious", helious.economic_calendar, "Source : Helious (https://helious.io/calendar)")],
-        ttl=HOUR,
+        ttl=ttl,
     )
+    if not res.stale:
+        fallback.store.flush()  # sur disque tout de suite : un arrêt brutal ne coûte pas une relecture
+    return res
+
+
+def _utc(iso: str | None) -> datetime | None:
+    try:
+        d = datetime.fromisoformat(iso) if iso else None
+    except ValueError:
+        return None
+    return d if d is None or d.tzinfo else d.replace(tzinfo=timezone.utc)
 
 
 async def us_market_holidays(year: int | None = None) -> Result:

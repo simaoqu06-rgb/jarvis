@@ -30,13 +30,13 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from app import alerts, config, scheduler
-from app.core import sources_health, version
+from app import alerts, config, needs, scheduler
+from app.core import fallback, sources_health, version
 from app.lab import db as lab_db
 from app.lab.method import COUNCIL
 from app.lab import routines_watch as RW
 from app.notify import bot
-from app.sources import twelvedata
+from app.sources import helious, twelvedata
 from app.trading import calendar as CAL
 from app.trading import proposals as PR
 from app.trading import research
@@ -78,6 +78,7 @@ QUOTE_STALE_FACTOR = 2       # cotation périmée au double du seuil du cockpit 
 QUOTE_OPEN_GRACE_S = 300     # à l'ouverture, la cotation d'une action date de la veille jusqu'à la première bougie
 COUNCIL_RECENT_H = 72
 REBUILD_GRACE_S = 600        # git pull puis --build : l'ancien conteneur voit le nouveau code pendant la construction
+CALENDAR_LATE_S = 7200       # calendrier économique plus vieux que sa durée de vie (8 h avec la clé, 24 h sans) + 2 h
 PROPOSALS_MAX = 8
 MAX_ITEMS = 200
 
@@ -455,13 +456,12 @@ SOURCE_ROLES = {
                          "le scan du matin, le Killmode et le secours de Twelve Data ne marchent plus"),
     "Alpaca (compte fictif)": ("forward-test du labo sur le compte fictif (aucun argent réel)",
                                "le forward-test n'avance plus"),
-    "Finnhub": ("catalyseurs des plans (actus, résultats), agenda des résultats, fiche société",
-                "la note catalyseur des plans et l'agenda des résultats sont incomplets"),
+    "Finnhub": ("actus de marché (seule source), catalyseurs des plans (actus, résultats), agenda des résultats, fiche "
+                "société", "les alertes d'actus de marché s'arrêtent, et la note catalyseur des plans et l'agenda des "
+                           "résultats sont incomplets"),
     "SEC EDGAR": ("dépôts 8-K (agenda, fiche société)", "les 8-K de l'agenda ne sont plus vérifiés"),
     "Frankfurter (BCE)": ("change EUR/USD des tailles en euros", "les tailles en euros prennent le dernier change connu"),
-    "Helious": ("actus de marché (Finnhub en secours) et calendrier économique de l'agenda (sans secours)",
-                "les actus passent par Finnhub et le calendrier économique garde sa dernière version connue"),
-}
+}  # Helious (calendrier économique) : règle à part, r_calendar
 KEYED = {"Twelve Data": "TWELVEDATA_API_KEY", "Finnhub": "FINNHUB_API_KEY",
          "Alpaca (données)": "ALPACA_API_KEY et ALPACA_SECRET_KEY",
          "Alpaca (compte fictif)": "ALPACA_API_KEY et ALPACA_SECRET_KEY"}
@@ -492,7 +492,7 @@ def r_sources(ctx: dict, now: datetime) -> list[dict] | None:
     snap = sources_health.snapshot()
     down, auth, limited = {}, {}, {}
     for name, s in snap.items():
-        if s.get("statut") != "erreur":
+        if s.get("statut") != "erreur" or name == "Helious":  # Helious : r_calendar, qui juge l'effet sur le calendrier
             continue
         if name in KEYED and s.get("code") == 401 and s.get("echecs_suite", 0) >= AUTH_MIN_FAILS:
             auth.setdefault(KEYED[name], []).append((name, s))
@@ -523,8 +523,8 @@ def r_sources(ctx: dict, now: datetime) -> list[dict] | None:
                                                                                 "en retard"))
         out.append(item(f"limit:{slug(name)}", "info", "commun", f"{name} limite ses appels (trop de demandes)",
                         f"Rôle : {role}. {name} refuse les appels avec un HTTP 429 depuis "
-                        f"{_paris(_parse(s.get('premier_echec')), now)} : c'est sa limite de débit, pas une panne, et "
-                        f"JARVIS réessaie à chaque passage. En attendant, {impact}.",
+                        f"{_paris(_parse(s.get('premier_echec')), now)} : c'est une limite d'appels (par minute, ou quota du "
+                        f"mois épuisé), pas une panne, et JARVIS réessaie à chaque passage. En attendant, {impact}.",
                         [say("Rien à faire : le constat se ferme au premier appel accepté.")], _source_evidence(name, s)))
     for name, s in sorted(down.items()):
         role, impact = SOURCE_ROLES.get(name, ("source de données de JARVIS", "les vues qui l'utilisent sont "
@@ -534,6 +534,66 @@ def r_sources(ctx: dict, now: datetime) -> list[dict] | None:
                         f"{_paris(_parse(s.get('dernier_succes')), now)} ; dernière erreur : {s.get('erreur')}.",
                         [say("Rien à faire si ça revient seul.")] + diag_steps(), _source_evidence(name, s)))
     return out
+
+
+def _calendar_end(data) -> datetime | None:
+    dated = [d for d in (_parse(e.get("datetime_utc")) for e in data or [] if isinstance(e, dict)) if d is not None]
+    return max(dated) if dated else None
+
+
+def r_calendar(ctx: dict, now: datetime) -> list[dict] | None:
+    """Calendrier économique (Helious, sans secours) : constat quand sa dernière version est périmée ET que la
+    dernière lecture a échoué. Un calendrier que personne n'a redemandé depuis n'est pas une panne. La santé des
+    sources vit en mémoire : après un redémarrage, sans lecture tentée, pas d'avis (le constat ouvert reste)."""
+    ttl = needs.calendar_ttl()
+    last = fallback.store.last_known("economic_calendar")
+    got = _parse(last.updated_at) if last else None
+    if got is not None and (now - got).total_seconds() < ttl + CALENDAR_LATE_S:
+        return []
+    s = sources_health.snapshot().get("Helious")
+    if s is None:
+        return None
+    if s.get("statut") != "erreur":
+        return []
+    keyed = bool(config.secret(helious.KEY_NAME))
+    code, since = s.get("code"), _paris(_parse(s.get("premier_echec")), now)
+    end = _calendar_end(last.data) if last else None
+    held = (f"Dernière version reçue : {_paris(got, now)}" if got else "Aucune version reçue jusqu'ici") + (
+        f" ; elle couvre jusqu'au {_paris(end)}." if got and end else ".")
+    role = ("Helious est la seule source du calendrier économique : l'Agenda du cockpit (« Cette semaine ») et le point "
+            + (f"du matin gardent les annonces jusqu'au {_paris(end)}, mais sans les chiffres publiés depuis ni les "
+               "annonces ajoutées." if end is not None and end > now else
+               "du matin n'ont plus les annonces à venir (inflation, emploi, Fed)."))
+    evidence = _source_evidence("Helious", s) | {
+        "calendrier reçu le": last.updated_at if last else None, "couvre jusqu'au": _iso(end) if end else None,
+        "clé HELIOUS_API_KEY": "présente" if keyed else "absente", "relu toutes les": f"{ttl // 3600} h"}
+    if code == 429 and not keyed:
+        return [item("calendar:helious", "action", "commun", "Calendrier économique périmé : quota Helious du mois épuisé",
+                     f"{role} Sans clé, Helious donne 50 appels par mois partagés par l'adresse du serveur, et les "
+                     f"refuse (HTTP 429) depuis {since}. {held} Le quota revient le 1er du mois.",
+                     [say("Crée un compte gratuit sur helious.io, puis une clé d'API (page Developers, « Get a key ») : "
+                          "100 appels par mois à JARVIS seul, et le calendrier relu toutes les 8 h.")]
+                     + env_steps(helious.KEY_NAME), evidence)]
+    if code == 429:
+        return [item("calendar:helious", "probleme", "commun",
+                     "Calendrier économique périmé : quota de la clé Helious épuisé",
+                     f"{role} Ta clé Helious donne 100 appels par mois (JARVIS en prend environ 93) ; Helious les "
+                     f"refuse (HTTP 429) depuis {since}. {held} Le quota revient le 1er du mois.",
+                     [say("Rien à faire : le calendrier revient seul le 1er du mois. Si ça se répète, l'offre Starter de "
+                          "Helious (14,99 $ par mois) donne 1 500 appels.")] + diag_steps(), evidence)]
+    if code in (401, 403) and not keyed:
+        return [item("calendar:helious", "action", "commun", "Calendrier économique périmé : Helious demande une clé",
+                     f"{role} Helious refuse les appels sans clé ({s.get('erreur')}) depuis {since}. {held}",
+                     [say("Crée un compte gratuit sur helious.io, puis une clé d'API (page Developers, « Get a key »).")]
+                     + env_steps(helious.KEY_NAME), evidence)]
+    if code in (401, 403):
+        return [item("calendar:helious", "action", "commun", "Calendrier économique périmé : clé Helious refusée",
+                     f"{role} Helious refuse la clé {helious.KEY_NAME} ({s.get('erreur')}) depuis {since}. {held}",
+                     [say("Refais une clé sur helious.io (page Developers, « Get a key »).")]
+                     + env_steps(helious.KEY_NAME), evidence)]
+    return [item("calendar:helious", "probleme", "commun", "Calendrier économique périmé : Helious ne répond plus",
+                 f"{role} Dernière erreur : {s.get('erreur')}, depuis {since}. {held}",
+                 [say("Rien à faire si ça revient seul.")] + diag_steps(), evidence)]
 
 
 def r_quota(ctx: dict, now: datetime) -> list[dict]:
@@ -562,7 +622,8 @@ KEYS = [
     ("TWELVEDATA_API_KEY", "action", "le suivi des actions passe sur Alpaca (16 min de retard) et la confirmation des "
                                      "GO perd le temps réel",
      "sur twelvedata.com (offre gratuite)"),
-    ("FINNHUB_API_KEY", "action", "plus de catalyseur dans les plans, ni d'agenda des résultats",
+    ("FINNHUB_API_KEY", "action", "plus d'actus de marché (alertes Discord comprises), ni de catalyseur dans les plans, ni "
+                                  "d'agenda des résultats",
      "sur finnhub.io (offre gratuite)"),
     ("ALPACA_API_KEY", "action", "plus de scanner du matin, de Killmode ni de forward-test",
      "sur app.alpaca.markets, compte Paper"),
@@ -956,7 +1017,7 @@ def r_proposals(ctx: dict, now: datetime) -> list[dict]:
 RULES = [
     ("worker du labo", r_lab_worker), ("base du labo", r_lab_base), ("garde du Labo 1", r_lab_v1),
     ("décisions du council", r_council), ("boucles", r_loops), ("erreurs", r_errors), ("disque", r_disk),
-    ("sources", r_sources), ("crédits Twelve Data", r_quota), ("clés", r_keys), ("Discord", r_discord),
+    ("sources", r_sources), ("calendrier économique", r_calendar), ("crédits Twelve Data", r_quota), ("clés", r_keys), ("Discord", r_discord),
     ("routines Claude", r_routines), ("déploiement", r_deploy), ("sorties à déclarer", r_undeclared),
     ("KILL après la clôture", r_kill_overnight), ("positions", r_positions), ("risque", r_risk),
     ("grade", r_grade), ("propositions", r_proposals),
