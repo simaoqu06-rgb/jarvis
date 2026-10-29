@@ -93,7 +93,7 @@ privé, ou dans les réglages du réseau Wi-Fi utilisé) et vérifie que l'appli
 contourner le DNS de Tailscale, et l'adresse `.ts.net:4443` ne répond plus.
 
 Après une mise à jour du cockpit, recharge la page une fois (les fichiers sont versionnés, le navigateur prend la
-nouvelle version). Si une vue reste vide, le bouton « Télécharger le diagnostic » de la vue Santé (touche `8`)
+nouvelle version). Si une vue reste vide, le bouton « Télécharger le diagnostic » de la vue Santé (touche `9`)
 produit un JSON sans aucune clé ni valeur de variable, à transmettre tel quel.
 
 Le message « Trading Cockpit » apparaît aussi sur Discord dès le premier trade suivi : épingle-le
@@ -326,6 +326,14 @@ au code). Il ne lit jamais `.git/config` ni `.env` dans ce montage. Le montage p
 - `JARVIS_SSH_CIBLE=root@<adresse du serveur>` : seulement si le serveur change ; sans elle, les commandes `ssh` de
   la page visent `root@2.31.19.106` ;
 - `JARVIS_GITHUB_TOKEN` (jeton en **lecture seule**) : seulement si le dépôt redevient privé ; public, il ne sert pas.
+
+**Rubrique « À faire » (vue, pastille et bandeau)** : rien à migrer ni à ajouter dans `.env`. Déploiement habituel,
+pas à pas :
+1. depuis PowerShell : `ssh root@2.31.19.106` ;
+2. `cd /root/jarvis && git pull && docker compose up -d --build` ;
+3. recharge le cockpit une fois : la vue À faire est la 2e du rail (touche `2` ou `G T`), les vues
+   suivantes avancent d'un cran (Marchés `3` … Santé `9`). `data/attention.json` se crée tout seul au premier passage
+   (une minute environ) ; avant, le bandeau et la page disent « Première vérification en cours ».
 
 ## Ménage automatique
 

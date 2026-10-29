@@ -557,7 +557,8 @@ async def state(space: str = "paper"):
             "lab": lab_heartbeat(now), "portfolio": portfolio(space, now, positions), "positions_open": positions,
             "risk": risk(now), "proposals_pending": _pending_proposals(), "market_sessions": market_sessions(now),
             "sources": sources_short(), "agenda_today": agenda_today(now), "plans_today": plans_today(now),
-            "killmode": _killmode_state(), "attention": todo["counts"], "attention_top": todo["top"]}
+            "killmode": _killmode_state(), "attention": todo["counts"], "attention_top": todo["top"],
+            "attention_check": todo["last_check_at"]}
 
 
 def _killmode_state() -> dict:

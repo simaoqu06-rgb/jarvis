@@ -16,6 +16,8 @@ document.createElement = function (tag, options) {
 /* ---------- DOM sûr */
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+// affiché : ni masqué, ni dans un <details> replié (son contenu garde des boîtes mais ne prend pas le focus)
+const shown = (n) => n.getClientRects().length > 0 && !n.closest('details:not([open])');
 const root = document.documentElement;
 const put = (node, ...kids) => { node.replaceChildren(); return add(node, kids); };
 function add(node, kids) {
@@ -50,6 +52,7 @@ function svg(tag, attrs, ...kids) {
 const P = (d) => ['path', { d }];
 const ICONS = {
   cockpit: [['rect', { x: 3, y: 3, width: 7, height: 9, rx: 2 }], ['rect', { x: 14, y: 3, width: 7, height: 5, rx: 2 }], ['rect', { x: 14, y: 12, width: 7, height: 9, rx: 2 }], ['rect', { x: 3, y: 16, width: 7, height: 5, rx: 2 }]],
+  afaire: [['rect', { x: 8, y: 2, width: 8, height: 4, rx: 1 }], P('M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2'), P('M9 14l2 2 4-4')],
   marches: [P('M7 4v16M17 4v16'), ['rect', { x: 4.5, y: 8, width: 5, height: 7, rx: 1 }], ['rect', { x: 14.5, y: 6, width: 5, height: 9, rx: 1 }]],
   positions: [P('M12 3l9 5-9 5-9-5 9-5z'), P('M3 13l9 5 9-5')],
   risque: [P('M12 3l8 3v6c0 4.5-3.4 8.2-8 9-4.6-.8-8-4.5-8-9V6l8-3z'), P('M9 12l2 2 4-4')],
@@ -161,6 +164,7 @@ function action(name, args = {}) {
 /* ---------- état */
 const VIEWS = [
   ['cockpit', 'Cockpit', "Vue d'ensemble", 'c'],
+  ['afaire', 'À faire', 'Ce que tu as à faire, problèmes détectés, à savoir', 't'],
   ['marches', 'Marchés', 'Graphique, watchlist et plan du jour', 'm'],
   ['positions', 'Positions', 'Trades ouverts, ordres IBKR, clôtures, conseils', 'p'],
   ['risque', 'Risque', 'Grade, risque ouvert, arrêt du jour', 'r'],
@@ -176,6 +180,8 @@ const st = {
   chartSym: null, chartMarket: null, tf: '15m', cursor: -1, drawer: null, instruments: null, instrumentsAt: 0,
   instrument: null, posCharts: null, journal: null, journalAt: 0, prevPos: null, lastPlan: null, lastSizing: null,
   labTab: 'strategies', lab: null, labAt: 0, agenda: null, agendaAt: 0, health: null, healthAt: 0,
+  todo: null, todoAt: 0, todoErr: '', todoSkew: 0, todoFilter: 'all', todoFold: { masques: false, regles: false },
+  todoOpen: new Set(), todoSeen: null, todoPrev: null, todoGrace: new Set(), todoFocus: null, badgeN: null, focusSym: null,
 };
 const apiSpace = () => (st.space === 'live' ? 'trades' : 'paper');
 const spaceName = () => (st.space === 'live' ? 'Mes trades' : 'Papier');
@@ -228,6 +234,8 @@ async function fetchHeavy() {
     await loadJournal(30000);
   } else if (view === 'sante') {
     await loadInto('health', '/api/cockpit/health');
+  } else if (view === 'afaire') {
+    await loadTodo();
   } else if (view === 'risque') {
     await Promise.allSettled([loadText('grade'), loadText('frais')]);
   }
@@ -258,7 +266,7 @@ function signature(view) {
 }
 function onState() {
   diffPositions(st.state.positions_open || []);
-  updatePills(); renderBanner();
+  updatePills(); renderBanner(); updateBadge();
   const sig = signature(st.view);
   if (sig !== st.sig) render(false); else runBinders();
   if (st.drawer) bindDrawer();
@@ -425,7 +433,7 @@ function render(animate) {
 
 /* --- Cockpit */
 BUILD.cockpit = () => {
-  const s = st.state, out = [heroCard(), sessionsCard(), openCard(), riskCard(), plansCard(), agendaCard(6)];
+  const s = st.state, out = [todoBanner(), heroCard(), sessionsCard(), openCard(), riskCard(), plansCard(), agendaCard(6)];
   if ((s.proposals_pending || []).length) out.push(proposalsCard());
   return out;
 };
@@ -702,6 +710,298 @@ function proposalsCard() {
       el('button', { class: 'btn sm primary', type: 'button', onclick: () => approveProposal(p) }, 'Approuver', el('span', { class: 'lock', text: '●', title: 'appui maintenu' })))))));
 }
 
+/* --- À faire : constats du moteur (app/web/attention.py, docs/CARTE-INTERFACE.md §8). Pastille et bandeau lisent
+   `state.attention` (tous espaces confondus) ; la vue relit /attention toutes les 10 s quand elle est affichée. */
+const KIND = { action: ['À faire', 'À faire de ton côté'], probleme: ['Problème', 'Problèmes détectés'], info: ['Info', 'Pour info'] };
+const SPACE_FR = { commun: 'Commun', trades: 'Mes trades', paper: 'Papier' };
+const TODO_FILTERS = [['all', 'Tout'], ['commun', 'Commun'], ['trades', 'Mes trades'], ['paper', 'Papier']];
+const SPACE_VIEWS = new Set(['cockpit', 'marches', 'positions', 'journal']); // vues qui dépendent de l'espace affiché
+try { const f = localStorage.getItem('cockpit.todoFilter'); if (TODO_FILTERS.some((x) => x[0] === f)) st.todoFilter = f; } catch (_) { /* stockage indisponible */ }
+const isOpen = (f) => !f.resolved_at && !f.ack_at;
+const todoId = (f) => (f.id == null ? String(f.key) : String(f.id));
+const nOf = (n, one, many) => n + ' ' + (n > 1 ? many : one);
+const spChip = (space) => el('span', { class: 'sp-chip s-' + space, text: SPACE_FR[space] || space });
+function clockAt(iso) {
+  const d = toDate(iso); if (!d) return DASH;
+  return dayKey(d) === dayKey(new Date()) ? hhmm(d) : DTF.dm.format(d) + ' ' + hhmm(d);
+}
+function todoTotals(c) {
+  const t = (c && c.total) || {}, tr = (c && c.trades) || {};
+  return { a: t.action || 0, p: t.probleme || 0, i: t.info || 0, trades: (tr.action || 0) + (tr.probleme || 0) };
+}
+function todoSummary(n) {
+  const bits = [n.a ? n.a + ' à faire' : null, n.p ? nOf(n.p, 'problème', 'problèmes') : null].filter(Boolean);
+  if (!bits.length) return 'Rien à faire de ton côté' + (n.i ? ' · ' + nOf(n.i, 'info à lire', 'infos à lire') : '');
+  return bits.join(' · ') + (n.trades ? ' (dont ' + n.trades + ' dans Mes trades)' : '');
+}
+
+/* Pastille du rail et de l'onglet mobile, titre de l'onglet du navigateur */
+function updateBadge() {
+  const c = st.state && st.state.attention; if (!c) return;
+  const n = todoTotals(c), total = n.a + n.p, grew = st.badgeN != null && total > st.badgeN;
+  for (const b of $$('[data-badge]')) {
+    b.hidden = !total; b.textContent = total > 9 ? '9+' : String(total);
+    b.classList.toggle('hot', n.a > 0);
+    if (grew && !reduced()) { b.classList.remove('pulse'); void b.offsetWidth; b.classList.add('pulse'); setTimeout(() => b.classList.remove('pulse'), 650); }
+  }
+  for (const s of $$('[data-badge-sr]')) s.textContent = total ? ', ' + todoSummary(n) : '';
+  const rail = $('#nav [data-go="afaire"]'); if (rail) rail.title = 'À faire (2) · ' + todoSummary(n);
+  st.badgeN = total;
+  document.title = (n.a ? '(' + n.a + ') ' : '') + 'JARVIS · Trading Cockpit';
+}
+
+/* Bandeau en haut de la vue Cockpit : chaud (action), tiède (problèmes), calme (une ligne) */
+function todoBanner() {
+  const body = el('div', { class: 'tb-body' });
+  const btn = el('button', { class: 'btn sm primary', type: 'button', data: { go: 'afaire' } }, 'À faire ', el('span', { class: 'kh' }, kbd('G'), ' ', kbd('T')));
+  const box = el('article', { class: 'card c-12 todo-banner calm', 'aria-label': 'À faire' }, body, btn);
+  bind((s) => {
+    const c = s.attention; box.hidden = !c; if (!c) return;
+    const n = todoTotals(c), top = s.attention_top || [];
+    box.className = 'card c-12 todo-banner ' + (n.a ? 'hot' : n.p ? 'warm' : 'calm') + (!n.a && !n.p && !n.i && !s.attention_check ? ' wait' : '');
+    fill(body, [n, top.map((t) => [t.id, t.kind, t.space, t.title]), !!s.attention_check], () => {
+      // avant le premier passage du moteur, zéro ne veut pas dire « rien à faire »
+      if (!n.a && !n.p && !n.i && !s.attention_check) return el('p', { class: 'tb-line' }, el('b', { text: 'Première vérification en cours' }), ' · JARVIS relit son état une minute après le démarrage');
+      if (!n.a && !n.p) return el('p', { class: 'tb-line' }, el('b', { text: 'Rien à faire de ton côté' }), ' · ' + (n.i ? nOf(n.i, 'info à lire', 'infos à lire') : 'aucun problème détecté'));
+      const head = [n.a ? nOf(n.a, 'chose à faire de ton côté', 'choses à faire de ton côté') : null, n.p ? nOf(n.p, 'problème détecté', 'problèmes détectés') : null].filter(Boolean).join(' · ');
+      return [el('b', { class: 'tb-title', text: head + (n.trades ? ' (dont ' + n.trades + ' dans Mes trades)' : '') }),
+        el('ul', { class: 'tb-list' }, top.map((t) => el('li', null, el('button', { class: 'tb-it k-' + t.kind, type: 'button', onclick: () => openTodo(t) },
+          el('span', { class: 'todo-kind', text: KIND[t.kind][0] }), spChip(t.space), el('span', { class: 'tb-t', text: t.title, title: t.title })))))];
+    });
+  });
+  return box;
+}
+
+/* La vue */
+let todoUi = null;
+BUILD.afaire = () => [todoMainCard(), todoLegendCard()];
+function todoMainCard() {
+  const meta = el('span'), box = el('div', { class: 'todo-box' });
+  const seg = el('div', { class: 'seg-tabs af-seg', role: 'group', 'aria-label': 'Portée affichée (touche F)' });
+  const segBtns = TODO_FILTERS.map(([k, t]) => { const nb = el('span', { class: 'seg-n' }); const b = el('button', { type: 'button', onclick: () => setTodoFilter(k) }, t, nb); seg.append(b); return [k, b, nb]; });
+  todoUi = { meta, box, segBtns, fp: null };
+  drawTodo(true);
+  everySecond(tickTodo);
+  return card('af-main', 'De ton côté', meta, seg, box);
+}
+function todoLegendCard() {
+  const row = (cls, tag, text) => el('div', { class: 'lg-row ' + cls }, tag, el('span', { class: 'small soft', text }));
+  return card('af-side', 'Comment lire cette page', null,
+    el('h3', { class: 'sub-h first' }, 'Trois types'),
+    el('div', { class: 'legend' },
+      row('k-action', el('span', { class: 'todo-kind', text: 'À faire' }), 'une commande à lancer, un bouton ou une décision qui t\'attend'),
+      row('k-probleme', el('span', { class: 'todo-kind', text: 'Problème' }), 'JARVIS voit une panne ou un défaut chez lui ; souvent il reprend seul, sinon les étapes disent quoi faire'),
+      row('k-info', el('span', { class: 'todo-kind', text: 'Info' }), 'rien à faire, bon à savoir')),
+    el('h3', { class: 'sub-h' }, 'Trois portées'),
+    el('div', { class: 'legend' },
+      row('', spChip('commun'), 'JARVIS, le serveur, le labo et ses propositions : visible dans les deux espaces'),
+      row('', spChip('trades'), 'tes trades réels, passés par toi chez IBKR et déclarés à JARVIS'),
+      row('', spChip('paper'), 'les recommandations suivies telles qu\'envoyées sur Discord')),
+    el('ul', { class: 'lg-notes' },
+      el('li', { text: 'Un constat se ferme tout seul quand sa cause disparaît. « C\'est fait » ou « Masquer » le range ; s\'il est encore détecté, il reste dans Masqués.' }),
+      el('li', { text: 'Aucun bouton de cette page ne passe d\'ordre : JARVIS ne touche pas à ton compte IBKR.' }),
+      el('li', { text: 'Un bouton qui décide (proposition, veto) demande un appui maintenu.' })),
+    el('p', { class: 'small muted kh mt-12' }, kbd('J'), ' ', kbd('K'), ' constat suivant · ', kbd('Entrée'), ' premier bouton · ', kbd('X'), ' ranger · ', kbd('F'), ' portée'));
+}
+async function loadTodo() {
+  try {
+    const d = await api('/api/cockpit/attention?space=all', { timeout: 15000 });
+    const at = Date.parse(d.generated_at);
+    st.todoSkew = isNaN(at) ? 0 : at - Date.now();
+    trackDone(d.items || []);
+    st.todo = d; st.todoAt = Date.now(); st.todoErr = '';
+  } catch (e) { st.todoErr = e.message; }
+  drawTodo();
+}
+/* Un constat qui vient de se régler reste 8 s à sa place, en vert, avant de passer dans « Réglés ». */
+function trackDone(items) {
+  const prev = st.todoPrev;
+  st.todoPrev = new Set(items.filter((f) => isOpen(f) && f.id != null).map((f) => f.id));
+  if (!prev) return;
+  for (const f of items) {
+    if (!f.resolved_at || !prev.has(f.id) || st.todoGrace.has(f.id)) continue;
+    st.todoGrace.add(f.id);
+    setTimeout(() => { st.todoGrace.delete(f.id); drawTodo(); }, 8000);
+  }
+}
+function setTodoFilter(k) {
+  st.todoFilter = k;
+  try { localStorage.setItem('cockpit.todoFilter', k); } catch (_) { /* idem */ }
+  drawTodo(true);
+}
+function todoVisible() { return todoUi ? $$('.todo[data-nav-item]', todoUi.box).filter(shown) : []; }
+function drawTodo(force) {
+  const ui = todoUi; if (!ui || !ui.box.isConnected) return;
+  const d = st.todo, c = d && d.counts;
+  for (const [k, b, nb] of ui.segBtns) {
+    b.setAttribute('aria-pressed', String(k === st.todoFilter));
+    const x = c && (k === 'all' ? c.total : c[k]);
+    nb.textContent = x ? String(x.action + x.probleme + x.info) : '';
+  }
+  if (!d) {
+    put(ui.box, st.todoErr ? empty('Lecture impossible', [st.todoErr, 'Nouvel essai dans 10 s.']) : [el('p', { class: 'muted small m-0', text: 'Lecture…' }), el('div', { class: 'skeleton short' })]);
+    ui.fp = null; tickTodo(); return;
+  }
+  const items = (d.items || []).filter((f) => st.todoFilter === 'all' || f.space === st.todoFilter);
+  const fp = st.todoFilter + '|' + [...st.todoGrace].join(',') + '|' + items.map((f) => [todoId(f), f.last_seen, f.ack_at, f.resolved_at].join('~')).join('|');
+  if (force || fp !== ui.fp) {
+    ui.fp = fp;
+    // focus, curseur et blocs dépliés survivent à la reconstruction
+    const act = document.activeElement, art = act && ui.box.contains(act) ? act.closest('.todo') : null;
+    const keep = art ? { id: art.dataset.todoId, role: act === art ? null : act.dataset.role || null, idx: todoVisible().indexOf(art) } : null;
+    const cur = $('.todo.cursor', ui.box), curId = cur ? cur.dataset.todoId : null;
+    const seen = st.todoSeen;
+    put(ui.box, todoGroups(items, d, seen));
+    st.todoSeen = new Set(items.map(todoId));
+    const list = todoVisible();
+    st.cursor = curId ? list.findIndex((x) => x.dataset.todoId === curId) : -1;
+    if (st.cursor >= 0) list[st.cursor].classList.add('cursor');
+    if (keep) {
+      const a = list.find((x) => x.dataset.todoId === keep.id);
+      const target = (a && keep.role && $('[data-role="' + keep.role + '"]', a)) || a || list[Math.min(Math.max(0, keep.idx), list.length - 1)];
+      if (target) target.focus({ preventScroll: true });
+    }
+  }
+  if (st.todoFocus) {
+    const a = todoVisible().find((x) => x.dataset.todoId === st.todoFocus);
+    if (a) { st.todoFocus = null; a.focus({ preventScroll: true }); a.scrollIntoView({ block: 'center', behavior: reduced() ? 'auto' : 'smooth' }); }
+  }
+  tickTodo();
+}
+function todoGroups(items, d, seen) {
+  const grace = (f) => !!f.resolved_at && st.todoGrace.has(f.id);
+  const open = items.filter((f) => isOpen(f) || grace(f));
+  const hidden = items.filter((f) => !f.resolved_at && f.ack_at), done = items.filter((f) => f.resolved_at && !grace(f));
+  const out = [];
+  if (!d.last_check_at && !items.length) out.push(empty('Première vérification en cours', ['JARVIS relit son état une minute après le démarrage ; la liste apparaît au passage suivant de la page (10 s).']));
+  else if (!open.some((f) => f.kind !== 'info' && !f.resolved_at)) out.push(todoOk(d));
+  for (const k of ['action', 'probleme', 'info']) {
+    const rows = open.filter((f) => f.kind === k); if (!rows.length) continue;
+    out.push(el('section', { class: 'todo-g', 'aria-label': KIND[k][1] }, el('h3', { class: 'sub-h first', text: KIND[k][1] + ' (' + rows.filter((f) => !f.resolved_at).length + ')' }), todoList(rows, seen)));
+  }
+  if (hidden.length) out.push(todoFold('masques', 'Masqués, toujours ouverts', hidden, seen));
+  if (done.length) out.push(todoFold('regles', 'Réglés ces 3 derniers jours', done, seen));
+  if (d.tronque) out.push(el('p', { class: 'small muted m-0', text: 'Liste coupée aux 200 constats les plus importants.' }));
+  return out;
+}
+function todoOk(d) {
+  const all = st.todoFilter === 'all', name = (TODO_FILTERS.find((x) => x[0] === st.todoFilter) || [])[1];
+  const n = todoTotals(d.counts), elsewhere = all ? 0 : n.a + n.p;
+  return el('div', { class: 'todo-ok', role: 'status' },
+    el('div', null, el('b', { text: all ? 'Rien à faire de ton côté.' : 'Rien à faire dans « ' + name + ' ».' }), all ? ' Aucun problème détecté.' : ' Aucun problème détecté dans cette portée.'),
+    el('div', { class: 'small' }, 'Dernière vérification ', d.last_check_at ? el('span', { data: { age: d.last_check_at } }) : 'pas encore faite', '.'),
+    elsewhere ? el('div', { class: 'small' }, nOf(elsewhere, 'constat ouvert', 'constats ouverts') + ' dans les autres portées : filtre « Tout » (touche F).') : null);
+}
+function todoFold(key, label, rows, seen) {
+  const d = el('details', { class: 'todo-fold' }, el('summary', { text: label + ' (' + rows.length + ')' }), todoList(rows, seen));
+  d.open = !!st.todoFold[key];
+  d.addEventListener('toggle', () => { st.todoFold[key] = d.open; });
+  return d;
+}
+const todoList = (rows, seen) => el('div', { class: 'todo-list', role: 'list' }, rows.map((f) => el('div', { role: 'listitem' }, todoCard(f, seen))));
+function evText(v) {
+  if (v == null || v === '') return DASH;
+  if (typeof v === 'boolean') return v ? 'oui' : 'non';
+  if (isNum(v)) return nf(0, 4).format(v);
+  if (Array.isArray(v)) return v.length ? v.map(evText).join(', ') : DASH;
+  const s = String(v);
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(s) && toDate(s) ? DTF.full.format(toDate(s)) : s;
+}
+function todoCard(f, seen) {
+  const id = todoId(f), done = !!f.resolved_at;
+  const a = el('article', { class: 'todo k-' + f.kind + ' s-' + f.space + (done ? ' done' : f.ack_at ? ' acked' : '') + (seen && !seen.has(id) ? ' appear' : ''), tabindex: '0',
+    'aria-label': KIND[f.kind][0] + ', ' + (SPACE_FR[f.space] || f.space) + ' : ' + f.title + (done ? ' (réglé)' : f.ack_at ? ' (rangé)' : ''), data: { navItem: '', todoId: id } });
+  a.append(el('div', { class: 'todo-h' }, el('span', { class: 'todo-kind', text: done ? 'Réglé · ' + KIND[f.kind][0] : KIND[f.kind][0] }), spChip(f.space)),
+    el('h4', { class: 'todo-t' }, f.title, f.toujours_constate && !done ? chip('toujours constaté', 'warn', 'Rangé, mais JARVIS le détecte encore') : null),
+    f.detail ? el('p', { class: 'todo-d' }, inlineMd(f.detail)) : null);
+  if (!done && (f.steps || []).length) a.append(el('ol', { class: 'todo-steps' }, f.steps.map((s, k) => el('li', null, todoStep(s, f, k)))));
+  const ev = Object.entries(f.evidence || {});
+  if (ev.length) {
+    const det = el('details', { class: 'todo-ev' }, el('summary', { data: { role: 'ev' }, text: 'Preuve' }), el('dl', { class: 'kv' }, ev.map(([k, v]) => kvRow(k, evText(v)))));
+    det.open = st.todoOpen.has(id);
+    det.addEventListener('toggle', () => { if (det.open) st.todoOpen.add(id); else st.todoOpen.delete(id); });
+    a.append(det);
+  }
+  const ages = done
+    ? el('span', null, 'réglé ' + clockAt(f.resolved_at) + ' · apparu ' + clockAt(f.first_seen))
+    : el('span', null, (f.first_seen ? 'depuis ' + clockAt(f.first_seen) + ' · ' : '') + 'encore constaté ', el('span', { data: { age: f.last_seen || '' } }), f.ack_at ? ' · rangé ' + clockAt(f.ack_at) : '');
+  const btn = f.id == null || done ? null
+    : el('button', { class: 'btn sm todo-ack', type: 'button', data: { role: 'ack' }, onclick: () => todoAck(f, !f.ack_at) }, f.ack_at ? 'Réafficher' : f.kind === 'action' ? 'C\'est fait' : 'Masquer');
+  a.append(el('div', { class: 'todo-f' }, ages, btn));
+  return a;
+}
+function todoStep(s, f, k) {
+  const text = el('span', { class: 'st-t' }, inlineMd(s.text));
+  if (s.cmd) {
+    return el('div', { class: 'st-b' }, text, el('div', { class: 'cmd' }, el('code', { text: s.cmd }),
+      el('button', { class: 'btn sm', type: 'button', data: { role: 'copy-' + k }, 'aria-label': 'Copier la commande ' + s.cmd, onclick: () => copyCmd(s.cmd) }, 'Copier')));
+  }
+  if (s.action) {
+    return el('div', { class: 'st-b' }, el('button', { class: 'btn sm' + (s.action === 'proposal_approve' ? ' primary' : s.action === 'veto' ? ' danger' : ''), type: 'button', data: { role: 'step-' + k }, onclick: () => todoAction(s, f) },
+      s.label || s.text, el('span', { class: 'lock', text: '●', title: 'appui maintenu' })));
+  }
+  if (s.go) return el('div', { class: 'st-b' }, el('button', { class: 'btn sm', type: 'button', data: { role: 'step-' + k }, onclick: () => todoGo(s, f) }, s.text, ' →'));
+  return el('div', { class: 'st-b' }, text);
+}
+function tickTodo() {
+  const ui = todoUi; if (!ui || !ui.box.isConnected) return;
+  const now = Date.now() + st.todoSkew, d = st.todo;
+  for (const n of $$('[data-age]', ui.box)) { const t = Date.parse(n.dataset.age); n.textContent = isNaN(t) ? DASH : ago((now - t) / 1000); }
+  if (d && st.todoErr) { ui.meta.className = 'warn'; ui.meta.textContent = 'dernière lecture ' + ago((Date.now() - st.todoAt) / 1000) + ' · ' + st.todoErr; }
+  else if (d) { ui.meta.className = ''; ui.meta.textContent = d.last_check_at ? 'vérifié ' + ago((now - Date.parse(d.last_check_at)) / 1000) : 'pas encore vérifié depuis le démarrage'; }
+  else { ui.meta.className = st.todoErr ? 'warn' : ''; ui.meta.textContent = st.todoErr ? 'lecture impossible' : 'Lecture…'; }
+}
+
+/* Gestes */
+async function todoAck(f, on, viaUndo) {
+  try {
+    await api('/api/cockpit/attention/' + encodeURIComponent(f.id) + (on ? '/ack' : '/unack'), { method: 'POST', body: {} });
+    if (on) toast('Rangé : « ' + f.title + ' »', 'good', () => todoAck(f, false, true));
+    else toast((viaUndo ? 'Annulé : ' : 'Réaffiché : ') + '« ' + f.title + ' »', 'info');
+  } catch (e) { toast(e.message, 'bad'); }
+  loadTodo(); statePoll.now();
+}
+const VETO_TEXT = 'Comme `!veto` : le labo annule la dernière décision du council à son prochain passage (méthode promue remise à l\'ancienne, challenger retiré ou règles approuvées refusées) et l\'annonce sur Discord.';
+const TODO_ACT = {
+  proposal_approve: (s, f) => ({ title: 'Approuver la proposition #' + s.args.id, text: f.title + '. Seule l\'approbation change le réglage ; elle ne s\'annule pas depuis le cockpit.', label: 'Maintenir pour approuver' }),
+  proposal_refuse: (s, f) => ({ title: 'Refuser la proposition #' + s.args.id, text: f.title + '. Refusée, elle sort de la liste et rien ne change.', label: 'Maintenir pour refuser', red: true }),
+  veto: () => ({ title: 'Poser un veto', text: VETO_TEXT, label: 'Maintenir pour poser le veto', red: true }),
+};
+function todoAction(s, f) {
+  const o = TODO_ACT[s.action]; if (!o) return;
+  holdConfirm(Object.assign(o(s, f), { run: async () => {
+    const r = await action(s.action, s.args || {});
+    toast(r.text, 'good');
+    // rangé tout de suite : il se ferme au prochain passage du moteur (une minute au plus) si sa cause a disparu
+    if (f.id != null && !f.ack_at) await api('/api/cockpit/attention/' + encodeURIComponent(f.id) + '/ack', { method: 'POST', body: {} }).catch(() => null);
+    loadTodo(); statePoll.now();
+  } }));
+}
+/* « Ouvrir … » : un constat de Mes trades ouvre sa vue dans Mes trades (appui maintenu), un constat du Papier dans le Papier. */
+function todoGo(s, f) {
+  const open = () => { if (s.symbol) st.focusSym = s.symbol; go(s.go, { force: true }); };
+  if (!SPACE_VIEWS.has(s.go) || f.space === 'commun' || (f.space === 'trades') === (st.space === 'live')) { open(); return; }
+  if (f.space === 'paper') { applySpace('paper'); open(); return; }
+  holdConfirm({ title: 'Ouvrir dans « Mes trades »', text: 'Ce constat porte sur tes trades réels : la vue s\'ouvre dans « Mes trades ». Les actions de cet espace modifient ton journal ; le cockpit n\'envoie jamais d\'ordre.', label: 'Maintenir pour entrer',
+    run: async () => { applySpace('live'); open(); } });
+}
+function openTodo(f) {
+  st.todoFocus = todoId(f);
+  if (st.todoFilter !== 'all' && st.todoFilter !== f.space) setTodoFilter('all');
+  go('afaire'); drawTodo();
+}
+async function copyCmd(text) {
+  const back = document.activeElement;
+  let ok = false;
+  try { if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(text); ok = true; } } catch (_) { /* repli ci-dessous */ }
+  if (!ok) {
+    const t = el('textarea', { class: 'sr', readonly: true, 'aria-hidden': 'true' }); t.value = text; document.body.append(t); t.select();
+    try { ok = document.execCommand('copy'); } catch (_) { ok = false; }
+    t.remove(); if (back && back.isConnected) back.focus();
+  }
+  toast(ok ? 'Commande copiée' : 'Copie impossible : sélectionne la commande à la main', ok ? 'good' : 'bad');
+}
+
 /* --- Positions */
 BUILD.positions = () => {
   const s = st.state, pos = s.positions_open || [], live = st.space === 'live';
@@ -794,7 +1094,10 @@ function adviceCard(pos) {
   } else body.push(el('p', { class: 'muted small mt-12', text: 'Aucun conseil gardé sur les trades ouverts aujourd\'hui. Les KILL n\'en ont pas : ils se vendent à la clôture.' }));
   return card('c-12', 'Conseils en prix', 'sortir, alléger ou garder ; ventes et stop en prix', ...body);
 }
-AFTER.positions = () => { updatePosCharts(); heavyPoll.now(); };
+AFTER.positions = () => {
+  updatePosCharts(); heavyPoll.now();
+  if (st.focusSym) { const r = $('#v-positions .ptable [data-sym="' + CSS.escape(st.focusSym) + '"]'); st.focusSym = null; if (r) { r.focus({ preventScroll: true }); r.scrollIntoView({ block: 'center' }); } }
+};
 function updatePosCharts() {
   const d = st.posCharts; if (!d || d.space !== apiSpace() || st.view !== 'positions') return;
   for (const c of d.charts) {
@@ -1612,9 +1915,10 @@ function buildNav() {
   $('#search-btn').prepend(icon('search', 16, 2));
   $('#pal-ico').append(icon('search', 18, 2));
   const nav = $('#nav');
-  VIEWS.forEach((v, k) => nav.append(el('button', { type: 'button', data: { go: v[0] }, title: v[1] + ' (' + (k + 1) + ')' }, icon(v[0]), el('span', { class: 'lbl', text: v[1] }), kbd(String(k + 1)))));
+  const badge = (id) => (id === 'afaire' ? [el('span', { class: 'badge', hidden: true, 'aria-hidden': 'true', data: { badge: '' } }), el('span', { class: 'sr', data: { badgeSr: '' } })] : null);
+  VIEWS.forEach((v, k) => nav.append(el('button', { type: 'button', data: { go: v[0] }, title: v[1] + ' (' + (k + 1) + ')' }, icon(v[0]), el('span', { class: 'lbl', text: v[1] }), badge(v[0]), kbd(String(k + 1)))));
   const tb = $('#tabbar');
-  for (const id of ['cockpit', 'marches', 'positions', 'journal']) { const v = VIEWS.find((x) => x[0] === id); tb.append(el('button', { type: 'button', data: { go: id } }, icon(id, 20), v[1])); }
+  for (const id of ['cockpit', 'afaire', 'marches', 'positions']) { const v = VIEWS.find((x) => x[0] === id); tb.append(el('button', { type: 'button', data: { go: id } }, icon(id, 20), v[1], badge(id))); }
   tb.append(el('button', { type: 'button', data: { act: 'palette' } }, icon('more', 20), 'Plus'));
   $$('[data-modk]').forEach((k) => { k.textContent = MOD + ' K'; });
 }
@@ -1849,7 +2153,7 @@ function killmode(on, viaUndo) {
   holdConfirm({ title: on ? 'Allumer Killmode' : 'Éteindre Killmode', text: on ? 'Comme `!kill on` : JARVIS pourra analyser et proposer des KILL (`!kill TICKER`, `!kill scan`). Les ordres restent les tiens.' : 'Comme `!kill off` : plus d\'analyse ni de KILL proposé. Le journal de Killmode reste lisible.', label: on ? 'Maintenir pour allumer' : 'Maintenir pour éteindre', red: !on, run });
 }
 function veto() {
-  holdConfirm({ title: 'Poser un veto', text: 'Comme `!veto` : le labo annule la dernière décision du council à son prochain passage (méthode promue remise à l\'ancienne, challenger retiré ou règles approuvées refusées) et l\'annonce sur Discord.', label: 'Maintenir pour poser le veto', red: true,
+  holdConfirm({ title: 'Poser un veto', text: VETO_TEXT, label: 'Maintenir pour poser le veto', red: true,
     run: async () => { const r = await action('veto'); toast(r.text, 'mode'); } });
 }
 
@@ -1903,6 +2207,9 @@ let palItems = [], palSel = 0, palBack = null;
 function commands() {
   const c = [], s = st.state, live = st.space === 'live';
   VIEWS.forEach((v, k) => c.push({ g: 'Navigation', t: 'Aller à ' + v[1], ico: icon(v[0], 15), h: [String(k + 1)], run: () => go(v[0]) }));
+  const todo = ((st.todo && st.todo.items) || (s && s.attention_top) || []).filter(isOpen);
+  for (const f of todo.slice(0, 30)) c.push({ g: 'À faire', t: KIND[f.kind][0] + ' · ' + f.title, ico: f.kind === 'action' ? '!' : f.kind === 'probleme' ? '⚠' : 'i', sub: SPACE_FR[f.space], danger: f.kind === 'action', run: () => openTodo(f) });
+  for (const [k, t] of TODO_FILTERS) c.push({ g: 'À faire', t: 'Filtrer : ' + t, ico: 'F', h: k === 'all' ? ['F'] : null, run: () => { setTodoFilter(k); go('afaire'); } });
   for (const p of (s && s.positions_open) || []) c.push({ g: 'Trades ouverts · ' + spaceName(), t: p.symbol + ' au graphique avec SL et TP', ico: p.symbol.slice(0, 3), sub: price(p.last_price), run: () => { st.chartSym = p.symbol; st.chartMarket = p.market; go('marches', { force: true }); } });
   for (const i of ((st.instruments && st.instruments.instruments) || [])) c.push({ g: 'Instruments', t: i.symbol + ' · ' + (i.market === 'crypto' ? 'crypto' : 'action'), ico: i.symbol.slice(0, 3), sub: price(i.price), run: () => openDrawer(i.symbol, i.market) });
   c.push({ g: 'Actions', t: 'Nouveau plan', ico: '+', h: ['+'], run: () => planForm() });
@@ -1955,6 +2262,7 @@ function openPal() {
   $('#pal-q').value = ''; palSel = 0; renderPal();
   $('#scrim').classList.add('on'); $('#palette').classList.add('on'); $('#pal-q').focus();
   if (!st.instruments || Date.now() - st.instrumentsAt > 60000) loadInstruments().then(() => { if ($('#palette').classList.contains('on')) renderPal(); });
+  if (!st.todo || Date.now() - st.todoAt > 30000) loadTodo().then(() => { if ($('#palette').classList.contains('on')) renderPal(); });
 }
 function runPal(k) { const c = palItems[k]; if (!c) return; closeOverlays(); c.run(); }
 $('#pal-q').addEventListener('input', () => { palSel = 0; renderPal(); });
@@ -1970,12 +2278,13 @@ function openHelp() {
   closeOverlays();
   const g = [
     ['Partout', [['Palette de commandes', [MOD, 'K']], ['Palette (autre touche)', ['/']], ['Raccourcis', ['?']], ['Fermer', ['Échap']]]],
-    ['Navigation', [['Vues 1 à 8', ['1', '…', '8']], ['Cockpit', ['G', 'C']], ['Marchés', ['G', 'M']], ['Positions', ['G', 'P']], ['Risque', ['G', 'R']], ['Labo', ['G', 'L']], ['Agenda', ['G', 'A']], ['Journal', ['G', 'J']], ['Santé', ['G', 'H']]]],
+    ['Navigation', [['Vues 1 à 9', ['1', '…', '9']], ['Cockpit', ['G', 'C']], ['À faire', ['G', 'T']], ['Marchés', ['G', 'M']], ['Positions', ['G', 'P']], ['Risque', ['G', 'R']], ['Labo', ['G', 'L']], ['Agenda', ['G', 'A']], ['Journal', ['G', 'J']], ['Santé', ['G', 'H']]]],
     ['Listes et graphique', [['Ligne suivante / précédente', ['J', 'K']], ['Inspecteur (ou graphique)', ['Entrée']], ['Trade suivant au graphique', ['N']], ['Trade précédent', ['Maj', 'N']], ['Intervalle', ['[', ']']]]],
     ['Actions', [['Papier ⇄ Mes trades', ['M']], ['Nouveau plan', ['+']], ['Avis JARVIS', ['A']]]],
+    ['À faire', [['Constat suivant / précédent', ['J', 'K']], ['Premier bouton du constat', ['Entrée']], ['C\'est fait ou Masquer', ['X']], ['Portée suivante', ['F']]]],
   ];
   $('#help').replaceChildren(el('h2', { text: 'Raccourcis clavier' }), el('div', { class: 'help-g' }, g.map((x) => el('div', null, el('h3', { text: x[0] }), el('dl', null, x[1].map((r) => el('div', null, el('dt', { text: r[0] }), el('dd', null, r[1].map(kbd)))))))),
-    el('p', { class: 'muted small mt-16', text: 'Entrer dans « Mes trades », clôturer, supprimer, déclarer une sortie, rouvrir, approuver une proposition, Killmode et veto demandent un appui maintenu, au clavier comme au doigt. Le cockpit n\'envoie jamais d\'ordre.' }));
+    el('p', { class: 'muted small mt-16', text: 'Entrer dans « Mes trades », clôturer, supprimer, déclarer une sortie, rouvrir, approuver une proposition (ou la refuser depuis À faire), Killmode et veto demandent un appui maintenu, au clavier comme au doigt. Le cockpit n\'envoie jamais d\'ordre.' }));
   $('#scrim').classList.add('on'); $('#help').classList.add('on');
 }
 function closeOverlays() {
@@ -1997,14 +2306,14 @@ function toast(msg, kind = 'info', undo) {
 
 /* ---------- clavier */
 let chordG = false, chordT = 0;
-const CHORD = { c: 'cockpit', m: 'marches', p: 'positions', r: 'risque', l: 'labo', a: 'agenda', j: 'journal', h: 'sante' };
+const CHORD = { c: 'cockpit', t: 'afaire', m: 'marches', p: 'positions', r: 'risque', l: 'labo', a: 'agenda', j: 'journal', h: 'sante' };
 function showChord(on) {
   const c = $('#chord');
   if (on) { c.replaceChildren(el('b', { text: 'G' }), ' puis : ', ...Object.entries(CHORD).flatMap(([k, v], i) => [i ? ' · ' : '', el('b', { text: k.toUpperCase() }), ' ' + VIEWS.find((x) => x[0] === v)[1]])); c.classList.add('on'); }
   else c.classList.remove('on');
 }
 function moveCursor(d) {
-  const items = $$('#v-' + st.view + ' [data-nav-item]'); if (!items.length) return;
+  const items = $$('#v-' + st.view + ' [data-nav-item]').filter(shown); if (!items.length) return; // sans les blocs repliés
   st.cursor = (st.cursor + d + items.length) % items.length;
   items.forEach((x, k) => x.classList.toggle('cursor', k === st.cursor));
   items[st.cursor].focus({ preventScroll: false });
@@ -2026,7 +2335,13 @@ document.addEventListener('keydown', (e) => {
   const k = e.key;
   if (chordG) { chordG = false; clearTimeout(chordT); showChord(false); if (CHORD[k.toLowerCase()]) { e.preventDefault(); go(CHORD[k.toLowerCase()]); } return; }
   if (k === 'g' || k === 'G') { chordG = true; showChord(true); chordT = setTimeout(() => { chordG = false; showChord(false); }, 1500); return; }
-  if (/^[1-8]$/.test(k)) { e.preventDefault(); go(VIEWS[+k - 1][0]); return; }
+  if (/^[1-9]$/.test(k)) { e.preventDefault(); go(VIEWS[+k - 1][0]); return; }
+  if (st.view === 'afaire') {
+    const here = tgt && tgt.closest ? tgt.closest('#v-afaire .todo') : null, cur = here || $('#v-afaire .todo.cursor');
+    if (k === 'Enter' && here === tgt) { const b = $('.todo-steps button, .todo-f button', here); if (b) { e.preventDefault(); b.focus(); } return; }
+    if (k === 'x' || k === 'X') { const b = cur && $('.todo-ack', cur); if (b) { e.preventDefault(); b.click(); } return; }
+    if (k === 'f' || k === 'F') { e.preventDefault(); const ix = TODO_FILTERS.findIndex((x) => x[0] === st.todoFilter); const nx = TODO_FILTERS[(ix + 1) % TODO_FILTERS.length]; setTodoFilter(nx[0]); toast('Portée : ' + nx[1], 'info'); return; }
+  }
   if (k === '/') { e.preventDefault(); openPal(); return; }
   if (k === '?') { e.preventDefault(); openHelp(); return; }
   if (k === '+') { e.preventDefault(); planForm(st.view === 'marches' ? { symbol: st.chartSym, market: st.chartMarket } : {}); return; }
