@@ -179,7 +179,8 @@ complet, n° 9 et recalcul du direct attendent) et le dit en tête de `!labo` et
 L'archive sert seulement à l'audit (`!strategies`, section « Audit », et `GET /api/lab/strategies/audit`) : rien
 ne la lit pour décider. Le fichier fait à peu près la taille des lignes remplacées (pour la n° 11, presque toute la
 table des stratégies : de l'ordre de 1 Go, quelques secondes à quelques minutes au premier passage) ; `data/` n'est jamais effacé
-par le ménage.
+par le ménage. N° 13 : seules les lignes actions sont réécrites, donc archivées dans `labo2-avant-n13.db` ; la crypto
+reste en n° 11 et garde `labo2-avant-n11.db`.
 
 En secours (worker arrêté ou ancienne version du code), la même copie à la main, depuis le dossier de JARVIS
 (`docker compose run` lance un conteneur à part sur la même image, le même `.env` et le même `data/`, que le worker

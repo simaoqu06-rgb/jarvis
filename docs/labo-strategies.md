@@ -1568,6 +1568,115 @@ données payante ; les transactions ne sont relues que pour les minutes qui déc
 mesure de la méthode entière. GO de GPT (conditionnel, conditions figées dans le protocole v2) et de Gemini ; en
 vigueur sur le feu vert de Simão.
 
+## Déclaration n° 13 (29 octobre 2026) : annulation des GO sur le TP1, quart d'heure de grâce puis clôture
+
+Écrite avant tout chiffre de la règle : aucune ligne du labo ne la mesure encore. Demande de Simão (fil « Revoir la
+validation des GO ») : AEYE, GO noté 8,7 le 28/10, a été annulé puis a dépassé son TP3. Diagnostic
+(`/mnt/project-files/trading/validation-go/diagnostic-validation-go-2026-10-29.md`) : verdict **Améliorer**. Le GO
+n'est pas tombé « trop tard » mais sur la toute première bougie, parce que son TP1 (10,455) était à 1,5 cent de
+l'ouverture (10,44) et qu'une mèche l'a touché ; la décision sur les deux premières bougies, proposée par Simão, est
+refusée par le council (à 9 h 40, AEYE et CRML, stoppé juste après, ont le même profil). Choix de Simão (carte
+« Rejouer TP1 sur clôture »), puis « le TP1 est bcp trop proche de l'ouverture… il faut régler ça » : quart d'heure de
+grâce. Protocole figé : `/mnt/project-files/trading/validation-go/protocole-n13-fige-2026-10-29.md`. Code :
+`app/trading/confirm.py` (`evaluate`, `tp1`), `app/lab/strategies.py` (`GO_TP1`, `confirm_arm`, `go_rows`),
+`app/lab/strat_stats.py` (`_tp1_compare`).
+
+### La règle
+
+La confirmation de la n° 7 (le code du direct, `confirm.evaluate`) change en un seul point, l'annulation sur le TP1
+avant la confirmation (`tp1="cloture"`, `confirm.TP1_RULES`) :
+
+- règle actuelle (« meche ») : le GO tombe dès qu'une bougie de 5 min **touche** le TP1 (son plus haut), dès la
+  première bougie ;
+- règle n° 13 : pendant le **premier quart d'heure** (bougies finies à 9 h 35, 9 h 40 et 9 h 45 New York), le TP1
+  n'annule rien et seule une clôture sous le stop annule ; ensuite, le GO ne tombe sur le TP1 que si une bougie de
+  5 min **clôture au niveau du TP1 ou au-dessus** avant la confirmation.
+
+Tout le reste est identique : annulation sur une clôture sous le stop dès la première bougie, repli (plus bas ≤ entrée,
+quart d'heure compris), confirmation sur une bougie finie après 9 h 45 qui clôture au-dessus du VWAP, déclencheur =
+son plus haut + 0,01 (on attend la suivante s'il atteint le TP1), ordre stop d'achat valable jusqu'à 11 h 30, sortie
+déclarée `r_sans_be`. Un GO qui ouvre au-dessus de son TP1 reste en vie (pas de clause « plan périmé »). Le quart
+d'heure est la durée qu'attend déjà la confirmation (`WAIT`), pas un paramètre choisi sur les chiffres.
+
+**Le direct ne change pas** : il appelle toujours `evaluate` avec la règle actuelle ; seul le labo rejoue l'autre.
+
+Conséquence logique, qui sert de contrôle du code : la règle n° 13 n'annule jamais plus tôt que la règle actuelle (une
+clôture au-dessus du TP1 suppose un plus haut au-dessus). Un GO confirmé, expiré ou tombé sous le stop avec la règle
+actuelle a donc exactement le même sort avec la n° 13 ; seuls les GO annulés sur le TP1 peuvent changer, et l'écart
+entre les deux règles est le R des trades que la n° 13 ajoute. Le tableau compte les autres changements de sort
+(`anormaux`) : un seul est un défaut du code, à corriger avant toute lecture.
+
+### Bras et essais
+
+| Bras | Stop | Jours |
+|---|---|---|
+| `go_confirme_tp1` | d'origine (plans du labo) | tous |
+| `go_confirme_tp1_plancher` | plancher du direct (1/3 de l'ATR journalier, le plan que trade le direct) | ceux que le générateur a calculés, donc toutes les séances neuves |
+
+Mêmes GO, mêmes jours, mêmes coûts, même ordre et même témoin que `go_confirme` (bras confirmé de la n° 7), statut
+propre dans `confirmation`. Essais : 163 + 2 = **165** ; seuil inchangé à l'arrondi (z 3,43 ; en t, 3,85 sur 30
+séances, 3,62 sur 60, 3,52 sur 120).
+
+### Jugement
+
+- **Seulement sur les séances neuves**, après le **28 octobre 2026** (`strategies.SEEN_N13`) : la règle vient d'AEYE
+  (28/10) et des chiffres de toute la période visible (export du 29/10). L'historique est calculé et publié à titre
+  descriptif (« jours vus »), comme pour la n° 11. Le bloc scellé n'est ni lu ni déplacé.
+- **Ce qui décide pour le direct** : l'écart par GO « n° 13 ou rien − confirmé ou rien » (0 R pour un bras sans trade),
+  après les coûts du simulateur et la commission IBKR, en grappes par jour ; il « aide » s'il est positif, avec t au
+  seuil de la déclaration (`candidate_t`) et au moins 30 GO.
+- Chaque bras est aussi jugé comme une stratégie (règle « candidate » habituelle), sur les séances neuves.
+- Le passage du direct à la règle n° 13 n'est **proposé à Simão** que si, sur les séances neuves, l'écart aide au
+  plancher, est positif à l'origine, et que l'écart à 20 € en sortie unique sur TP2 (Dégressif, `r_20e_1s_deg`, la
+  sortie de Simão) est positif au plancher. Ouvrir le bloc scellé pour confirmer reste sa décision.
+- Abandon : écart au plancher négatif avec t sous −seuil. Sinon, pas de conclusion avant 30 séances neuves.
+
+### Mesures sans essai (jamais pour décider)
+
+- Historique des deux bras et des deux écarts (au confirmé actuel, et à 20 € en sortie unique TP2).
+- Passages d'un statut à l'autre, règle actuelle → n° 13 (annulé → confirmé, annulé → expiré…), avec le R des deux
+  règles dans chaque passage, sur toutes les séances. L'heure de chaque annulation est déjà gardée (`signal_at` des
+  lignes sans ordre).
+
+### Coût
+
+Nouvelle déclaration des lignes actions : rattrapage complet des actions (`strats:stock:d13`), comme la n° 11 ; la
+crypto ne bouge pas (`CRYPTO_DECLARATION` reste 11, son rattrapage et son archive restent ceux de la n° 11). Pendant ce
+temps le tableau ne montre que les jours refaits (« Tableau partiel »), jusqu'à « n° 13 : complète ». Les anciennes
+lignes actions sont archivées (`labo2-avant-n13.db`) ; l'audit apparié doit lire ≈ 0 sur les stratégies d'avant. Le
+code de `confirm.evaluate` entre dans l'empreinte des lignes du labo v2 (`empreinte.STRAT_CODE`). Un deuxième
+passage de `evaluate` par GO : négligeable. Déployée seulement après « n° 12 : complète ».
+
+### Paris de l'analyste (écrits avant le premier chiffre)
+
+- L'écart par GO est positif sur l'historique, aux deux stops : 50 %.
+- Il « aide » au plancher sur les séances neuves avant 120 séances : 15 %.
+- Un des deux bras devient « candidate » : 3 %.
+- Les deux bras perdent après frais sur l'historique (comme le confirmé actuel, −0,05 R par trade) : 85 %.
+- Moins de la moitié des GO que la règle actuelle annule sur le TP1 sont confirmés puis exécutés avec la n° 13 : 80 %.
+- Si AEYE est un GO du labo le 28/10, la n° 13 le confirme : 80 %.
+
+### Limites
+
+- Puissance faible : la plupart des GO ont le même sort avec les deux règles ; l'écart moyen sera de quelques
+  centièmes de R par GO. Ordre de grandeur à refaire sur l'historique : avec 3 à 5 trades ajoutés par séance sur ~50 GO,
+  il faut que ces trades gagnent environ +0,2 R chacun après frais pour conclure en 120 séances.
+- Bougies du labo (Alpaca, rejouées) et VWAP différents de ceux du direct (Twelve Data en temps réel).
+- Population des GO du labo (son univers à 9 h 10), pas celle du scanner du direct (filtres de prix, d'ATR,
+  catalyseur) : AEYE et CRML n'y sont peut-être pas.
+- Une seule clôture au-dessus du TP1 suffit à annuler après 9 h 45.
+
+### Council
+
+Position de l'analyste, sur les faits : sur 393 séances, tout le gain de la confirmation (+0,249 R par GO contre
+l'achat à l'ouverture) vient de l'annulation sous le stop et des expirés ; l'annulation sur le TP1 écarte 39 % des
+GO, ceux qui partent le plus vite, et les GO tombés sur le TP1 en 1re bougie ouvrent en médiane 1,7 R au-dessus de
+l'entrée du plan. **Sceptique** : la grâce laisse vivre des GO partis en gap qui retombent (22 % des GO tombés sur le
+TP1 à la 1re bougie touchent ensuite le stop) ; le repli puis le VWAP en filtrent une partie, c'est ce que mesure
+l'écart. **Pragmatique** : même code que le direct, un paramètre ; si la règle passe, le direct change en une ligne.
+**Critique** : deux essais au lieu d'un, la barre ne bouge pas à l'arrondi ; juger sur les seules séances neuves est
+lent, c'est le prix d'une règle inspirée par un cas vu. GO, choix de Simão.
+
 ## Bloc scellé
 
 Le rejeu du **6 avril au 5 octobre 2026** est calculé mais rangé à part (`trades_sealed`,
@@ -1578,7 +1687,8 @@ Limite assumée : les mouvements du jour et les fiches catalyseurs de ces dates 
 ## Où voir les chiffres
 
 `!strategies` sur Discord, `GET /api/lab/strategies` (clé du labo), ligne « Labo v2 » de `!labo`, et la ligne de
-la déclaration en vigueur dans `!labo` (« n° 12 : complète », ou ce qui reste à refaire). N° 12 : `!ouverture` (ou
+la déclaration en vigueur dans `!labo` (« n° 13 : complète », ou ce qui reste à refaire). N° 13 : lignes
+« TP1 sur clôture (n° 13, …) » de `!strategies`, sous la confirmation des GO. N° 12 : `!ouverture` (ou
 `!n12`) et `GET /api/lab/ouverture` (`?jour=AAAA-MM-JJ` pour une séance). Audit des mesures
 remplacées (pour audit, jamais pour décider) : la section « Audit » de `!strategies` et
 `GET /api/lab/strategies/audit`.

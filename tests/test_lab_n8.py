@@ -185,7 +185,7 @@ def test_bras_filtres_meme_ordre_ou_rien():
     assert {rows[n]["confirmation"] for n in ("go_confirme_v2", "go_confirme_v3", "go_confirme_v4")} == {"annule"}
     floor = {"entry": 100.0, "stop": 97.0, "targets": [{"price": 104.0}, {"price": 106.0}, {"price": 108.0}]}
     names = {r["strategy"] for r in ST.go_rows(make(CONFIRMED), "AAA", {"plancher": floor})}
-    assert names == {"go_brut_plancher", "go_confirme_plancher"}      # filtres : stop d'origine seulement
+    assert names == {"go_brut_plancher", "go_confirme_plancher", "go_confirme_tp1_plancher"}  # filtres : origine seulement
 
 
 def _go_db(days: list[date]) -> LabDB:

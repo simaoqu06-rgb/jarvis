@@ -480,7 +480,8 @@ def test_essais_declares():
     # 3 filtres FRSH du bras confirmé (stop d'origine) et Killmode complet (espérance, écart au témoin propre).
     # n° 11 : stop structurel (orb30 actions, cassure de zone sur deux marchés) et 2 sous-ensembles, sortie r_net.
     # n° 12 : passe A de Gemini (2 sorties) et ORB des stocks in play (4 essais, protocole v2), sur r_frais, à part.
-    assert len(t) == 163 and len(ST.EXITS) == 7 and len(ST.STOCK_EXITS) == 3
+    # n° 13 : le bras confirmé avec le TP1 sur clôture, sur les deux stops de la n° 7, sortie stop fixe.
+    assert len(t) == 165 and len(ST.EXITS) == 7 and len(ST.STOCK_EXITS) == 3
     assert t[-14:] == (list(ST.KILL_COMPLETE_TRIALS) + list(ST.PLUS10_TRIALS) + list(ST.N11_TRIALS)
                        + list(ST.N12_TRIALS))
     assert {x["exit"] for x in t if x["market"] == "crypto"} == set(ST.EXITS)
@@ -666,4 +667,4 @@ def test_route_api_des_strategies(tmp_path, monkeypatch):
     _rows(db, "pullback", 0.3, -0.2)
     r = TestClient(main.app).get("/api/lab/strategies", headers={"X-Lab-Key": "cle"})
     assert r.status_code == 200 and "pullback" in r.json()["strategies"]["stock"]
-    assert r.json()["declaration"]["essais"] == 163 and r.json()["declaration"]["z_candidate"] == 3.43
+    assert r.json()["declaration"]["essais"] == 165 and r.json()["declaration"]["z_candidate"] == 3.43

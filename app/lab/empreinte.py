@@ -54,8 +54,10 @@ V1_CODE = (
     ("lab/universe.py", ("STOCK_TOP_DOLLAR", "STOCK_TOP_MOVERS", "CRYPTO_TOP", "RVOL_DAYS", "DECISION_NY",
                          "stock_decision_ts", "_metrics", "stock_universe", "crypto_universe", "build", "regime")),
 )
-# Labo v2 : le code du Labo 1 (v1 rejouée, plans des GO), les stratégies et le rattrapage.
+# Labo v2 : le code du Labo 1 (v1 rejouée, plans des GO), les stratégies et le rattrapage ; n° 13 : la confirmation
+# des GO du direct (confirm.evaluate), que les bras GO rejouent avec le même code depuis la n° 7.
 STRAT_CODE = V1_CODE + (
+    ("trading/confirm.py", ("BAR", "WAIT", "LAST_CHECK", "TICK", "TP1_RULES", "PENDING", "evaluate")),
     ("lab/strategies.py", None),
     ("lab/rattrapage.py", ("DAILY_LOOKBACK_DAYS", "STOCK_BATCH", "SPLIT_TOL", "v1_trades", "_v1", "_factor",
                            "operation", "_daily", "_lost", "_too_many", "stock_rows", "crypto_rows")),
