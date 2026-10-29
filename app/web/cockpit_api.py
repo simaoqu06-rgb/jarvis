@@ -482,7 +482,8 @@ def agenda_today(now: datetime) -> list[dict]:
             "scheduler.tick_closing")
         add(bounds[1], "Clôture NYSE" + (" (demi-séance)" if bounds[1].astimezone(NEW_YORK).hour == 13 else ""),
             "marche", "calendar.py", "haute")
-        add(_at(ny_day, time(15, 12), PARIS), "Routine Claude « Recherche avant l'ouverture »", "routine",
+        # tâche planifiée en heure de New York (9 h 12), donc 14 h 12 Paris quand un seul pays a changé d'heure
+        add(_at(ny_day, time(9, 12)), "Routine Claude « Recherche avant l'ouverture »", "routine",
             "routines/recherche-pre-ouverture.md")
         add(_at(ny_day, time(22, 52), PARIS), "Routine Claude « Équipe du soir du labo »", "routine",
             "labo/routine_soir.md")
