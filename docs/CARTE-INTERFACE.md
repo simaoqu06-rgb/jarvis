@@ -98,6 +98,9 @@ ordre : seulement des conseils en prix (`conseils`).
 - **Papier (recommandations)** : `reco.result` : R brut du moteur, puis $ brut, commissions IBKR et $ / € nets à la
   quantité envoyée ; R net = $ net / (quantité × risque). « Si j'avais tout suivi » = capital déclaré + somme des €
   nets (`reco.bilan`).
+- **Portefeuille fictif (Papier)** (choix de Simão du 29/10) : `reco.portfolio`, départ 1 000 €, chaque recommandation
+  close rejouée à **20 € de risque fixe** (`K.shares(|entrée − stop|, eurusd du message)`), frais IBKR déduits, même
+  quand le message n'a pas de taille (grade F). Indépendant de la taille du message et du grade.
 - **Forward-test Alpaca** (labo) : `paper.stats`, en R, 3 brackets, sans frais. Ce n'est **pas** l'espace Papier.
 
 ### 1.6 Risque
@@ -197,6 +200,7 @@ Fréquence : `state` toutes les 5 s (sans appel réseau) ; vues lourdes toutes l
 |---|---|---|---|
 | Résumé · Mes trades | `state.portfolio` (space=trades) ← `realized_r`, `realized_r_net`, `sizing.risk_amount_eur`, positions | `latent{r,eur}`, `jour{r,r_net,eur,fees_eur}`, `semaine{…}`, `positions_ouvertes`, `capital.eur` « déclaré » | à exposer (PR 1 ✓) |
 | Résumé · Papier | `state.portfolio` (space=paper) ← `reco.bilan` | `si_tout_suivi{equite_eur, eur_net, r_net, taux_reussite, par_etat}`, `recos_du_jour`, `go_en_attente_de_confirmation` | à exposer (PR 1 ✓) |
+| Portefeuille fictif · Papier | `state.portfolio.portefeuille` ← `reco.portfolio` | `depart_eur`, `risque_par_trade_eur`, `capital_eur`, `resultat_eur`, `rendement_pct`, `closes`, `gagnantes`, `sans_resultat`, `r_net`, `ouvertes`, `latent_eur`, `points[[clos_at, €]]` (courbe de la carte Papier) | exposé |
 | Courbe du P&L cumulé | `state.portfolio.courbe` ← `_closed_rows` | Mes trades : R nets cumulés des clôtures du jour ; Papier : € nets (R sans taille) depuis la mise en service | à exposer (PR 2 ✓, calculée par le serveur) |
 | Recommandations en attente du déclenchement (Papier) | `state.portfolio.en_attente` ← recos `attente` | `symbol`, `type_fr`, `entry`, `stop`, `qty`, `valid_until` | à exposer (PR 2 ✓) |
 | Séances (cadran) | `state.market_sessions` ← `calendar.py` | `etat`, `aujourd_hui{premarche, ouverture, cloture, fin_apres_bourse}`, `prochain_changement`, `prochaine_ouverture`, `raison_fermeture`, `demi_seance`, `ecart_paris_new_york_h` | à exposer (PR 1 ✓) |

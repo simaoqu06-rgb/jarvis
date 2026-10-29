@@ -180,3 +180,25 @@ def test_bilan_si_tout_suivi():
     out = R.bilan(book, 1000.0)
     assert out["par_etat"]["clos"] == 1 and out["par_etat"]["pas_declenche"] == 1
     assert out["eur_net"] == a["result"]["eur"] and out["equite_eur"] == round(1000 + a["result"]["eur"], 2)
+
+
+def test_portefeuille_fictif_a_20_euros_fixes_meme_sans_taille():
+    """Grade F : le MP part sans taille. Le portefeuille fictif (choix du 29/10) prend quand même le trade à 20 € de
+    risque : 20 × 1,16 / 0,36 $ = 64 actions, comme go_reco(qty=64)."""
+    book = R.RecoBook(None)
+    a, b = go_reco(qty=None), R.kill_from_call(kill_call(), 1.15)
+    book.recos = [a, b]
+    assert R.fixed_qty(a) == 64 and R.fixed_qty(b) == 46
+    R.step(a, [bar(4, 13.78, 13.85, 13.75, 13.83), bar(5, 13.83, 14.40, 13.80, 14.3)], at(6))
+    assert a["result"]["eur"] is None  # le journal reste tel qu'envoyé
+    sized = R.result(a, 64)
+    assert sized["usd"] == 32.56  # même résultat qu'un message à 64 actions (frais Fixe compris)
+    out = R.portfolio(book)
+    assert out["depart_eur"] == 1000.0 and out["risque_par_trade_eur"] == 20.0 and out["closes"] == 1
+    assert out["capital_eur"] == round(1000 + sized["eur"], 2) and out["resultat_eur"] == sized["eur"]
+    assert out["points"] == [[sized["closed_at"], sized["eur"]]] and out["gagnantes"] == 1 and out["ouvertes"] == 0
+
+
+def test_portefeuille_fictif_vide_reste_au_depart():
+    out = R.portfolio(R.RecoBook(None))
+    assert out["capital_eur"] == 1000.0 and out["closes"] == 0 and out["latent_eur"] is None and out["points"] == []

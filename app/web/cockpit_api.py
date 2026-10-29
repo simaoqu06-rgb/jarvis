@@ -342,7 +342,7 @@ def portfolio(space: str, now: datetime, positions: list[dict]) -> dict:
                 "entry": r["message"]["entry"], "stop": r["message"]["stop"], "qty": r["message"].get("qty"),
                 "sent_at": r["sent_at"], "valid_until": r["message"].get("valid_until")}
                for r in scheduler.reco_book.recos if r["status"] == "attente"]
-    return out | {"si_tout_suivi": b, "en_attente": waiting,
+    return out | {"si_tout_suivi": b, "portefeuille": RECO.portfolio(scheduler.reco_book), "en_attente": waiting,
                   "courbe": {"unite": "€" if eur else "R",
                              "titre": "€ nets cumulés depuis la mise en service" if eur else
                                       "R nets cumulés depuis la mise en service",

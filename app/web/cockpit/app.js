@@ -438,7 +438,7 @@ function heroCard() {
   const statCells = [0, 1, 2, 3].map(() => { const k = el('div', { class: 'k' }), v = el('div', { class: 'v' }), s = el('div', { class: 's' }); stats.append(el('div', { class: 'stat' }, k, v, s)); return { k, v, s }; });
   const meta = live
     ? (isNum(p0.capital.eur) ? 'capital ' + eur0(p0.capital.eur) + ' · déclaré' : 'capital non déclaré (JARVIS_CAPITAL)')
-    : 'si j\'avais suivi chaque recommandation depuis le ' + (toDate(p0.si_tout_suivi.depuis) ? DTF.dm.format(toDate(p0.si_tout_suivi.depuis)) : DASH);
+    : 'portefeuille fictif · chaque recommandation déclenchée depuis le ' + (toDate(p0.si_tout_suivi.depuis) ? DTF.dm.format(toDate(p0.si_tout_suivi.depuis)) : DASH);
   bind((s) => {
     const p = s.portfolio, j = p.jour, w = p.semaine;
     if (live) {
@@ -456,22 +456,22 @@ function heroCard() {
       setStat(statCells[2], 'Cette semaine', w.n ? rr(w.r_net) : rr(0), w.n ? eur(w.eur, true) + ' nets · ' + w.n + ' clôture' + (w.n > 1 ? 's' : '') : 'aucune clôture', w.r_net);
       setStat(statCells[3], 'Frais IBKR estimés (jour)', j.n ? eur(j.fees_eur) : eur(0), 'déduits des R nets');
     } else {
-      const b = p.si_tout_suivi, v = isNum(b.equite_eur) ? b.equite_eur : isNum(b.eur_net) ? b.eur_net : b.closes ? null : 0;
-      mega.classList.toggle('unknown', v == null);
-      if (v == null) { megaV.textContent = DASH; delete megaV.dataset.v; } else tween(megaV, v, (x) => (isNum(b.equite_eur) ? '' : sgn(x, true)) + nf(2).format(Math.abs(x)));
+      const b = p.si_tout_suivi, f = p.portefeuille;
+      mega.classList.remove('unknown');
+      tween(megaV, f.capital_eur, (x) => nf(2).format(x));
       cur.textContent = '€';
-      delta.className = 'delta ' + (isNum(b.r_net) && b.closes ? (b.r_net >= 0 ? 'up' : 'down') : 'flat');
-      delta.textContent = b.closes ? rr(b.r_net) + ' nets · ' + b.closes + ' close' + (b.closes > 1 ? 's' : '') : 'aucune recommandation close';
-      subTxt.textContent = isNum(b.equite_eur) ? 'capital déclaré ' + eur0(b.capital_declare_eur) + ' + résultats nets de frais' : 'résultats nets de frais (capital non déclaré)' + (b.eur_sans_taille ? ' · ' + b.eur_sans_taille + ' sans taille' : '');
+      delta.className = 'delta ' + (f.closes && f.resultat_eur !== 0 ? (f.resultat_eur > 0 ? 'up' : 'down') : 'flat');
+      delta.textContent = f.closes ? eur(f.resultat_eur, true) + ' (' + sgn(f.rendement_pct, true) + nf(1).format(Math.abs(f.rendement_pct)) + ' %) · ' + rr(f.r_net) + ' nets · ' + f.closes + ' close' + (f.closes > 1 ? 's' : '') : 'aucune recommandation close';
+      subTxt.textContent = 'départ ' + eur0(f.depart_eur) + ' · ' + eur0(f.risque_par_trade_eur) + ' de risque par trade · frais IBKR déduits' + (f.ouvertes ? ' · ' + f.ouvertes + ' ouverte' + (f.ouvertes > 1 ? 's' : '') + (isNum(f.latent_eur) ? ' (latent ' + eur(f.latent_eur, true) + ')' : '') : '') + (f.sans_resultat ? ' · ' + f.sans_resultat + ' sans résultat' : '');
       const d = p.recos_du_jour;
       setStat(statCells[0], 'Recommandations du jour', int((d.ouvert || 0) + (d.clos || 0)) + ' déclenchée' + ((d.ouvert || 0) + (d.clos || 0) > 1 ? 's' : ''), (d.attente || 0) + ' en attente · ' + (d.pas_declenche || 0) + ' pas déclenchée' + ((d.pas_declenche || 0) > 1 ? 's' : '') + ' · ' + (p.go_en_attente_de_confirmation || 0) + ' GO à confirmer');
       setStat(statCells[1], 'R nets aujourd\'hui', j.n ? rr(j.r_net) : rr(0), j.n ? eur(j.eur, true) : 'aucune clôture', j.r_net);
       setStat(statCells[2], 'Cette semaine', w.n ? rr(w.r_net) : rr(0), w.n ? eur(w.eur, true) : 'aucune clôture', w.r_net);
       setStat(statCells[3], 'Taux de réussite', isNum(b.taux_reussite) ? pct(b.taux_reussite * 100, false, 0) : DASH, b.closes ? b.gagnantes + ' gagnante' + (b.gagnantes > 1 ? 's' : '') + ' sur ' + b.closes : 'aucune close');
     }
-    curve.replaceChildren(curveSvg(p.courbe));
+    curve.replaceChildren(curveSvg(live ? p.courbe : { unite: '€', titre: 'Résultat cumulé du portefeuille fictif', points: p.portefeuille.points }));
   });
-  const eyebrow = live ? 'P&L · Mes trades' : 'Si j\'avais tout suivi · Papier';
+  const eyebrow = live ? 'P&L · Mes trades' : 'Portefeuille fictif de JARVIS · Papier';
   return card('c-8 hero', eyebrow, meta,
     el('div', { class: 'hero-row' }, el('div', null, mega, el('div', { class: 'hero-sub' }, delta, subTxt)), curve), stats);
 }
