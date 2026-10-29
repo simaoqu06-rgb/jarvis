@@ -413,3 +413,10 @@ def test_confirmations_d_une_seance_passee_ne_sont_pas_celles_du_jour(client, mo
     monkeypatch.setattr(scheduler, "confirm_state", {"day": "2026-10-23", "gos": {"NVDA": {"status": "attente"}}})
     c = client.get("/api/cockpit/journal").json()["confirmations"]
     assert c["du_jour"] is False and c["jour"] == "2026-10-23"
+
+
+def test_routine_recherche_suit_l_heure_de_new_york():
+    # semaine du 29/10/2026 : Paris est passé à l'heure d'hiver, pas New York ; la tâche est à 9 h 12 New York
+    now = datetime(2026, 10, 29, 11, 0, tzinfo=timezone.utc)
+    item = next(i for i in API.agenda_today(now) if "Recherche avant l'ouverture" in i["titre"])
+    assert item["at"].startswith("2026-10-29T13:12")  # 14 h 12 Paris

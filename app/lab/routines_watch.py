@@ -6,7 +6,7 @@ et prévient sur Discord, une fois, quand le dépôt attendu manque (zéro jeton
 
 - équipe du soir (lun-ven, 22 h 52 Paris) : l'avis du council sur le grade (POST /api/lab/grade/avis) de la soirée
   de la veille, vérifié à SOIR_LIMITE_PARIS, du mardi au samedi ;
-- recherche avant l'ouverture (lun-ven, 15 h 12 Paris) : ses verdicts (POST /api/lab/recherche) sur le scan du
+- recherche avant l'ouverture (lun-ven, 9 h 12 New York) : ses verdicts (POST /api/lab/recherche) sur le scan du
   jour, vérifiés à RECHERCHE_LIMITE_NY les jours où le scanner a retenu au moins une valeur.
 
 Fonctions pures : l'état (dernière soirée vue, alertes déjà envoyées) vit dans l'état des alertes du serveur.
