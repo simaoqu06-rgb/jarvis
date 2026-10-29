@@ -26,6 +26,7 @@ from fastapi.responses import JSONResponse
 
 from app import config, scheduler
 from app.core import sources_health
+from app.core.http import SourceError
 from app.lab import db as lab_db
 from app.lab import grade as lab_grade
 from app.lab import heartbeat
@@ -368,8 +369,24 @@ def risk(now: datetime) -> dict:
             "grade_max_age_h": lab_grade.MAX_AGE_H,
             "risque_ouvert_pct": lab_grade.open_risk(trades), "risque_ouvert_max_pct": lab_grade.RISQUE_OUVERT_MAX,
             "r_du_jour_net": lab_grade.day_r(trades, now), "arret_jour_r": lab_grade.ARRET_JOUR_R,
-            "risque_max_par_trade_eur": T.rule_eur(), "capital_declare_eur": _capital(),
+            "risque_max_par_trade_eur": T.rule_eur(), "capital_declare_eur": _capital(), "ibkr": ibkr_fees(),
             "note": "risque au stop ≠ perte maximale : un gap au-delà du stop s'exécute plus loin"}
+
+
+def ibkr_fees() -> dict:
+    """Barème IBKR du compte (JARVIS_IBKR_PLAN), brackets (sortie unique ou un par objectif) et plancher d'un
+    aller-retour à un bracket (2 ordres au minimum de commission), en R d'un trade à la règle de 20 €."""
+    from app.trading import ibkr as IBKR
+    from app.trading import killmode as K  # import tardif : killmode tire le labo
+
+    mine = K.IBKR_PLAN if K.IBKR_PLAN in K.IBKR_PLANS else "fixe"
+    risk_usd = T.rule_eur() * K.EURUSD_DEFAULT
+    plans = {k: {"label": IBKR.LABELS[k], "par_action_usd": v["per_share"], "minimum_usd": v["min"],
+                 "plafond_pct": v["max_pct"] * 100, "frais_place_usd": v["extra"],
+                 "plancher_aller_retour_usd": round(2 * v["min"], 2),
+                 "plancher_r": round(2 * v["min"] / risk_usd, 3)} for k, v in K.IBKR_PLANS.items()}
+    return {"bareme": mine, "bareme_label": IBKR.LABELS[mine], "sortie_unique": IBKR.single_exit(),
+            "baremes": plans, "eurusd_reference": K.EURUSD_DEFAULT}
 
 
 # --- Séances et agenda ----------------------------------------------------------------------------
@@ -430,8 +447,8 @@ def market_sessions(now: datetime) -> dict:
 
 
 def agenda_today(now: datetime) -> list[dict]:
-    """Ce que JARVIS fait aujourd'hui, depuis ses propres horaires (aucune source externe ; calendrier économique et
-    résultats : vue Agenda, PR 3)."""
+    """Ce que JARVIS fait aujourd'hui, depuis ses propres horaires (aucune source externe ; calendrier économique,
+    résultats et 8-K : route /agenda)."""
     ny_day = now.astimezone(NEW_YORK).date()
     items: list[dict] = []
 
@@ -786,11 +803,7 @@ def _lab_payload(now: datetime) -> dict:
                                   if p.get("kind") in ("labo", "grade", "promotion")][:30])
     out["veto"] = {"possible": True, "effet": "annule la dernière décision du council au prochain passage du labo "
                                               "(!veto)"}
-    out["modules"] = {name: f"/api/lab/{name}" for name in (
-        "strategies", "ouverture", "autopsie", "rates", "sec8k", "etude8k", "polyfed", "potentiel", "filtres",
-        "lessons", "grade", "summary", "matin")}
-    out["modules_note"] = ("détail lu par la vue Labo (PR 3) ; ces routes demandent la clé du labo, le cockpit les "
-                           "lira par fonction, sans clé")
+    out["modules"] = {name: f"/api/cockpit/texte/{name}" for name in TEXT_MODULES}
     return out
 
 
@@ -801,6 +814,273 @@ async def lab():
     if _lab_cache["data"] is None or clock.monotonic() - _lab_cache["at"] > 60:
         _lab_cache.update(data=await asyncio.to_thread(_lab_payload, now), at=clock.monotonic())
     return _lab_cache["data"]
+
+
+# --- Textes des commandes Discord (vues Labo, Risque, Journal) ---------------------------------------------
+
+# module → (titre, commande). Liste blanche : le cockpit affiche exactement ce que la commande répondrait sur Discord,
+# par la même fonction, en lecture seule.
+TEXT_MODULES = {
+    "labo": ("État du labo", "!labo"),
+    "strategies": ("Stratégies du labo v2", "!strategies"),
+    "ouverture": ("Déclaration n° 12 : ouverture", "!ouverture"),
+    "gemini": ("Challenger « méthode Gemini »", "!gemini"),
+    "killmode": ("Journal de Killmode", "!kill bilan"),
+    "lecons": ("Carnet des leçons", "!lecons"),
+    "grade": ("Grade de JARVIS", "!grade"),
+    "frais": ("Ta mise de 20 € chez IBKR", "!frais"),
+    "autopsie": ("Autopsie des trades du labo", "!autopsie"),
+    "rates": ("Ratés des +10 %", "!rates"),
+    "sec8k": ("Mesure 8-K", "!8k"),
+    "etude8k": ("Étude des 8-K sur plusieurs jours", "!etude8k"),
+    "polyfed": ("Polymarket : repricing de la Fed", "!fed"),
+    "potentiel": ("Potentiel +10", "!potentiel"),
+    "bilan": ("Forward-test du compte fictif", "!bilan"),
+    "confirmations": ("Confirmations des GO", "!confirmations"),
+    "desaccords": ("Désaccords avec JARVIS", "!desaccords"),
+}
+TEXT_NOTES = {"killmode": "lu sans solder : les appels dont la séance est finie sont soldés par `!kill bilan` sur "
+                          "Discord (bougies de la séance)"}
+TEXT_TTL_S, TEXT_ERROR_TTL_S = 120, 15
+_text_cache: dict[str, tuple[float, dict]] = {}
+
+
+def text_of(module: str) -> str:
+    """Le texte de la commande Discord du module (bloquant : lit lab.db, appelé dans un fil)."""
+    from app.lab import morning as lab_morning
+    from app.lab import status as lab_status
+    from app.notify import bot  # import tardif : bot importe scheduler
+    from app.trading import gemini as GEMINI
+    from app.trading import killmode as K
+
+    if module == "labo":
+        return (lab_status.text(lab_status.status()) + "\n"
+                + lab_morning.status_line(lab_morning.shared_state(), PR.proposals))
+    if module == "gemini":
+        st = GEMINI.load()
+        return GEMINI.today_text(st) + "\n\n" + GEMINI.bilan_text(st)
+    if module == "killmode":
+        return K.bilan_text(K.calls(), now=datetime.now(timezone.utc))
+    if module == "autopsie":
+        return bot.autopsie_text([])
+    if module == "bilan":
+        return paper.report_text(paper.stats(scheduler.paper_book))
+    if module == "confirmations":
+        return CONFIRM.report_text(CONFIRM.read_log(), scheduler.confirm_state)
+    if module == "desaccords":
+        return T.disagreements_text(T.disagreements(scheduler.book, T.note_slopes()))
+    return {"strategies": bot.strategies_text, "ouverture": bot.ouverture_text, "lecons": bot.lessons_text,
+            "grade": bot.grade_text, "frais": bot.frais_text, "rates": bot.rates_text, "sec8k": bot.sec8k_text,
+            "etude8k": bot.etude8k_text, "polyfed": bot.polyfed_text, "potentiel": bot.potentiel_text}[module]()
+
+
+@router.get("/texte/{module}")
+async def texte(module: str):
+    """Réponse d'une commande Discord en lecture (liste blanche TEXT_MODULES ; cache de 2 min par module)."""
+    if module not in TEXT_MODULES:
+        raise HTTPException(400, "module inconnu : " + ", ".join(TEXT_MODULES))
+    hit = _text_cache.get(module)
+    if hit and clock.monotonic() < hit[0]:
+        return hit[1]
+    now = datetime.now(timezone.utc)
+    title, command = TEXT_MODULES[module]
+    try:
+        text, error, ttl = await asyncio.to_thread(text_of, module), None, TEXT_TTL_S
+    except Exception as exc:  # base absente ou ancien schéma : la carte le dit, les autres restent
+        log.warning("Cockpit : texte %s illisible (%s: %s)", module, type(exc).__name__, exc)
+        text, error, ttl = None, f"{type(exc).__name__}: {exc}"[:200], TEXT_ERROR_TTL_S
+    body = {"module": module, "titre": title, "commande": command, "texte": text, "erreur": error,
+            "at": now.isoformat(timespec="seconds"), "note": TEXT_NOTES.get(module)}
+    _text_cache[module] = (clock.monotonic() + ttl, body)
+    return body
+
+
+# --- Agenda : calendrier économique, résultats et 8-K des valeurs suivies ----------------------------------
+
+AGENDA_DAYS = 7
+AGENDA_TTL_S = {"resultats": 3600, "sec": 900}
+ECO_COUNTRIES, ECO_IMPACTS = ("US", "EU", "FR", "DE"), ("High", "Medium")  # le filtre du point du matin (alerts.py)
+SEC_MAX_SYMBOLS = 20
+SEC_CONCURRENCY, SEC_BUDGET_S = 4, 12.0  # sous les 10 requêtes/s de la SEC (partagées avec le labo) ; la vue attend 30 s
+ITEMS_8K = {"1.01": "contrat important", "1.02": "fin d'un contrat important", "1.03": "faillite",
+            "2.01": "acquisition ou cession", "2.02": "résultats", "2.03": "nouvelle dette",
+            "2.05": "restructuration", "2.06": "dépréciation", "3.01": "radiation ou non-conformité",
+            "3.02": "émission d'actions", "3.03": "droits des actionnaires", "4.01": "changement d'auditeur",
+            "4.02": "comptes à corriger", "5.01": "changement de contrôle", "5.02": "dirigeants",
+            "5.03": "statuts", "5.07": "vote des actionnaires", "7.01": "communiqué (Reg FD)",
+            "8.01": "autre événement", "9.01": "annexes"}
+_agenda_cache: dict[str, tuple[float, object]] = {}
+_agenda_inflight: dict[str, asyncio.Future] = {}
+
+
+def agenda_symbols(now: datetime) -> list[str]:
+    """Actions qui comptent pour Simão, les plus importantes d'abord (le plafond des 8-K coupe la fin) : positions des
+    deux espaces, plans du scan du jour (pas celui d'une séance passée), watchlist."""
+    syms = [s for s, m in _held_symbols().items() if m == "stock"]
+    plans = plans_today(now)
+    if plans["du_jour"]:
+        syms += [p["symbol"] for p in plans["picks"]]
+    syms += list(config.WATCHLIST_STOCKS)
+    return [s for i, s in enumerate(syms) if s and s not in syms[:i] and SYMBOL_RE.match(s)]
+
+
+def _store(key: str, ttl: float, value) -> None:
+    now = clock.monotonic()
+    for k in [k for k, (until, _) in _agenda_cache.items() if until <= now]:  # un calendrier par jour : pas de fuite
+        del _agenda_cache[k]
+    _agenda_cache[key] = (now + ttl, value)
+
+
+async def _fill(key: str, ttl: float, fetch):
+    try:
+        value = await fetch()
+    except Exception as exc:
+        _store(key, 60, exc)
+        raise
+    _store(key, ttl, value)
+    return value
+
+
+def _settled(key: str, task: asyncio.Future) -> None:
+    if _agenda_inflight.get(key) is task:
+        del _agenda_inflight[key]
+    if not task.cancelled():
+        task.exception()  # lue ici : une lecture abandonnée par la vue ne laisse pas d'avertissement asyncio
+
+
+async def _cached(key: str, ttl: float, fetch):
+    """Valeur en cache jusqu'à `ttl` ; une erreur remonte (la partie le dit) et n'est retentée qu'après une minute.
+    Une lecture en cours est partagée (deux onglets ne la relancent pas) et va au bout même si la vue n'attend plus :
+    le passage suivant la trouve en cache."""
+    hit = _agenda_cache.get(key)
+    if hit and clock.monotonic() < hit[0]:
+        if isinstance(hit[1], Exception):
+            raise hit[1]
+        return hit[1]
+    task = _agenda_inflight.get(key)
+    if task is None or task.get_loop() is not asyncio.get_running_loop():
+        task = asyncio.ensure_future(_fill(key, ttl, fetch))
+        _agenda_inflight[key] = task
+        task.add_done_callback(lambda t, key=key: _settled(key, t))
+    return await asyncio.shield(task)
+
+
+async def _part(name: str, build) -> dict:
+    try:
+        return await build()
+    except Exception as exc:  # une source en panne n'efface pas les autres parties
+        log.warning("Cockpit : agenda %s indisponible (%s: %s)", name, type(exc).__name__, exc)
+        return {"erreur": f"{type(exc).__name__}: {exc}"[:200]}
+
+
+async def _economic(now: datetime) -> dict:
+    from app import needs
+
+    res = await needs.economic_calendar()  # cache d'une heure de needs.resolve
+    if res.data is None:  # aucune source ni valeur connue : inconnu, pas « rien de notable »
+        raise SourceError(res.message or "calendrier économique inconnu")
+    start = datetime.combine(now.astimezone(PARIS).date(), time(0), PARIS)
+    end = start + timedelta(days=AGENDA_DAYS)
+    dated = [at for at in (_parse(e.get("datetime_utc")) for e in res.data) if at is not None]
+    events = []
+    for e in res.data:
+        at = _parse(e.get("datetime_utc"))
+        if at is None or not start <= at < end or e.get("country") not in ECO_COUNTRIES \
+                or e.get("impact") not in ECO_IMPACTS:
+            continue
+        events.append({"at": at.isoformat(timespec="seconds"), "titre": e.get("title"), "pays": e.get("country"),
+                       "impact": e.get("impact"), "prevision": e.get("forecast"), "precedent": e.get("previous"),
+                       "reel": e.get("actual"), "statut": e.get("status")})
+    return {"evenements": sorted(events, key=lambda e: e["at"]), "source": res.source, "attribution": res.attribution,
+            "maj": res.updated_at, "stale": res.stale, "message": res.message,
+            # dernier jour (Paris) que la source couvre : au-delà, le calendrier est inconnu, pas vide
+            "couvre_jusqu_au": max(dated).astimezone(PARIS).date().isoformat() if dated else None,
+            "filtre": "impact fort ou moyen ; États-Unis, zone euro, France, Allemagne (comme le point du matin)"}
+
+
+async def _earnings(now: datetime, symbols: list[str]) -> dict:
+    from app.sources import finnhub
+
+    if not config.secret(finnhub.KEY_NAME):
+        return {"manque": f"clé {finnhub.KEY_NAME} absente : pas de calendrier des résultats", "suivies": [],
+                "jours": {}}
+    day = now.astimezone(NEW_YORK).date()
+    rows = await _cached(f"resultats:{day}", AGENDA_TTL_S["resultats"],
+                         lambda: finnhub.earnings_calendar(day, day + timedelta(days=AGENDA_DAYS - 1)))
+    days: dict[str, dict] = {}
+    for r in rows:
+        d = days.setdefault(r["date"], {"total": 0, "avant_ouverture": set(), "apres_cloture": set(),
+                                        "pendant": set(), "heure_inconnue": set()})
+        d["total"] += 1
+        d[{"bmo": "avant_ouverture", "amc": "apres_cloture", "dmh": "pendant"}.get(r.get("hour"), "heure_inconnue")
+          ].add(r["symbol"])
+    wanted = set(symbols)
+    followed = [{"symbol": r["symbol"], "date": r["date"], "heure": r.get("hour"),
+                 "trimestre": f"T{r['quarter']} {r['year']}" if r.get("quarter") and r.get("year") else None,
+                 "bpa_estime": r.get("eps_estimate"), "bpa_reel": r.get("eps_actual"),
+                 "ca_estime": r.get("revenue_estimate"), "ca_reel": r.get("revenue_actual")}
+                for r in rows if r["symbol"] in wanted]
+    return {"suivies": sorted(followed, key=lambda r: (r["date"], r["symbol"])),
+            "jours": {k: {n: sorted(v) if isinstance(v, set) else v for n, v in d.items()}
+                      for k, d in sorted(days.items())},
+            "source": "Finnhub"}
+
+
+async def _sec_filings(now: datetime, symbols: list[str]) -> dict:
+    from app.sources import edgar
+
+    if not config.secret(edgar.KEY_NAME):
+        return {"manque": f"{edgar.KEY_NAME} absent (nom et e-mail exigés par la SEC) : pas de 8-K", "depots": []}
+    ciks = await _cached("sec:tickers", 86400, edgar.tickers)
+    since = (now.astimezone(NEW_YORK).date() - timedelta(days=3)).isoformat()
+    wanted = symbols[:SEC_MAX_SYMBOLS]
+    missing = [s for s in wanted if ciks.get(edgar.ticker(s)) is None]
+    gate = asyncio.Semaphore(SEC_CONCURRENCY)
+
+    async def read(cik: int) -> dict:
+        async with gate:
+            return await _cached(f"sec:{cik}", AGENDA_TTL_S["sec"], lambda: edgar.submissions(cik))
+
+    tasks = {s: asyncio.ensure_future(read(ciks[edgar.ticker(s)])) for s in wanted if s not in missing}
+    _, late = await asyncio.wait(tasks.values(), timeout=SEC_BUDGET_S) if tasks else (set(), set())
+    for t in late:
+        t.cancel()  # la lecture partagée continue (_cached) et sert au passage suivant
+    out, errors, read_ok, too_slow = [], [], [], []
+    for s, t in tasks.items():
+        if t in late:
+            too_slow.append(s)
+            continue
+        if t.exception() is not None:  # une valeur en erreur n'efface pas les autres
+            errors.append(f"{s} : {type(t.exception()).__name__}")
+            continue
+        read_ok.append(s)
+        cik = ciks[edgar.ticker(s)]
+        for f in t.result()["recent"]:
+            if (f.get("filing_date") or "") >= since and f["form"] in ("8-K", "8-K/A"):
+                out.append({"symbol": s, "form": f["form"], "date": f["filing_date"],
+                            "accepte": _iso(f["accepted_ts"]), "heure_douteuse": f["suspect"],
+                            "items": [{"code": i, "label": ITEMS_8K.get(i, "item " + i)} for i in f["items"]],
+                            "lien": edgar.index_url(cik, f["accession"])})
+    # « lues » seulement : une valeur en erreur, trop lente, sans CIK ou au-delà du plafond n'a pas été vérifiée
+    return {"depots": sorted(out, key=lambda f: (f["date"], f["accepte"] or ""), reverse=True),
+            "valeurs": wanted, "lues": read_ok, "sans_cik": missing, "erreurs": errors, "trop_lentes": too_slow,
+            "hors_plafond": symbols[SEC_MAX_SYMBOLS:], "depuis": since, "source": "SEC EDGAR",
+            "note": "heure SEC indicative : le JSON d'EDGAR la donne parfois en retard de 4 à 5 h"}
+
+
+@router.get("/agenda")
+async def agenda():
+    """Agenda : la frise du jour (horaires de JARVIS), le calendrier économique de la semaine (Helious), les résultats
+    (Finnhub) et les 8-K des trois derniers jours (SEC EDGAR) des valeurs suivies. Sources gratuites, en cache (1 h ;
+    15 min par société pour la SEC) : la vue se rafraîchit sans les solliciter. Jamais Twelve Data."""
+    now = datetime.now(timezone.utc)
+    symbols = agenda_symbols(now)
+    eco, res, sec = await asyncio.gather(_part("economique", lambda: _economic(now)),
+                                         _part("resultats", lambda: _earnings(now, symbols)),
+                                         _part("sec", lambda: _sec_filings(now, symbols)))
+    return {"generated_at": now.isoformat(timespec="seconds"), "aujourd_hui": agenda_today(now),
+            "seances": market_sessions(now), "valeurs_suivies": symbols,
+            "economique": eco, "resultats": res, "sec8k": sec}
 
 
 def _trade_row(t: dict) -> dict:
@@ -833,7 +1113,10 @@ async def journal(space: str = "paper", limit: int = Query(100, ge=1, le=1000)):
             "desaccords": T.disagreements(scheduler.book, slopes),
             "confirmations": {"lignes": rows[-60:][::-1], "total": len(rows),
                               "aujourd_hui": scheduler.confirm_state.get("gos"),
-                              "jour": scheduler.confirm_state.get("day")},
+                              "jour": scheduler.confirm_state.get("day"),
+                              # vidé seulement au scan suivant : le week-end, ce sont encore les GO de vendredi
+                              "du_jour": scheduler.confirm_state.get("day")
+                              == now.astimezone(NEW_YORK).date().isoformat()},
             "forward_test": {k: v for k, v in st.items() if k != "text"},
             "decisions": [p for p in reversed(PR.proposals.items) if p["status"] != "pending"][:50]}
 

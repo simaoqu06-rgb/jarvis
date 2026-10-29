@@ -71,13 +71,35 @@ de cache dans `app/needs.py`. Chaque appel a un délai maximum de 8 secondes.
 JARVIS propose des plans selon la méthode EmperorBTC ([docs/emperorbtc.md](docs/emperorbtc.md)) ;
 c'est toi qui passes les ordres : aucun ordre n'est envoyé à un courtier.
 
-**Cockpit** : `/cockpit` (page web). On y calcule un plan, on clique « Je prends ce trade » pour le
-suivre, et on voit pour chaque trade le prix en direct (toutes les 10 s) avec un mini-graphe des
-2 dernières heures et les niveaux SL/entrée/TP, les TP/SL touchés avec l'heure, un compte à rebours
-vers chaque TP restant, les signes de sortie et le journal des trades terminés (résultats en R).
-Les prix des actions viennent des bougies déjà lues par le suivi : la page ne coûte aucun crédit
-Twelve Data. Ajoutée à l'écran d'accueil du téléphone, elle s'ouvre comme une appli.
-Le même tableau est réécrit chaque minute dans un message Discord (à épingler une fois). Tout tourne sur ton serveur : aucun token Claude n'est consommé.
+**Trading Cockpit** : `/cockpit` (page web privée, réseau Tailscale seulement, voir [DEPLOY.md](DEPLOY.md)). Huit
+vues : **Cockpit** (résumé, séances NYSE, trades ouverts, risque, plans du jour, à venir), **Marchés** (bougies avec
+SL, objectifs, entrée et délais estimés, watchlist), **Positions** (trades sur le graphique, ordres IBKR en prix,
+clôturés, conseils), **Risque** (grade par marché, risque ouvert, arrêt du jour, dernier calcul de taille, frais
+IBKR), **Labo** (méthode, Killmode, déclarations, n° 12, Gemini, leçons, autopsie, ratés, 8-K, Fed, council et
+veto), **Agenda** (frise du jour, calendrier économique, résultats et 8-K des valeurs suivies, semaine), **Journal**
+(clôtures, désaccords, confirmations des GO, forward-test, décisions) et **Santé** (sources, crédits Twelve Data,
+boucles, erreurs, diagnostic à télécharger). Raccourcis : `1` à `8` ou `G` puis une lettre, palette `Ctrl/⌘ K`,
+aide `?`.
+
+- Deux espaces : **Papier** (à l'ouverture) = chaque recommandation actionnable envoyée sur Discord (GO confirmés et
+  KILL), suivie telle qu'envoyée ; **Mes trades** = tes vrais trades déclarés à JARVIS. On entre dans Mes trades par
+  un appui maintenu de 1,1 s ; le serveur refuse toute écriture dans Mes trades sans ce verrou.
+- La page **n'envoie aucun ordre** (ni IBKR ni Alpaca) et ne touche aucune clé. La navigation ne dépense **aucun
+  crédit Twelve Data** (bougies du suivi, Kraken, Alpaca) ; seuls un plan, une prise, une reprise, un avis, une fiche
+  ou les conseils en prix, au clic, en dépensent comme sur Discord, et l'écran le dit. Les vues Labo, Risque et Journal montrent aussi le texte exact
+  des commandes Discord (`!grade`, `!frais`, `!strategies`, `!desaccords`…), par les mêmes fonctions.
+- Actions protégées (clôture, suppression, sortie réelle, reprise, approbation, veto, Killmode) : appui maintenu,
+  jeton CSRF, mêmes fonctions que les routes et commandes `!…`, journal `data/cockpit_actions.jsonl`.
+- Aucune ressource externe (polices et Lightweight Charts servis par JARVIS), CSP stricte sur `/cockpit` et
+  `/api/cockpit/*`. Ajoutée à l'écran d'accueil de l'iPhone, elle s'ouvre comme une appli (barre d'onglets en bas).
+- L'ancien cockpit reste sous `/cockpit/ancien` et la page du labo sous `/cockpit/labo` jusqu'à ta validation.
+- Un résumé des trades suivis est réécrit chaque minute dans un message Discord (à épingler une fois). Tout tourne sur ton
+  serveur : aucun token Claude n'est consommé.
+- Carte écran ↔ données et contrat de `/api/cockpit/*` : [docs/CARTE-INTERFACE.md](docs/CARTE-INTERFACE.md).
+
+**Si la page ne s'ouvre pas sur l'iPhone** : coupe le **Relais privé iCloud** (Réglages > ton nom > iCloud >
+Relais privé, ou seulement pour le réseau Wi-Fi utilisé) et vérifie que l'appli Tailscale est connectée : le relais
+peut contourner le DNS de Tailscale.
 
 | Route | Rôle |
 |---|---|
@@ -380,8 +402,9 @@ catalyseurs) passe par la file `data/lab_queue/`, que le worker lit à chaque pa
   méthode v2 (règle « … ») », ta règle de 20 € à part), et `!avis` ramène un GO écarté à « attendre ».
   Donnée manquante (indice du régime, bougies journalières pour le volume relatif et la variation de la veille,
   contexte) : la règle concernée ne s'applique pas, plan gardé, une ligne de journal.
-- **Cockpit** : page `/cockpit/labo` (lecture seule) : grade, avancement, chiffres clés, méthode en
-  place et challenger, dernières propositions, règles testées, dernier message du matin.
+- **Cockpit** : vue Labo de `/cockpit` (touche `5`) ; l'ancienne page `/cockpit/labo` (lecture seule : grade,
+  avancement, chiffres clés, méthode en place et challenger, propositions, règles testées, message du matin) reste
+  servie jusqu'à validation.
 - **Grade de JARVIS** (`app/lab/grade.py`, barème validé par Simão le 2026-10-07) : de F- à S+, la
   preuve mesurée par le worker (sans jeton) que la méthode en place gagne, par marché.
   - Lettre = espérance nette en R sur les 60 derniers jours de bourse de la méthode en place (hors

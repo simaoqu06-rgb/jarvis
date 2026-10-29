@@ -174,7 +174,8 @@ const TF_S = { '1m': 60, '5m': 300, '15m': 900, '1h': 3600, '1j': 86400 };
 const st = {
   view: 'cockpit', space: 'paper', unlocked: false, state: null, stateAt: 0, apiOk: true, apiErr: '', sig: '',
   chartSym: null, chartMarket: null, tf: '15m', cursor: -1, drawer: null, instruments: null, instrumentsAt: 0,
-  instrument: null, posCharts: null, journal: null, journalAt: 0, prevPos: null, lastPlan: null,
+  instrument: null, posCharts: null, journal: null, journalAt: 0, prevPos: null, lastPlan: null, lastSizing: null,
+  labTab: 'strategies', lab: null, labAt: 0, agenda: null, agendaAt: 0, health: null, healthAt: 0,
 };
 const apiSpace = () => (st.space === 'live' ? 'trades' : 'paper');
 const spaceName = () => (st.space === 'live' ? 'Mes trades' : 'Papier');
@@ -184,12 +185,13 @@ const fromHash = location.hash.replace('#', ''); if (VIEWS.some((x) => x[0] === 
 
 /* ---------- scrutation : une requête à la fois, arrêt quand l'onglet est masqué */
 function poller(fn, ms) {
-  let timer = 0, busy = false, on = false;
+  let timer = 0, busy = false, on = false, again = false;
   const run = async () => {
     clearTimeout(timer);
-    if (!on || document.hidden || busy) return;
+    if (!on || document.hidden) return;
+    if (busy) { again = true; return; } // changement de vue pendant une lecture lente : on repasse dès qu'elle finit
     busy = true;
-    try { await fn(); } catch (_) { /* l'erreur est déjà affichée */ } finally { busy = false; if (on) timer = setTimeout(run, ms()); }
+    try { await fn(); } catch (_) { /* l'erreur est déjà affichée */ } finally { busy = false; if (on) timer = setTimeout(run, again ? 0 : ms()); again = false; }
   };
   return { start() { on = true; run(); }, stop() { on = false; clearTimeout(timer); }, now() { if (on) run(); } };
 }
@@ -204,16 +206,30 @@ async function fetchState() {
     st.apiOk = false; st.apiErr = e.message; renderBanner(); updatePills();
   }
 }
+const older = (key, ms) => !st[key] || Date.now() - st[key + 'At'] > ms;
+async function loadJournal(ms) {
+  const space = apiSpace();
+  if (!older('journal', ms) && st.journal.space === space) return;
+  try { const d = await api('/api/cockpit/journal?space=' + space + '&limit=100', { timeout: 20000 }); if (space !== apiSpace()) return; st.journal = d; st.journalAt = Date.now(); }
+  catch (e) { if (!st.journal) waitFailed('journal', e.message); return; }
+  emit('journal');
+}
 async function fetchHeavy() {
   const space = apiSpace(), view = st.view;
   if (view === 'positions') {
-    const tasks = [api('/api/cockpit/positions/charts?space=' + space + '&tf=15m').then((d) => { if (space === apiSpace()) { st.posCharts = d; updatePosCharts(); } })];
-    if (Date.now() - st.journalAt > 60000 || !st.journal || st.journal.space !== space) {
-      tasks.push(api('/api/cockpit/journal?space=' + space + '&limit=12', { timeout: 15000 }).then((d) => { if (space === apiSpace()) { st.journal = d; st.journalAt = Date.now(); rebindJournal(); } }));
-    }
-    await Promise.allSettled(tasks);
+    await Promise.allSettled([api('/api/cockpit/positions/charts?space=' + space + '&tf=15m').then((d) => { if (space === apiSpace()) { st.posCharts = d; updatePosCharts(); } }), loadJournal(60000)]);
   } else if (view === 'marches') {
     await Promise.allSettled([loadInstrument(), loadInstruments()]);
+  } else if (view === 'labo') {
+    await Promise.allSettled([older('lab', 30000) ? loadInto('lab', '/api/cockpit/lab', 30000) : null, loadText('labo'), loadText(st.labTab)]);
+  } else if (view === 'agenda') {
+    if (older('agenda', 60000)) await loadInto('agenda', '/api/cockpit/agenda', 30000);
+  } else if (view === 'journal') {
+    await loadJournal(30000);
+  } else if (view === 'sante') {
+    await loadInto('health', '/api/cockpit/health');
+  } else if (view === 'risque') {
+    await Promise.allSettled([loadText('grade'), loadText('frais')]);
   }
 }
 const statePoll = poller(fetchState, () => 5000);
@@ -398,7 +414,7 @@ function loadingCard() { return card('c-12', 'Chargement', null, el('div', { cla
 function render(animate) {
   const sec = $('#v-' + st.view);
   destroyCharts('view');
-  binders = []; seconds = [];
+  binders = []; seconds = []; heavyBinders = [];
   const nodes = st.state ? BUILD[st.view]() : [loadingCard()];
   sec.replaceChildren(...nodes);
   st.sig = signature(st.view); st.cursor = -1;
@@ -659,7 +675,7 @@ function agendaList(items, limit) {
     const imp = a.importance === 'haute' ? 3 : 1;
     ol.append(el('li', { class: (d <= now ? 'past' : '') + (imp === 3 ? ' hot' : '') },
       el('span', { class: 'time', text: hhmm(d) }),
-      el('span', null, el('span', { class: 'ttl', text: a.titre }), el('span', { class: 'meta', text: a.categorie + ' · source : ' + a.source })),
+      el('span', null, el('span', { class: 'ttl', text: a.titre }), el('span', { class: 'meta', text: (CAT[a.categorie] || a.categorie) + ' · source : ' + a.source + (a.detail ? ' · ' + a.detail : '') })),
       el('span', { class: 'imp', 'aria-label': 'importance ' + imp + ' sur 3' }, [1, 2, 3].map((k) => el('i', { class: k <= imp ? 'on' : '' })))));
   }
   if (!placed) ol.append(nowLine());
@@ -739,11 +755,11 @@ function ordersCard(pos) {
 let journalBox = null;
 function closedCard() {
   journalBox = el('div');
-  rebindJournal();
+  rebindJournal(); onData('journal', rebindJournal);
   return card('c-6', 'Clôturés récemment · ' + spaceName(), st.space === 'live' ? 'R nets de frais estimés' : 'résultats nets de frais', journalBox);
 }
 function rebindJournal() {
-  if (!journalBox || !journalBox.isConnected) return;
+  if (!journalBox) return;
   const j = st.journal;
   if (!j || j.space !== apiSpace()) { journalBox.replaceChildren(el('div', { class: 'skeleton' })); return; }
   const rows = (j.clotures || []).slice(0, 10);
@@ -912,26 +928,487 @@ function drawInstrument(fresh) {
   }
 }
 
-/* --- Vues de l'étape 3 : état vide qui dit ce qui manque et où le trouver en attendant */
-const LATER = {
-  risque: ['Vue Risque détaillée à l\'étape 3', ['Grade, risque ouvert et arrêt du jour sont déjà sur le Cockpit (carte Risque).', 'Le dernier calcul de taille en étapes et les frais IBKR arrivent avec cette vue.']],
-  labo: ['Vue Labo à l\'étape 3', ['En attendant, la page Labo actuelle reste disponible.']],
-  agenda: ['Vue Agenda complète à l\'étape 3', ['La frise d\'aujourd\'hui est ci-dessous ; résultats, 8-K et « Cette semaine » arrivent avec cette vue.']],
-  journal: ['Vue Journal à l\'étape 3', ['Les clôtures récentes sont dans la vue Positions ; désaccords, confirmations des GO et forward-test arrivent avec cette vue.', 'L\'ancien cockpit reste disponible.']],
-  sante: ['Vue Santé à l\'étape 3', ['Le diagnostic (sans aucun secret) se télécharge déjà ci-dessous.']],
-};
-for (const v of Object.keys(LATER)) {
-  BUILD[v] = () => {
-    const [t, r] = LATER[v];
-    const links = el('div', { class: 'row-gap mt-12' });
-    if (v === 'labo') links.append(el('a', { class: 'btn', href: '/cockpit/labo' }, 'Ouvrir la page Labo actuelle'));
-    if (v === 'journal') links.append(el('a', { class: 'btn', href: '/cockpit/ancien' }, 'Ouvrir l\'ancien cockpit'));
-    if (v === 'sante') links.append(el('a', { class: 'btn', href: '/api/cockpit/diagnostics', download: '' }, 'Télécharger le diagnostic'));
-    const out = [card('c-12', VIEWS.find((x) => x[0] === v)[1], 'à venir', empty(t, r), links)];
-    if (v === 'agenda') out.push(agendaCard(0));
-    if (v === 'risque') out.push(riskCard());
-    return out;
+/* ---------- données des vues Risque, Labo, Agenda, Journal et Santé : relues seulement quand la vue est affichée ;
+   une carte n'est re-remplie que si ses données ont changé (fill). */
+const sigOf = (x) => { try { const s = JSON.stringify(x); return s === undefined ? '∅' : s; } catch (_) { return String(Date.now()); } };
+function fill(box, data, build) {
+  if (!box) return;
+  const s = sigOf(data);
+  if (box.jsig === s) return;
+  box.jsig = s;
+  put(box, build(data));
+}
+let heavyBinders = [];
+function onData(key, fn) { heavyBinders.push([key, fn]); if (st[key]) { try { fn(st[key]); } catch (e) { console.error(e); } } }
+function emit(key) { if (!st[key]) return; for (const [k, f] of heavyBinders) if (k === key) { try { f(st[key]); } catch (e) { console.error(e); } } }
+function waitFailed(key, msg) { for (const b of $$('[data-wait="' + key + '"]')) put(b, empty('Lecture impossible', [msg])); }
+async function loadInto(key, path, timeout = 15000) {
+  try { st[key] = await api(path, { timeout }); st[key + 'At'] = Date.now(); }
+  catch (e) { if (!st[key]) waitFailed(key, e.message); return; }
+  emit(key);
+}
+const waitBox = (key, cls) => el('div', { class: cls || null, data: { wait: key } }, st[key] ? null : el('div', { class: 'skeleton short' }));
+const kvRow = (k, v, cls) => el('div', null, el('dt', { text: k }), el('dd', { class: cls, text: v }));
+const STATUS_PROP = { pending: ['en attente', 'info'], approved: ['approuvée', 'up'], refused: ['refusée', 'down'], replaced: ['remplacée', 'ghost'] };
+const propChip = (p) => { const s = STATUS_PROP[p.status] || [p.status || '?', '']; return chip(s[0], s[1]); };
+
+/* Texte d'une commande Discord (même fonction côté serveur) : gras, code, petites lignes « -# », blocs ```. */
+function inlineMd(s) {
+  const out = [], re = /(\*\*[^*]+\*\*|`[^`]+`)/g;
+  let last = 0, m;
+  while ((m = re.exec(s))) {
+    if (m.index > last) out.push(s.slice(last, m.index));
+    out.push(m[0][0] === '*' ? el('b', { text: m[0].slice(2, -2) }) : el('code', { text: m[0].slice(1, -1) }));
+    last = re.lastIndex;
+  }
+  if (last < s.length) out.push(s.slice(last));
+  return out;
+}
+function discordText(text) {
+  const box = el('div', { class: 'dtext' });
+  let code = null;
+  for (const raw of String(text || '').split('\n')) {
+    if (raw.trim().startsWith('```')) { if (code) { box.append(el('pre', { class: 'pre', text: code.join('\n') })); code = null; } else code = []; continue; }
+    if (code) { code.push(raw); continue; }
+    if (!raw.trim()) { box.append(el('div', { class: 'gap' })); continue; }
+    let line = raw, cls = 'ln';
+    if (line.startsWith('-# ')) { line = line.slice(3); cls += ' sub'; }
+    else if (/^#{1,3} /.test(line)) { line = line.replace(/^#{1,3} /, ''); cls += ' h'; }
+    else if (line.startsWith('> ')) { line = line.slice(2); cls += ' q'; }
+    box.append(el('div', { class: cls }, inlineMd(line)));
+  }
+  if (code) box.append(el('pre', { class: 'pre', text: code.join('\n') }));
+  return box;
+}
+const TEXTS = {};
+async function loadText(mod) {
+  const c = TEXTS[mod];
+  if (c && (c.loading || Date.now() - c.at < 120000)) return;
+  TEXTS[mod] = Object.assign(c || {}, { loading: true });
+  try { TEXTS[mod] = { at: Date.now(), data: await api('/api/cockpit/texte/' + mod, { timeout: 30000 }) }; }
+  catch (e) { TEXTS[mod] = { at: Date.now() - 90000, data: Object.assign({}, c && c.data, { erreur: e.message }) }; }
+  for (const b of $$('[data-tmod="' + mod + '"]')) renderTextBox(b);
+}
+function renderTextBox(box) {
+  const c = TEXTS[box.dataset.tmod];
+  if (!c || !c.data) { if (!box.firstChild) box.append(el('div', { class: 'skeleton' })); return; }
+  fill(box, c.data, (d) => (!d.texte ? empty('Lecture impossible', [d.erreur || 'réponse vide']) : [
+    el('div', { class: 'tmeta' }, chip(d.commande, 'ghost'), el('span', { text: 'lu ' + stamp(d.at) + ' · le texte de la commande sur Discord' + (d.erreur ? ' · relecture en échec : ' + d.erreur : '') })),
+    d.note ? el('p', { class: 'small muted m-0' }, inlineMd(d.note)) : null,
+    discordText(d.texte)]));
+}
+function textBox(mod) {
+  const box = el('div', { class: 'tbox', data: { tmod: mod } });
+  renderTextBox(box); loadText(mod);
+  return box;
+}
+const textCard = (mod, cls, eyebrow, meta) => card(cls, eyebrow, meta || null, textBox(mod));
+function textDetails(mod, label) {
+  const d = el('details', { class: 'tdetails' }, el('summary', { class: 'small soft' }, inlineMd(label)));
+  d.addEventListener('toggle', () => { if (d.open && !d.querySelector('.tbox')) d.append(textBox(mod)); });
+  return d;
+}
+
+/* --- Risque */
+BUILD.risque = () => [gradeCard(), budgetCard(), sizingCard(), feesCard(), textCard('grade', 'c-6', 'Grade détaillé'), textCard('frais', 'c-6', 'Ta mise de 20 € chez IBKR')];
+function gradeTile(m, g) {
+  const chips = [];
+  if (g.perime) chips.push(chip('périmé', 'warn'));
+  if (g.mode_survie) chips.push(chip('mode survie', 'warn'));
+  if (g.non_note) chips.push(chip('non noté', 'ghost'));
+  if (g.observation) chips.push(chip('plans en observation', 'info'));
+  return el('div', { class: 'gtile' },
+    el('div', { class: 'gtile-h' }, el('span', { class: 'soft', text: m === 'stock' ? 'Actions US' : 'Crypto' }), el('span', { class: 'gl' + (String(g.grade || '?').length > 2 ? ' long' : ''), text: g.grade || '?' })),
+    el('dl', { class: 'kv' },
+      kvRow('Risque proposé', pct(g.risque_propose, false) + (isNum(g.risque_propose_eur) ? ' · ' + eur(g.risque_propose_eur) : '')),
+      kvRow('Risque du grade', pct(g.risque_grade, false)),
+      kvRow('Plafond de la lettre', isNum(g.risque_max) ? pct(g.risque_max, false) : DASH)),
+    el('p', { class: 'small soft m-0', text: g.raison || '' }),
+    chips.length ? el('div', { class: 'row-gap' }, chips) : null);
+}
+function gradeCard() {
+  const box = el('div', { class: 'gtiles' }), age = el('span');
+  bind((s) => {
+    const r = s.risk, stale = isNum(r.grade_age_h) && r.grade_age_h > r.grade_max_age_h;
+    age.className = stale ? 'warn' : '';
+    age.textContent = isNum(r.grade_age_h) ? 'calculé ' + ago(r.grade_age_h * 3600) + (stale ? ' ⚠ périmé au-delà de ' + r.grade_max_age_h + ' h' : '') : 'jamais calculé par le labo';
+    fill(box, r.grades, (gr) => ['stock', 'crypto'].map((m) => gradeTile(m, gr[m] || {})));
+  });
+  return card('c-6', 'Grade par marché', age, box, el('div', { class: 'small muted mt-12', text: 'Les hausses de lettre restent à toi (propositions) ; le council du soir ne baisse le grade que pour un défaut d\'intégrité.' }));
+}
+function budgetCard() {
+  const openM = segm(0, 1, 20), dayM = segm(0, 1, 20), openV = el('span', { class: 'num' }), dayV = el('span', { class: 'num' });
+  const kv = el('dl', { class: 'kv mt-12' }), note = el('p', { class: 'note-warn' });
+  bind((s) => {
+    const r = s.risk, cap = r.capital_declare_eur;
+    openV.textContent = pct(r.risque_ouvert_pct, false) + ' / ' + pct(r.risque_ouvert_max_pct, false, 0);
+    setSegm(openM, r.risque_ouvert_pct, r.risque_ouvert_max_pct);
+    dayV.textContent = rr(r.r_du_jour_net) + ' · arrêt à ' + rr(r.arret_jour_r);
+    setSegm(dayM, isNum(r.r_du_jour_net) ? Math.max(0, -r.r_du_jour_net) : null, Math.abs(r.arret_jour_r));
+    put(kv, kvRow('Ta règle : risque max par trade', eur(r.risque_max_par_trade_eur)),
+      kvRow('Capital', isNum(cap) ? eur0(cap) + ' · déclaré' : 'non déclaré (JARVIS_CAPITAL)'),
+      kvRow('Risque ouvert en euros', isNum(cap) && isNum(r.risque_ouvert_pct) ? '≈ ' + eur(cap * r.risque_ouvert_pct / 100) : DASH),
+      kvRow('Budget encore libre', isNum(cap) && isNum(r.risque_ouvert_pct) ? pct(Math.max(0, r.risque_ouvert_max_pct - r.risque_ouvert_pct), false) + ' · ≈ ' + eur(cap * Math.max(0, r.risque_ouvert_max_pct - r.risque_ouvert_pct) / 100) : DASH),
+      kvRow('Taille d\'un nouveau plan', 'min(capital × % du grade, ' + eur0(r.risque_max_par_trade_eur) + ')'));
+    note.textContent = '⚠ ' + r.note.charAt(0).toUpperCase() + r.note.slice(1) + '.';
+  });
+  return card('c-6', 'Risque ouvert et arrêt du jour', 'trades déclarés dans Mes trades', el('div', { class: 'meters' },
+    el('div', null, el('div', { class: 'meter-h' }, el('span', { text: 'Risque ouvert' }), openV), openM, el('div', { class: 'meter-n', text: 'risque au stop des trades ouverts, en % du capital déclaré ; au-delà, JARVIS plafonne la taille' })),
+    el('div', null, el('div', { class: 'meter-h' }, el('span', { text: 'Arrêt de la journée' }), dayV), dayM, el('div', { class: 'meter-n', text: 'R nets du jour des trades pris ; à l\'arrêt, plus de taille proposée (message sans taille)' }))), kv, note);
+}
+/* Dernier plan calculé dans ce navigateur : gardé en local (la taille et ses entrées, rien d'autre). */
+function keepPlan(p) {
+  st.lastSizing = { at: new Date().toISOString(), symbol: p.symbol, market: p.market, side: p.side, entry: p.entry, stop: p.stop, grade: p.grade || null, sizing: p.sizing || null, sizing_regle: p.sizing_regle || null, ibkr: p.ibkr || null };
+  try { localStorage.setItem('cockpit.lastPlan', JSON.stringify(st.lastSizing)); } catch (_) { /* stockage indisponible */ }
+}
+try { const lp = JSON.parse(localStorage.getItem('cockpit.lastPlan') || 'null'); if (lp && lp.symbol) st.lastSizing = lp; } catch (_) { /* illisible : ignoré */ }
+function sizingSteps(p, ruleEur) {
+  const g = p.grade || {}, s = p.sizing || p.sizing_regle, rule = !p.sizing && !!p.sizing_regle, ib = p.ibkr, stock = p.market !== 'crypto';
+  const li = (label, value, sub, cls) => el('li', { class: cls || null }, el('span', null, el('span', { text: label }), sub ? el('span', { class: 'small muted blk', text: sub }) : null), el('span', { class: 'num', text: value }));
+  const out = [li('Grade ' + (g.grade || '?') + (stock ? ' des actions' : ' de la crypto') + ' : risque proposé', pct(g.risque_propose, false), g.raison || null)];
+  if (!s) { out.push(li('Pas de taille', DASH, 'grade à 0 % et pas de taille à ta règle pour ce plan', 'final')); return out; }
+  if (rule) out.push(li('Grade à 0 % : ta règle, hors avis de JARVIS', eur(s.risk_amount_eur), 'JARVIS ne propose pas de taille ; le plan donne celle de ta règle', 'bind'));
+  else {
+    const raw = isNum(s.capital) && isNum(g.risque_propose) ? s.capital * g.risque_propose / 100 : null;
+    const capped = isNum(raw) && isNum(ruleEur) && raw > ruleEur + 1e-9;
+    out.push(li('Risque en euros', eur(s.risk_amount_eur), isNum(raw) ? 'min(' + eur0(s.capital) + ' × ' + pct(g.risque_propose, false) + ' = ' + eur(raw) + ', ta règle ' + eur0(ruleEur) + ')' + (capped ? ' : ta règle plafonne' : '') : 'capital non déclaré : ta règle de ' + eur0(ruleEur), capped ? 'bind' : null));
+  }
+  out.push(li('Au change EUR/USD ' + nf(4).format(s.eurusd), usd(s.risk_amount), null));
+  const unit = Math.abs(p.entry - p.stop);
+  out.push(li('Risque par ' + (stock ? 'action' : 'unité') + ' : |' + price(p.entry) + ' − ' + price(p.stop) + '|', usd(unit), '≈ ' + eur(s.unit_risk_eur) + ' par ' + (stock ? 'action' : 'unité')));
+  out.push(li('Quantité : ' + usd(s.risk_amount) + ' ÷ ' + usd(unit) + (stock ? ', arrondie à l\'action entière' : ', arrondie vers le bas'), stock ? int(s.quantity) + ' action' + (s.quantity > 1 ? 's' : '') : qty(s.quantity),
+    'nominal ' + usd(s.notional) + (isNum(s.leverage) ? ' · levier ×' + nf(2).format(s.leverage) : ''), ib ? null : 'final'));
+  if (ib && ib.quantity) {
+    const f = ib.fees && ib.fees[ib.plan];
+    out.push(li('Chez IBKR : perte réelle au SL', usd(ib.real_risk_usd), (ib.sortie_unique ? 'un bracket sur ' + ((ib.brackets || [])[0] || {}).name + ' (' + (ib.reperes || []).join(' et ') + ' : repères)' : (ib.brackets || []).length + ' brackets, un par objectif') + (f ? ' · commissions ' + (ib.plan === 'degressif' ? 'Dégressif' : 'Fixe') + ' ≈ ' + usd(f.usd) + ' (' + rr(f.r, false) + ')' : ''), 'final'));
+  } else if (ib && ib.raison) out.push(li('Chez IBKR', '0 action', ib.raison, 'final'));
+  return out;
+}
+function sizingCard() {
+  const box = el('div');
+  const draw = () => {
+    const p = st.lastSizing, ruleEur = st.state && st.state.risk.risque_max_par_trade_eur;
+    fill(box, [p, ruleEur], () => (p ? [el('div', { class: 'row-gap small soft' }, el('b', { text: p.symbol }), chip(p.side === 'short' ? 'SHORT' : 'LONG', p.side === 'short' ? 'down' : 'up'), el('span', { text: 'entrée ' + price(p.entry) + ' · stop ' + price(p.stop) + ' · calculé ' + stamp(p.at) })), el('ol', { class: 'steps mt-12' }, sizingSteps(p, ruleEur))]
+      : empty('Aucun plan calculé dans ce navigateur', ['« Nouveau plan » (touche +) calcule la taille ; ses étapes s\'affichent ici et restent gardées sur cet appareil.'])));
   };
+  bind(draw);
+  return card('c-7', 'Dernier calcul de taille', el('button', { class: 'btn sm', type: 'button', onclick: () => planForm() }, 'Nouveau plan ', el('span', { class: 'kh' }, kbd('+'))), box);
+}
+function feesCard() {
+  const box = el('div');
+  bind((s) => fill(box, [s.risk.ibkr, st.lastSizing && st.lastSizing.ibkr], ([f, last]) => {
+    if (!f) return empty('Barème IBKR inconnu', []);
+    const rows = Object.entries(f.baremes).map(([k, b]) => el('div', { class: 'fee' + (k === f.bareme ? ' mine' : '') },
+      el('div', { class: 'fee-h' }, el('b', { text: b.label }), k === f.bareme ? chip('ton compte', 'mode') : null),
+      el('div', { class: 'small soft', text: nf(4).format(b.par_action_usd) + ' $ par action · minimum ' + usd(b.minimum_usd) + ' · plafond ' + pct(b.plafond_pct, false, 0) + ' de l\'ordre' + (b.frais_place_usd ? ' · + frais de place ≈ ' + nf(4).format(b.frais_place_usd) + ' $ par action' : '') }),
+      el('div', { class: 'small' }, 'Plancher d\'un aller-retour (1 bracket) : ', el('b', { class: 'num', text: usd(b.plancher_aller_retour_usd) }), el('span', { class: 'muted', text: ' · ' + rr(b.plancher_r, false) + ' à ' + eur0(s.risk.risque_max_par_trade_eur) }))));
+    const lf = last && last.fees;
+    return [el('div', { class: 'fees' }, rows),
+      el('div', { class: 'small soft mt-12', text: f.sortie_unique ? 'Sortie unique sur TP2 (TP1 et TP3 : repères sans ordre) : un bracket, deux ordres. JARVIS_IBKR_BRACKETS=3 pour un bracket par objectif.' : 'Un bracket par objectif (JARVIS_IBKR_BRACKETS=3) : deux ordres par bracket.' }),
+      lf ? el('div', { class: 'small mt-8' }, 'Dernier plan (' + st.lastSizing.symbol + ', ' + int(last.quantity) + ' actions) : ', el('b', { text: 'Fixe ' + usd(lf.fixe.usd) + ' (' + rr(lf.fixe.r, false) + ')' }), ' · ', el('b', { text: 'Dégressif ' + usd(lf.degressif.usd) + ' (' + rr(lf.degressif.r, false) + ')' })) : null];
+  }));
+  return card('c-5', 'Frais IBKR', 'barème du compte (JARVIS_IBKR_PLAN)', box);
+}
+
+/* --- Labo */
+const LAB_TABS = [['strategies', 'Déclarations'], ['ouverture', 'N° 12 ouverture'], ['gemini', 'Gemini'], ['lecons', 'Leçons'], ['autopsie', 'Autopsie'], ['rates', 'Ratés +10 %'], ['etude8k', 'Étude 8-K'], ['sec8k', 'Mesure 8-K'], ['polyfed', 'Fed'], ['potentiel', 'Potentiel +10']];
+try { const t = localStorage.getItem('cockpit.labTab'); if (LAB_TABS.some((x) => x[0] === t)) st.labTab = t; } catch (_) { /* idem */ }
+BUILD.labo = () => [labStatusCard(), killCard(), labTabsCard(), councilCard(), declarationsCard()];
+function labFacts(lab) {
+  const s = lab.statut || {}, r = lab.regles || {}, l = lab.lecons || {}, base = lab.base || {};
+  if (s.erreur || base.erreur) return [empty('Labo illisible', [s.erreur || base.erreur])];
+  const fact = (k, v, sub) => el('div', { class: 'fact' }, el('span', { class: 'k', text: k }), el('span', { class: 'v num', text: v }), sub ? el('span', { class: 's', text: sub }) : null);
+  const rep = s.replay || {}, last = (m) => ((rep[m] || {}).last_day || null);
+  return [el('div', { class: 'facts' },
+    fact('Méthode en place', s.method_version || DASH, s.exists ? (isNum(s.db_size_mb) ? 'base ' + (s.db_size_mb >= 1024 ? nf(1).format(s.db_size_mb / 1024) + ' Go' : nf(s.db_size_mb < 10 ? 1 : 0).format(s.db_size_mb) + ' Mo') : 'base présente') : 'base absente'),
+    fact('Rejeu jusqu\'au', last('stock') ? DTF.dm.format(toDate(last('stock'))) : DASH, 'actions' + (last('crypto') ? ' · crypto ' + DTF.dm.format(toDate(last('crypto'))) : '')),
+    fact('Règles', int(r.validee) + ' validée' + ((r.validee || 0) > 1 ? 's' : ''), int(r.rejetee) + ' rejetées · ' + int(r.en_attente) + ' en attente · ' + int(r.essais) + ' essais'),
+    fact('Leçons', int(l.confirmee) + ' confirmée' + ((l.confirmee || 0) > 1 ? 's' : ''), int(l.a_confirmer) + ' à confirmer · ' + int(l.dementie) + ' démenties'))];
+}
+function labStatusCard() {
+  const facts = waitBox('lab');
+  onData('lab', (lab) => fill(facts, [lab.statut, lab.regles, lab.lecons, lab.base], () => labFacts(lab)));
+  return card('c-8', 'Labo', el('span', null, 'lecture seule de lab.db · ', el('a', { href: '/cockpit/labo' }, 'page Labo actuelle')), facts, el('div', { class: 'mt-16' }, textBox('labo')));
+}
+function killCard() {
+  const head = el('div', { class: 'row-gap' }), list = waitBox('lab');
+  const btn = el('button', { class: 'btn', type: 'button', onclick: () => killmode(!(st.state && st.state.killmode.actif)) });
+  bind((s) => {
+    const k = s.killmode;
+    put(head, chip(k.actif ? 'allumé' : 'éteint', k.actif ? 'warn' : 'ghost'), el('span', { class: 'small soft', text: k.depuis ? 'depuis le ' + stamp(k.depuis) : 'éteint par défaut' }));
+    put(btn, k.actif ? 'Éteindre…' : 'Allumer…', el('span', { class: 'lock', text: '●', title: 'appui maintenu' }));
+  });
+  onData('lab', (lab) => fill(list, lab.killmode, (k) => {
+    if (!k || k.erreur) return empty('Journal de Killmode illisible', [k && k.erreur]);
+    const rows = (k.derniers || []).slice().reverse();
+    return [el('p', { class: 'small soft m-0', text: int(k.kill) + ' KILL notés · ' + int(k.temoins) + ' témoins (version en vigueur et précédentes)' }),
+      rows.length ? el('div', { class: 'feed mt-8' }, rows.map((c) => el('div', null, el('span', { class: 'mono', text: c.symbol }), el('span', { class: 'mono ' + (isNum(c.r_20e) ? (c.r_20e >= 0 ? 'up' : 'down') : 'muted'), text: isNum(c.r_20e) ? rr(c.r_20e) : 'à solder' }), el('span', { class: 'soft fv', text: 'entrée ' + price(c.entry) }), el('span', { class: 'soft right', text: c.day || DASH }))))
+        : el('p', { class: 'small muted' }, inlineMd('Aucun KILL noté : le journal se remplit par `!kill` entre 9 h 45 et 11 h (New York).'))];
+  }));
+  const journalBtn = el('button', { class: 'btn', type: 'button', onclick: async () => { openSheet('Journal de Killmode', textBox('killmode'), el('div', { class: 'acts' }, el('button', { class: 'btn', type: 'button', onclick: closeSheet }, 'Fermer'))); } }, 'Journal complet');
+  return card('c-4', 'Killmode', 'ne touche ni seuils ni version', head, el('div', { class: 'mt-12' }, list), el('div', { class: 'row-gap mt-12' }, btn, journalBtn),
+    el('div', { class: 'small muted mt-8' }, inlineMd('Lecture finale après 8 semaines minimum. Le journal complet ne solde pas les appels : `!kill bilan` sur Discord le fait.')));
+}
+function labTabsCard() {
+  const tabs = el('div', { class: 'seg-tabs wrap', role: 'tablist', 'aria-label': 'Modules du labo' });
+  const body = el('div', { class: 'mt-12' });
+  const show = (mod) => {
+    st.labTab = mod;
+    try { localStorage.setItem('cockpit.labTab', mod); } catch (_) { /* idem */ }
+    for (const b of tabs.children) b.setAttribute('aria-pressed', String(b.dataset.lt === mod));
+    put(body, textBox(mod));
+  };
+  for (const [m, t] of LAB_TABS) tabs.append(el('button', { type: 'button', data: { lt: m }, onclick: () => show(m), text: t }));
+  show(st.labTab);
+  return card('c-12', 'Modules du labo', 'mêmes textes que les commandes Discord · relus toutes les 2 min', tabs, body);
+}
+function councilCard() {
+  const box = waitBox('lab');
+  onData('lab', (lab) => fill(box, lab.propositions, (ps) => {
+    if (!Array.isArray(ps)) return empty('Propositions illisibles', [ps && ps.erreur]);
+    if (!ps.length) return empty('Aucune décision du labo enregistrée', ['Les règles approuvées, les hausses de grade proposées et les promotions de méthode apparaissent ici.']);
+    return el('div', { class: 'props' }, ps.slice(0, 8).map((p) => el('div', { class: 'prop' },
+      el('div', null, el('div', { text: '#' + p.id + ' · ' + proposalText(p) }), el('div', { class: 'why', text: (p.decided_at ? 'décidée ' + stamp(p.decided_at) : 'créée ' + stamp(p.created_at)) + (p.why ? ' · ' + (Array.isArray(p.why) ? p.why.join(' ; ') : p.why) : '') })),
+      propChip(p))));
+  }));
+  return card('c-6', 'Council et veto', 'le council déclare, approuve et promeut seul', box,
+    el('div', { class: 'row-gap mt-12' }, el('button', { class: 'btn danger', type: 'button', onclick: veto }, 'Poser un veto…', el('span', { class: 'lock', text: '●', title: 'appui maintenu' })),
+      el('span', { class: 'small muted' }, inlineMd('annule la dernière décision au prochain passage du labo (`!veto`)'))));
+}
+function declarationsCard() {
+  const box = waitBox('lab');
+  onData('lab', (lab) => fill(box, lab.declarations || lab.base, (ds) => {
+    if (!Array.isArray(ds)) return empty('Déclarations du council illisibles', [ds && ds.erreur]);
+    if (!ds.length) return empty('Aucune déclaration du council', ['Une déclaration = une règle pré-déclarée jouée contre un témoin aléatoire ; le tableau complet est dans l\'onglet « Déclarations ».']);
+    return el('div', { class: 'feed decl' }, ds.slice().reverse().slice(0, 12).map((d) => el('div', null,
+      el('span', { class: 'mono', text: d.strategie || '#' + d.id }), el('span', { class: 'soft', text: d.market === 'crypto' ? 'crypto' : 'actions' }),
+      el('span', { class: 'grow', text: d.nom || DASH, title: d.pourquoi || '' }), el('span', { class: 'soft right', text: d.creee_le ? stamp(d.creee_le) : DASH }))));
+  }));
+  return card('c-6', 'Déclarations du council', 'les plus récentes', box);
+}
+
+/* --- Agenda */
+const CAT = { jarvis: 'JARVIS', marche: 'marché', labo: 'labo', routine: 'routine Claude', macro: 'macro', resultats: 'résultats' };
+const IMPACT = { High: ['fort', 'haute'], Medium: ['moyen', 'normale'] };
+const HOUR = { bmo: 'avant l\'ouverture', amc: 'après la clôture', dmh: 'pendant la séance' };
+BUILD.agenda = () => [agendaDayCard(), agendaSideCard(), agendaWeekCard()];
+function ecoItem(e) {
+  const det = [['prévision', e.prevision], ['précédent', e.precedent], ['réel', e.reel]].filter((x) => x[1] != null && x[1] !== '').map((x) => x[0] + ' ' + x[1]).join(' · ');
+  return { at: e.at, titre: e.pays + ' · ' + e.titre, categorie: 'macro', source: 'Helious', importance: e.impact === 'High' ? 'haute' : 'normale', detail: 'impact ' + (IMPACT[e.impact] || [e.impact])[0] + (det ? ' · ' + det : '') };
+}
+function ecoUnknown(eco, day) {
+  if (!eco) return 'en lecture…';
+  if (eco.erreur) return 'indisponible (' + eco.erreur + ')';
+  if (!eco.couvre_jusqu_au || day > eco.couvre_jusqu_au) return 'pas encore publié par la source';
+  return '';
+}
+function agendaDayCard() {
+  const box = el('div'), meta = el('span'), note = el('div', { class: 'small muted mt-8' });
+  const draw = () => {
+    const a = st.agenda, today = dayKey(new Date()), ecoAll = a && a.economique;
+    const eco = ecoAll && ecoAll.evenements ? ecoAll.evenements.filter((e) => dayKey(toDate(e.at)) === today).map(ecoItem) : [];
+    const items = ((st.state && st.state.agenda_today) || []).concat(eco).sort((x, y) => (x.at < y.at ? -1 : 1));
+    const unknown = ecoUnknown(ecoAll, today);
+    meta.textContent = DTF.day.format(new Date());
+    note.textContent = unknown ? 'Calendrier économique ' + unknown + ' : les annonces du jour ne figurent pas ici.' : ecoAll.stale ? '⚠ Calendrier économique : dernière valeur connue' + (ecoAll.maj ? ' (' + stamp(ecoAll.maj) + ')' : '') + '.' : '';
+    note.hidden = !note.textContent;
+    fill(box, [items, Math.floor(Date.now() / 60000)], () => agendaList(items, 0)); // la ligne « maintenant » avance à la minute
+  };
+  bind(draw); onData('agenda', draw);
+  return card('c-7', 'Aujourd\'hui', meta, box, note);
+}
+function earningsBlock(r) {
+  if (!r) return el('div', { class: 'skeleton short' });
+  if (r.erreur) return empty('Calendrier des résultats indisponible', [r.erreur]);
+  if (r.manque) return empty('Pas de calendrier des résultats', [r.manque]);
+  const today = (st.agenda.seances.nyse.aujourd_hui || {}).jour || dayKey(new Date());
+  const mine = (r.suivies || []).filter((x) => x.date === today), day = (r.jours || {})[today];
+  const names = (list) => list.slice(0, 14).join(' · ') + (list.length > 14 ? ' … (+' + (list.length - 14) + ')' : '');
+  return el('div', null,
+    mine.length ? el('div', { class: 'feed earn' }, mine.map((x) => el('div', null, el('b', { class: 'mono', text: x.symbol }), chip(HOUR[x.heure] || 'heure inconnue', x.heure ? 'info' : 'ghost'), el('span', { class: 'soft fv', text: x.trimestre || '' }), el('span', { class: 'soft right', text: 'BPA attendu ' + (isNum(x.bpa_estime) ? nf(2).format(x.bpa_estime) : DASH) + (isNum(x.bpa_reel) ? ' · publié ' + nf(2).format(x.bpa_reel) : '') }))))
+      : el('p', { class: 'small soft m-0', text: 'Aucune valeur suivie ne publie aujourd\'hui.' }),
+    day ? el('div', { class: 'small muted mt-8' }, el('div', { text: 'Toute la cote aujourd\'hui : ' + day.total + ' publications.' }),
+      day.avant_ouverture.length ? el('div', { text: 'Avant l\'ouverture : ' + names(day.avant_ouverture) }) : null,
+      day.apres_cloture.length ? el('div', { text: 'Après la clôture : ' + names(day.apres_cloture) }) : null) : null);
+}
+function secBlock(s) {
+  if (!s) return el('div', { class: 'skeleton short' });
+  if (s.erreur) return empty('Dépôts SEC indisponibles', [s.erreur]);
+  if (s.manque) return empty('Pas de lecture des 8-K', [s.manque]);
+  const rows = s.depots || [], list = (k) => s[k] || [];
+  const unread = [[list('erreurs'), 'en erreur'], [list('trop_lentes'), 'SEC trop lente'], [list('sans_cik'), 'sans CIK'], [list('hors_plafond'), 'au-delà de ' + list('valeurs').length + ' valeurs']]
+    .filter((x) => x[0].length).map((x) => x[1] + ' : ' + x[0].join(', '));
+  return el('div', null,
+    rows.length ? el('div', { class: 'feed sec' }, rows.map((f) => el('div', null, el('b', { class: 'mono', text: f.symbol }), el('span', { class: 'soft', text: DTF.dm.format(toDate(f.date + 'T12:00:00Z')) + (f.form !== '8-K' ? ' · ' + f.form : '') }),
+      el('span', { class: 'chips' }, (f.items || []).filter((i) => i.code !== '9.01').map((i) => chip(i.label, i.code === '2.02' ? 'info' : i.code === '1.01' ? 'up' : '', 'item ' + i.code))),
+      el('a', { class: 'right small', href: f.lien, target: '_blank', rel: 'noopener noreferrer', text: 'EDGAR ↗' }))))
+      : (s.lues || []).length ? el('p', { class: 'small soft m-0', text: 'Aucun 8-K depuis le ' + DTF.dm.format(toDate(s.depuis + 'T12:00:00Z')) + ' sur les ' + s.lues.length + ' valeur' + (s.lues.length > 1 ? 's' : '') + ' lue' + (s.lues.length > 1 ? 's' : '') + '.' })
+        : empty('8-K inconnus', [(s.valeurs || []).length ? 'Aucune valeur lue sur la SEC (détail ci-dessous).' : 'Aucune valeur suivie : watchlist vide, aucun trade ni plan du jour.']),
+    unread.length ? el('div', { class: 'small warn mt-8', text: 'Non vérifiées : ' + unread.join(' · ') }) : null,
+    el('div', { class: 'small muted mt-8', text: s.note }));
+}
+function agendaSideCard() {
+  const earn = waitBox('agenda'), sec = waitBox('agenda'), who = el('p', { class: 'small muted m-0' });
+  onData('agenda', (a) => {
+    fill(earn, [a.resultats, (a.seances.nyse.aujourd_hui || {}).jour], () => earningsBlock(a.resultats));
+    fill(sec, a.sec8k, () => secBlock(a.sec8k));
+    who.textContent = 'Valeurs suivies : ' + ((a.valeurs_suivies || []).join(', ') || 'aucune (watchlist vide, aucun trade ni plan)') + '.';
+  });
+  return card('c-5', 'Résultats et 8-K', 'valeurs suivies : positions, plans du jour, watchlist', who,
+    el('h3', { class: 'sub-h', text: 'Résultats du jour' }), earn, el('h3', { class: 'sub-h', text: '8-K des trois derniers jours' }), sec);
+}
+function agendaWeekCard() {
+  const box = waitBox('agenda'), src = el('div', { class: 'small muted mt-12' });
+  onData('agenda', (a) => {
+    const eco = a.economique || {}, res = a.resultats || {};
+    fill(box, [eco.evenements, eco.couvre_jusqu_au, res.suivies, res.jours, eco.erreur, res.erreur, res.manque, dayKey(new Date())], () => {
+      const days = [];
+      for (let k = 0; k < 7; k++) days.push(dayKey(new Date(Date.now() + k * 864e5)));
+      const out = days.map((d) => {
+        const ev = (eco.evenements || []).filter((e) => dayKey(toDate(e.at)) === d);
+        const mine = (res.suivies || []).filter((x) => x.date === d), all = (res.jours || {})[d];
+        const label = DTF.day.format(new Date(d + 'T12:00:00'));
+        // Inconnu ≠ rien : un jour que la source ne couvre pas, ou des résultats sans clé, ne sont pas « rien de notable »
+        const unknown = [ecoUnknown(eco, d) ? 'calendrier économique' : null, res.erreur || res.manque ? 'résultats' : null].filter(Boolean);
+        const unk = unknown.length ? el('p', { class: 'small warn m-0 mt-8', text: unknown.length > 1 ? 'calendrier économique et résultats inconnus' : unknown[0] + (unknown[0] === 'résultats' ? ' inconnus' : ' inconnu') }) : null;
+        if (!ev.length && !mine.length && !all) return el('div', { class: 'wday empty-day' }, el('h3', { text: label }), unk || el('p', { class: 'small muted m-0', text: 'rien de notable' }));
+        return el('div', { class: 'wday' }, el('h3', { text: label }), unk,
+          ev.length ? el('ul', { class: 'wlist' }, ev.map((e) => el('li', { class: e.impact === 'High' ? 'hot' : '' }, el('span', { class: 'mono', text: hhmm(toDate(e.at)) }), el('span', null, el('b', { text: e.pays + ' ' }), e.titre, el('span', { class: 'small muted blk', text: ecoItem(e).detail }))))) : null,
+          mine.length ? el('div', { class: 'row-gap mt-8' }, mine.map((x) => chip(x.symbol + ' · ' + (HOUR[x.heure] || 'résultats'), 'info'))) : null,
+          all ? el('p', { class: 'small muted m-0 mt-8', text: all.total + ' publications sur toute la cote' }) : null);
+      });
+      return el('div', { class: 'week' }, out);
+    });
+    src.textContent = 'Calendrier économique : ' + (eco.erreur ? 'indisponible (' + eco.erreur + ')' : (eco.source || 'source inconnue') + (eco.stale && eco.source ? ' · ⚠ dernière valeur connue' + (eco.maj ? ' (' + stamp(eco.maj) + ')' : '') : '') + (eco.couvre_jusqu_au ? ' · publié jusqu\'au ' + DTF.dm.format(toDate(eco.couvre_jusqu_au + 'T12:00:00Z')) : '') + ' · ' + (eco.filtre || '')) + '. Résultats : ' + (res.manque ? 'clé Finnhub absente' : res.erreur ? 'indisponibles' : 'Finnhub') + '. Rien ici ne dépense de crédit Twelve Data.';
+  });
+  return card('c-12', 'Cette semaine', 'heure de Paris', box, src);
+}
+
+/* --- Journal */
+BUILD.journal = () => [closuresCard(), disagreeCard(), confirmCard(), forwardCard(), decisionsCard()];
+function closuresCard() {
+  const box = waitBox('journal'), meta = el('span');
+  const draw = (j) => {
+    if (j.space !== apiSpace()) return;
+    const rows = j.clotures || [], live = st.space === 'live';
+    const nets = rows.map((r) => (live ? r.r_net : (r.result || {}).r_net)).filter(isNum);
+    meta.textContent = rows.length ? rows.length + ' terminé' + (rows.length > 1 ? 's' : '') + ' · ' + rr(nets.reduce((a, b) => a + b, 0)) + ' nets cumulés · ' + nets.filter((x) => x > 0).length + ' gagnant' + (nets.filter((x) => x > 0).length > 1 ? 's' : '') : '';
+    fill(box, [st.space, rows], () => {
+      if (!rows.length) return empty('Aucun trade terminé dans l\'espace ' + spaceName(), [live ? 'Un trade terminé (objectif, stop, clôture ou sortie déclarée) s\'ajoute ici.' : 'Les recommandations closes ou pas déclenchées s\'ajoutent ici.']);
+      return el('div', { class: 'jtable' }, el('div', { class: 'jrow jhead', 'aria-hidden': 'true' }, ['Terminé', 'Symbole', 'R nets', 'Raison', 'Euros'].map((t) => el('span', { text: t }))),
+        rows.map((r) => {
+          if (live) {
+            return el('div', { class: 'jrow' }, el('span', { class: 'soft j-d', text: stamp(r.closed_at) }), el('b', { class: 'mono j-s', text: r.symbol }),
+              el('span', { class: 'mono j-r ' + (isNum(r.r_net) ? (r.r_net >= 0 ? 'up' : 'down') : 'muted'), text: rr(r.r_net), title: 'brut ' + rr(r.r) }),
+              el('span', { class: 'chips j-c' }, chip((r.raison || '?') + (r.corrige ? ' · corrigé' : ''), r.raison === 'stop' ? 'down' : String(r.raison || '').startsWith('tp') ? 'up' : ''), r.verdict ? verdictChip(r.verdict) : null, r.against_jarvis ? chip('contre l\'avis de JARVIS', 'against') : null),
+              el('span', { class: 'mono right j-e', text: eur(r.eur, true) }));
+          }
+          const res = r.result || {}, nd = r.status === 'pas_declenche';
+          return el('div', { class: 'jrow' }, el('span', { class: 'soft j-d', text: stamp(res.closed_at || r.sent_at) }), el('b', { class: 'mono j-s', text: r.symbol }),
+            el('span', { class: 'mono j-r ' + (isNum(res.r_net) ? (res.r_net >= 0 ? 'up' : 'down') : 'muted'), text: nd ? DASH : rr(res.r_net) }),
+            el('span', { class: 'chips j-c' }, chip(r.type_fr, r.type === 'kill' ? 'warn' : 'up'), chip(nd ? 'pas déclenchée' : res.raison || r.status_fr, nd ? 'ghost' : 'info'), r.mes_trades ? chip('aussi dans Mes trades', 'mode') : null),
+            el('span', { class: 'mono right j-e', text: nd ? DASH : eur(res.eur, true) }));
+        }));
+    });
+  };
+  onData('journal', draw);
+  return card('c-12', 'Trades terminés · ' + spaceName(), meta, box);
+}
+function groupLine(name, g, hint) {
+  if (!g) return null;
+  return el('div', { class: 'dg' }, el('span', { class: 'soft', text: name }), el('span', { class: 'num', text: int(g.closed) + ' / ' + int(g.total) }),
+    el('span', { class: 'num ' + (isNum(g.avg_r) ? (g.avg_r >= 0 ? 'up' : 'down') : 'muted'), text: isNum(g.avg_r) ? rr(g.avg_r) : DASH }),
+    el('span', { class: 'small muted', text: (g.ci ? 'IC [' + nf(2).format(g.ci[0]) + ' ; ' + nf(2).format(g.ci[1]) + ']' : 'IC inconnu') + (hint ? ' · ' + hint : '') }));
+}
+function disagreeCard() {
+  const box = waitBox('journal');
+  onData('journal', (j) => fill(box, j.desaccords, (d) => (!d ? empty('Désaccords illisibles', []) : [
+    el('div', { class: 'dgs' }, el('div', { class: 'dg dg-h', 'aria-hidden': 'true' }, ['', 'terminés / pris', 'moyenne nette par trade', ''].map((t) => el('span', { text: t }))),
+      groupLine('Avec JARVIS (GO)', d.avec), groupLine('Contre (NO GO pris)', d.contre), groupLine('À ta taille, grade à 0 %', d.regle)),
+    el('div', { class: 'small muted mt-8', text: 'Verdict seulement avec 30 trades sur 20 jours de chaque côté et un IC à 95 % qui exclut 0. Mes trades seulement (les KILL sont mesurés par leur journal).' })])));
+  return card('c-6', 'Désaccords avec JARVIS', 'qui avait raison', box, textDetails('desaccords', 'Verdict complet (comme `!desaccords`)'));
+}
+const CONF_ROW = { 'confirmé': 'up', 'annulé': 'down', 'expiré': '', attente: 'info', repli: 'warn' };
+function confirmCard() {
+  const box = waitBox('journal');
+  onData('journal', (j) => fill(box, j.confirmations, (c) => {
+    if (!c) return empty('Confirmations illisibles', []);
+    const today = c.jour && c.aujourd_hui ? Object.entries(c.aujourd_hui) : [];
+    const rows = (c.lignes || []).slice(0, 10);
+    const when = c.du_jour ? 'Aujourd\'hui :' : 'GO de la séance du ' + DTF.dm.format(toDate(c.jour + 'T12:00:00Z')) + ' (aucun aujourd\'hui pour l\'instant) :';
+    return [today.length ? el('div', { class: 'row-gap' }, el('span', { class: 'small soft', text: when }), today.map(([sym, g]) => chip(sym + ' · ' + (CONF[g.status] || [g.status])[0], CONF_ROW[g.status] || ''))) : el('p', { class: 'small soft m-0', text: 'Aucun GO à confirmer aujourd\'hui.' }),
+      rows.length ? el('div', { class: 'feed mt-8' }, rows.map((r) => el('div', null, el('b', { class: 'mono', text: r.symbol }), el('span', { class: 'mono ' + (isNum(r.confirme_r20) ? (r.confirme_r20 >= 0 ? 'up' : 'down') : 'muted'), text: isNum(r.confirme_r20) ? rr(r.confirme_r20) : isNum(r.confirme_r) ? rr(r.confirme_r) : DASH, title: 'R à 20 € (sinon R brut) de la politique confirmée' }), chip(r.status, CONF_ROW[r.status] || ''), el('span', { class: 'soft right', text: r.day })))) : null,
+      el('div', { class: 'small muted mt-8', text: int(c.total) + ' GO mesurés depuis le début' })];
+  }));
+  return card('c-6', 'Confirmations des GO', 'ordre stop d\'achat au déclencheur', box, textDetails('confirmations', 'Bilan complet (comme `!confirmations`)'));
+}
+function forwardCard() {
+  const box = waitBox('journal');
+  onData('journal', (j) => fill(box, j.forward_test, (f) => {
+    if (!f) return empty('Forward-test illisible', []);
+    const g = (name, x) => (x ? el('div', { class: 'dg' }, el('span', { class: 'soft', text: name }), el('span', { class: 'num', text: int(x.n) + ' trades' }), el('span', { class: 'num ' + (x.avg_r >= 0 ? 'up' : 'down'), text: rr(x.avg_r) + ' par trade' }), el('span', { class: 'small muted', text: 'réussite ' + pct(x.win_rate * 100, false, 0) + (isNum(x.ci_low) ? ' · IC [' + nf(2).format(x.ci_low) + ' ; ' + nf(2).format(x.ci_high) + ']' : '') })) : null);
+    return [el('p', { class: 'small soft m-0', text: int(f.total) + ' plans du scanner · ' + int(f.done) + ' terminés · ' + int(f.traded) + ' déclenchés' + (isNum(f.fill_rate) ? ' (' + pct(f.fill_rate * 100, false, 0) + ')' : '') }),
+      f.overall ? el('div', { class: 'dgs mt-8' }, g('Tous (GO et NO GO)', f.overall), g('GO seulement', f.go)) : el('p', { class: 'small muted', text: 'Aucun plan déclenché et terminé pour l\'instant.' }),
+      el('div', { class: 'small muted mt-8', text: 'Compte fictif Alpaca : GO et NO GO du scanner, 3 brackets, sans frais. Une mesure de critères, pas des recommandations.' })];
+  }));
+  return card('c-6', 'Forward-test', 'compte fictif Alpaca', box, textDetails('bilan', 'Bilan complet (comme `!bilan`)'));
+}
+function decisionsCard() {
+  const box = waitBox('journal');
+  onData('journal', (j) => fill(box, j.decisions, (ds) => (!ds || !ds.length ? empty('Aucune décision enregistrée', ['Les propositions approuvées, refusées ou remplacées s\'ajoutent ici.'])
+    : el('div', { class: 'props' }, ds.slice(0, 12).map((p) => el('div', { class: 'prop' }, el('div', null, el('div', { text: '#' + p.id + ' · ' + proposalText(p) }), el('div', { class: 'why', text: p.decided_at ? 'décidée ' + stamp(p.decided_at) : 'créée ' + stamp(p.created_at) })), propChip(p)))))));
+  return card('c-6', 'Décisions', 'propositions de réglages et du labo', box);
+}
+
+/* --- Santé */
+BUILD.sante = () => [sourcesCard(), jarvisCard(), loopsCard(), errorsCard()];
+function sourcesCard() {
+  const box = waitBox('health');
+  onData('health', (h) => fill(box, h.sources, (s) => {
+    const td = s.twelve_data || {}, lect = Object.entries(s.lectures || {});
+    const tile = (name, statut, lines, cls) => el('div', { class: 'src' + (cls ? ' ' + cls : '') }, el('div', { class: 'src-h' }, el('b', { text: name }), statut), lines.filter(Boolean).map((t) => el('div', { class: 'small soft', text: t })));
+    const tiles = [tile('Twelve Data · crédits', chip(td.depenses + ' / ' + td.par_jour, td.depenses >= td.par_jour ? 'down' : td.depenses >= td.par_jour * 0.8 ? 'warn' : 'up'), [s.twelve_data_configure ? 'clé présente' : 'clé absente', 'jour de New York ' + (td.jour_new_york || DASH), td.portee])];
+    tiles.push(tile('Alpaca', chip(s.alpaca_configure ? 'clés présentes' : 'clés absentes', s.alpaca_configure ? 'up' : 'warn'), ['données IEX gratuites et compte fictif']));
+    for (const [name, x] of lect) {
+      const bad = x.statut === 'erreur';
+      tiles.push(tile(name, chip(bad ? 'erreur' : 'ok', bad ? 'down' : 'up'), [
+        x.dernier_succes ? 'dernière lecture réussie ' + stamp(x.dernier_succes) : 'aucune lecture réussie',
+        (isNum(x.latence_ms) ? 'latence ' + int(x.latence_ms) + ' ms · ' : '') + int(x.ok) + ' lectures · ' + int(x.erreurs) + ' erreurs',
+        x.erreur ? (bad ? '⚠ ' : 'dernière erreur ') + x.erreur + (x.derniere_erreur ? ' (' + stamp(x.derniere_erreur) + ')' : '') : null], bad ? 'bad' : ''));
+    }
+    return [el('div', { class: 'srcs' }, tiles), lect.length ? null : el('div', { class: 'small muted mt-8', text: 'Aucune lecture depuis le démarrage du serveur : chaque source apparaît à sa première lecture.' })];
+  }));
+  return card('c-8', 'Sources', 'statut prouvé par la dernière lecture réussie de ce processus', box);
+}
+function jarvisCard() {
+  const box = el('dl', { class: 'kv', data: { wait: 'health' } }, st.health ? null : el('div', { class: 'skeleton short' }));
+  onData('health', (h) => {
+    const lab = h.labo, sv = h.planificateur.suivi, d = h.discord, disk = h.disque || {}, lag = (Date.now() - st.healthAt) / 1000;
+    put(box, kvRow('API', 'répond · ' + stamp(h.generated_at), 'txt up'),
+      kvRow('Suivi des trades', sv.at ? ago(sv.age_s + lag) + (sv.stale ? ' ⚠' : '') : 'jamais passé', sv.stale ? 'txt warn' : 'txt'),
+      kvRow('Labo (battement)', lab.age_s == null ? (lab.raison || 'aucun battement') : (lab.etape ? lab.etape + ' · ' : '') + ago(lab.age_s + lag) + (lab.stale ? ' ⚠' : ''), lab.stale ? 'txt warn' : 'txt'),
+      kvRow('Discord', (d.notifications ? 'notifications actives' : 'notifications coupées') + ' · ' + d.file_en_attente + ' en file' + (d.plus_ancien ? ' depuis ' + stamp(d.plus_ancien) : ''), d.file_en_attente ? 'txt warn' : 'txt'),
+      kvRow('Disque', disk.erreur ? disk.erreur : isNum(disk.libre_go) ? nf(1).format(disk.libre_go) + ' Go libres sur ' + nf(1).format(disk.total_go) + ' (' + pct(disk.utilise_pct, false, 0) + ' utilisés)' : DASH, isNum(disk.utilise_pct) && disk.utilise_pct > 90 ? 'txt warn' : 'txt'));
+  });
+  return card('c-4', 'JARVIS', null, box, el('div', { class: 'row-gap mt-12' }, el('a', { class: 'btn primary', href: '/api/cockpit/diagnostics', download: '' }, 'Télécharger le diagnostic')),
+    el('div', { class: 'small muted mt-8', text: 'JSON sans aucun secret ni valeur de variable d\'environnement (noms et présence des clés seulement).' }));
+}
+function loopsCard() {
+  const box = waitBox('health');
+  onData('health', (h) => fill(box, [h.planificateur.boucles, st.healthAt], ([b]) => {
+    const rows = Object.entries(b || {}), lag = (Date.now() - st.healthAt) / 1000;
+    if (!rows.length) return empty('Aucune boucle n\'a encore tourné', ['Le planificateur démarre avec le serveur ; chaque boucle s\'ajoute à son premier passage.']);
+    return el('div', { class: 'feed loops' }, rows.sort((x, y) => (x[0] < y[0] ? -1 : 1)).map(([name, r]) => el('div', null,
+      el('span', { class: 'grow', text: name }), chip(!r.ok ? 'échec' + (r.erreur ? ' · ' + r.erreur : '') : r.stale ? 'en retard' : 'ok', !r.ok ? 'down' : r.stale ? 'warn' : 'up'),
+      el('span', { class: 'soft fv', text: 'toutes les ' + (r.every_s < 60 ? r.every_s + ' s' : dur(r.every_s / 60)) }), el('span', { class: 'soft right', text: (isNum(r.age_s) ? ago(r.age_s + lag) : DASH) + (isNum(r.duree_s) ? ' · ' + nf(1).format(r.duree_s) + ' s' : '') }))));
+  }));
+  return card('c-6', 'Boucles du planificateur', 'en retard au-delà de 3 passages (3 min au moins)', box);
+}
+function errorsCard() {
+  const box = waitBox('health');
+  onData('health', (h) => fill(box, h.erreurs_recentes, (es) => (!es || !es.length ? empty('Aucune erreur depuis le démarrage', ['Avertissements et erreurs du serveur web s\'affichent ici, clés masquées.'])
+    : el('div', { class: 'errs' }, es.slice(0, 25).map((e) => el('div', { class: 'errl' }, el('div', { class: 'row-gap' }, chip(e.niveau, e.niveau === 'WARNING' ? 'warn' : 'down'), el('span', { class: 'mono small soft', text: e.module }), el('span', { class: 'small muted', text: stamp(e.at) })), el('div', { class: 'small', text: e.message })))))));
+  return card('c-6', 'Erreurs récentes', 'serveur web, 50 dernières', box);
 }
 
 /* ---------- graphiques (TradingView Lightweight Charts 5.0.8, servi par JARVIS) */
@@ -1257,7 +1734,7 @@ function planForm(pre = {}) {
     if (market.value) args.market = market.value;
     submit.disabled = true; submit.textContent = 'Calcul…';
     out.replaceChildren(el('div', { class: 'skeleton' }), el('p', { class: 'muted small', text: 'Historique, délais rejoués et checklist en cours…' }));
-    try { const r = await action('plan', args); st.lastPlan = { args, plan: r.plan }; out.replaceChildren(planView(r.plan, args)); }
+    try { const r = await action('plan', args); st.lastPlan = { args, plan: r.plan }; keepPlan(r.plan); out.replaceChildren(planView(r.plan, args)); }
     catch (err) { out.replaceChildren(el('p', { class: 'err', text: err.message })); }
     finally { submit.disabled = false; submit.textContent = 'Calculer le plan'; }
   });
