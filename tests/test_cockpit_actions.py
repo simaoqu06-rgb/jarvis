@@ -82,6 +82,22 @@ def test_la_page_ne_charge_rien_hors_du_serveur():
     assert ".innerHTML" not in js and "insertAdjacentHTML" not in js and "eval(" not in js
 
 
+def test_vue_a_faire_branchee_en_deuxieme_position():
+    from pathlib import Path
+
+    from app.web import attention, cockpit_actions
+
+    root = Path(__file__).resolve().parent.parent / "app" / "web" / "cockpit"
+    html, js = ((root / n).read_text(encoding="utf-8") for n in ("index.html", "app.js"))
+    views = re.findall(r"^  \['(\w+)', '", js.split("const VIEWS = [", 1)[1].split("];", 1)[0], re.M)
+    assert views[:3] == ["cockpit", "afaire", "marches"] and len(views) == 9  # touches 1 à 9
+    assert re.findall(r'data-view="(\w+)"', html) == views  # une section par vue, dans l'ordre du rail
+    assert "/^[1-9]$/" in js and "t: 'afaire'" in js
+    # les boutons d'action de la page À faire : ceux que le moteur peut proposer, tous connus du serveur
+    todo_act = re.findall(r"^  (\w+): ", js.split("const TODO_ACT = {", 1)[1].split("};", 1)[0], re.M)
+    assert set(todo_act) == set(attention.STEP_ACTIONS) <= set(cockpit_actions.ACTIONS)
+
+
 # --- Gardes ---------------------------------------------------------------------------------------------
 
 def test_csrf_absent_ou_faux(client):

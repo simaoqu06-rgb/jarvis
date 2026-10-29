@@ -774,6 +774,7 @@ def test_etat_du_cockpit_porte_les_compteurs(client, env):
     body = client.get("/api/cockpit/state").json()
     assert body["attention"]["commun"]["action"] >= 1
     assert body["attention_top"][0]["key"] in ("lab:down", "attention:stale")
+    assert body["attention_check"] == iso(NOW)
     health = client.get("/api/cockpit/health").json()
     assert health["bot"]["connecte"] is True and "jeton" not in json.dumps(health["bot"])
     assert health["page_a_faire"]["derniere_verification"] == iso(NOW)

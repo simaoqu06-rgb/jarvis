@@ -193,11 +193,14 @@ Fréquence : `state` toutes les 5 s (sans appel réseau) ; vues lourdes toutes l
 | Horloge Paris | horloge du navigateur | — | disponible |
 | Bascule d'espace | `?space=trades|paper` | — | PR 2 ✓ (appui maintenu vers Mes trades, touche M) |
 | Bannière API muette | échec de `GET /api/cockpit/state` (délai 8 s) | message d'erreur, âge des dernières données | PR 2 ✓ |
+| Pastille de l'entrée « À faire » (rail et onglet mobile) | `state.attention.total` | actions + problèmes ouverts non rangés, tous espaces ; rouge s'il y a une action, ambre sinon ; « 9+ » ; masquée à 0 ; pulsation unique quand le compte augmente ; infobulle et texte accessible « 3 à faire · 2 problèmes (dont 1 dans Mes trades) » | « À faire » 2 ✓ |
+| Titre de l'onglet du navigateur | `state.attention.total.action` | « (3) JARVIS · Trading Cockpit » s'il y a des actions | « À faire » 2 ✓ |
 
 ### 3.2 Cockpit (1)
 
 | Carte | Source | Champs | Statut |
 |---|---|---|---|
+| Bandeau À faire (en tête) | `state.attention`, `state.attention_top`, `state.attention_check` | chaud (action), tiède (problèmes seuls), calme (une ligne) ; les 3 premiers constats (type, portée, titre) ouvrent la vue sur le constat ; « Première vérification en cours » avant le premier passage du moteur | « À faire » 2 ✓ |
 | Résumé · Mes trades | `state.portfolio` (space=trades) ← `realized_r`, `realized_r_net`, `sizing.risk_amount_eur`, positions | `latent{r,eur}`, `jour{r,r_net,eur,fees_eur}`, `semaine{…}`, `positions_ouvertes`, `capital.eur` « déclaré » | à exposer (PR 1 ✓) |
 | Résumé · Papier | `state.portfolio` (space=paper) ← `reco.bilan` | `si_tout_suivi{equite_eur, eur_net, r_net, taux_reussite, par_etat}`, `recos_du_jour`, `go_en_attente_de_confirmation` | à exposer (PR 1 ✓) |
 | Portefeuille fictif · Papier | `state.portfolio.portefeuille` ← `reco.portfolio` | `depart_eur`, `risque_par_trade_eur`, `capital_eur`, `resultat_eur`, `rendement_pct`, `closes`, `gagnantes`, `sans_resultat`, `r_net`, `ouvertes`, `latent_eur`, `points[[clos_at, €]]` (courbe de la carte Papier) | exposé |
@@ -210,7 +213,18 @@ Fréquence : `state` toutes les 5 s (sans appel réseau) ; vues lourdes toutes l
 | À venir aujourd'hui | `state.agenda_today` ← horaires internes de JARVIS | `at`, `titre`, `categorie`, `source`, `passe` | à exposer (PR 1 ✓) ; calendrier économique, résultats et 8-K : vue Agenda (PR 3 ✓) |
 | Propositions en attente | `state.proposals_pending` ← `PR.proposals.pending()` | `id`, `kind`, `key`, `value`, `current`, `why` | disponible |
 
-### 3.3 Marchés (2)
+### 3.3 À faire (2)
+
+Touche `2` ou `G T` ; onglet mobile en 2e position (Journal passe dans « Plus »). Données : `GET /api/cockpit/attention?space=all`
+(§8.4) toutes les 10 s quand la vue est affichée, et à l'ouverture de la palette si la dernière lecture a plus de 30 s.
+
+| Carte | Source | Champs | Statut |
+|---|---|---|---|
+| De ton côté (8 colonnes) | `attention.items`, `counts`, `last_check_at`, `tronque` | filtre Tout · Commun · Mes trades · Papier avec compteurs (touche `F`, gardé en stockage local) ; groupes « À faire de ton côté », « Problèmes détectés », « Pour info » ; blocs repliables « Masqués, toujours ouverts » et « Réglés ces 3 derniers jours » ; encart vert si rien d'ouvert ; méta « vérifié il y a … » (ambre « dernière lecture il y a … · erreur » si la lecture échoue, la liste reste) | « À faire » 2 ✓ |
+| Carte d'un constat | un `item` (§8.1) | type, portée, titre (+ « toujours constaté »), détail, étapes (commande + Copier, bouton d'action par appui maintenu, bouton « Ouvrir … »), Preuve repliée (dates à l'heure de Paris, nombres fr-FR), pied « depuis … · encore constaté il y a … · rangé … » ou « réglé … · apparu … », bouton C'est fait / Masquer / Réafficher (aucun si `id` est `null`) | « À faire » 2 ✓ |
+| Comment lire cette page (4 colonnes) | texte fixe | trois types, trois portées, cycle d'un constat, « aucun bouton ne passe d'ordre », appui maintenu | « À faire » 2 ✓ |
+
+### 3.4 Marchés (3)
 
 | Carte | Source | Statut |
 |---|---|---|
@@ -221,7 +235,7 @@ Fréquence : `state` toutes les 5 s (sans appel réseau) ; vues lourdes toutes l
 | Avis JARVIS (touche A), Fiche société, Nouveau plan (`+`) | actions `opinion`, `company`, `plan` (mêmes fonctions que `!avis`, `!societe`, `POST /api/trading/plan`) : **seules dépenses Twelve Data venues de la page, au clic, et l'écran le dit** | PR 2 ✓ |
 | Conseil « stop à … » (ligne info) | `position.conseil` (dernier conseil gardé) | à exposer (PR 1 ✓) |
 
-### 3.4 Positions (3)
+### 3.5 Positions (4)
 
 | Carte | Source | Statut |
 |---|---|---|
@@ -231,7 +245,7 @@ Fréquence : `state` toutes les 5 s (sans appel réseau) ; vues lourdes toutes l
 | Conseils en prix, « J'ai vendu à… », « Rouvrir un trade arrêté » | actions `advice`, `exit`, `reopen` (Mes trades seulement) | PR 2 ✓ |
 | Clôturer, Supprimer (par trade) | actions `close`, `delete` (appui maintenu) | PR 2 ✓ |
 
-### 3.5 Risque (4)
+### 3.6 Risque (5)
 
 | Carte | Source | Statut |
 |---|---|---|
@@ -241,7 +255,7 @@ Fréquence : `state` toutes les 5 s (sans appel réseau) ; vues lourdes toutes l
 | Frais IBKR | `state.risk.ibkr` ← `killmode.IBKR_PLANS`, `JARVIS_IBKR_PLAN`, `ibkr.single_exit()` : barème du compte, par action, minimum, plafond, frais de place, plancher d'un aller-retour en $ et en R à 20 € ; frais du dernier plan (`plan.ibkr`) | PR 3 ✓ |
 | Grade détaillé, « Ta mise de 20 € chez IBKR » | `GET /api/cockpit/texte/grade` et `/texte/frais` (mêmes fonctions que `!grade`, `!frais`) | PR 3 ✓ |
 
-### 3.6 Labo (5)
+### 3.7 Labo (6)
 
 `GET /api/cockpit/lab` (cache 60 s) : `statut` (`lab_status.status` : rejeu, direct, méthode, déclaration en cours,
 battement), `declarations` (`council.load`), `regles` (`validator.counts`), `grade` (`payload` + historique),
@@ -259,7 +273,7 @@ battement), `declarations` (`council.load`), `regles` (`validator.counts`), `gra
 
 La page `/cockpit/labo` reste servie (lien « page Labo actuelle ») jusqu'à validation par Simão.
 
-### 3.7 Agenda (6)
+### 3.8 Agenda (7)
 
 | Carte | Source | Statut |
 |---|---|---|
@@ -272,14 +286,14 @@ Valeurs suivies (`agenda.valeurs_suivies`), les plus importantes d'abord : actio
 scan du jour (pas ceux d'une séance passée), `JARVIS_WATCHLIST_STOCKS` ; 20 au plus pour la SEC, le plafond coupe la
 watchlist en premier.
 
-### 3.8 Journal (7)
+### 3.9 Journal (8)
 
 `GET /api/cockpit/journal?space=` : `clotures` (Mes trades : raison, R, R net, € ; Papier : recommandations closes
 et pas déclenchées), `desaccords`, `confirmations` (60 dernières lignes, état du jour), `forward_test`, `decisions`.
 Chaque carte ouvre aussi le texte complet de la commande Discord : `/texte/desaccords` (`!desaccords`),
 `/texte/confirmations` (`!confirmations`), `/texte/bilan` (`!bilan`). PR 3 ✓.
 
-### 3.9 Santé (8)
+### 3.10 Santé (9)
 
 `GET /api/cockpit/health` : `sources.lectures` (statut prouvé par la dernière lecture réussie, latence),
 `sources.twelve_data` (crédits du jour), `planificateur` (chaque boucle, âge, péremption), `labo` (battement),
@@ -287,7 +301,7 @@ Chaque carte ouvre aussi le texte complet de la commande Discord : `/texte/desac
 le diagnostic » : `GET /api/cockpit/diagnostics`. PR 3 ✓ (grille des sources, crédits Twelve Data du jour, Alpaca,
 JARVIS et labo, boucles, erreurs récentes).
 
-### 3.10 Inspecteur
+### 3.11 Inspecteur
 
 Prix, variation, état de séance : `instruments` ; mini-graphique avec SL / TP : `instrument/{symbol}` ; dernier plan :
 `instrument.plan_du_jour` ; avis : action `opinion` à la demande (PR 2 ✓).
@@ -337,10 +351,13 @@ dates en **ISO-8601 UTC**. Valeur inconnue = `null` (jamais 0). En-têtes de sé
                  "note_composite": "priorité, pas une probabilité"},
  "killmode": {"actif": false, "depuis": "…"},
  "attention": {"total": {"action": 1, "probleme": 0, "info": 2}, "commun": {"…": 0}, "trades": {"…": 0}, "paper": {"…": 0}},
- "attention_top": [{"id": 12, "key": "deploy:pending", "kind": "action", "space": "commun", "title": "…", "last_seen": "…"}]}
+ "attention_top": [{"id": 12, "key": "deploy:pending", "kind": "action", "space": "commun", "title": "…", "last_seen": "…"}],
+ "attention_check": "…"}
 ```
 `attention` compte les constats ouverts et non rangés de la page À faire (§8), tous espaces ; `attention_top` en donne
-les trois premiers dans l'ordre de la page.
+les trois premiers dans l'ordre de la page ; `attention_check` est l'heure du dernier passage du moteur (`null` avant le
+premier, une minute environ après le démarrage : le bandeau dit alors « première vérification en cours », jamais « rien à
+faire »).
 
 ### 4.2 `GET /api/cockpit/instruments?space=`
 `{"instruments": [{"symbol", "market": "stock|crypto", "price" (USD), "change_pct" (% sur la clôture de la veille),
@@ -375,7 +392,7 @@ casser les autres.
 {"lignes", "total", "aujourd_hui", "jour"}, "forward_test", "decisions"}`.
 
 ### 4.8 `GET /api/cockpit/health` et `GET /api/cockpit/diagnostics`
-Santé : voir §3.9. Diagnostic : pièce jointe JSON (`Content-Disposition: attachment`) : boucles, labo, sources,
+Santé : voir §3.10. Diagnostic : pièce jointe JSON (`Content-Disposition: attachment`) : boucles, labo, sources,
 compteurs, `cles_presentes` (booléens), `variables_jarvis_definies` (**noms seulement**), erreurs récentes. Aucun
 secret, aucune valeur de variable (testé). Depuis la rubrique À faire (§8), les deux portent aussi `bot` (connecté,
 depuis quand, dernière erreur expurgée), `version_deployee` (commit du disque, empreintes du code, comparaison avec
@@ -553,7 +570,8 @@ CSP, zéro requête en échec, aucun débordement horizontal.
 Source : `/mnt/project-files/cockpit/a-faire/prompt-a-faire-corrige-2026-10-29.md` (revue du prompt de Meme Radar,
 verdict Améliorer). Ce que Simão doit faire de son côté, les problèmes que JARVIS voit dans son propre fonctionnement,
 et ce qui est bon à savoir. **PR « À faire » 1 ✓** : moteur, stockage, routes et instrumentations
-(`app/web/attention.py`) ; **PR « À faire » 2** : la vue, le badge du rail et la bannière du Cockpit.
+(`app/web/attention.py`) ; **PR « À faire » 2 ✓** : la vue, la pastille du rail et le bandeau du Cockpit (§3.1 à
+§3.3, écarts en §8.6).
 
 ### 8.1 Modèle
 
@@ -632,7 +650,7 @@ nommée), puis `docker compose up -d --force-recreate` (un `restart` ne relit pa
 - `POST /api/cockpit/attention/{id}/ack` et `/unack` : jeton CSRF (cookie + `X-CSRF-Token`, sinon 403), même garde
   « autre site » que les actions ; constat inconnu, réglé ou déjà dans cet état → 404. Chaque appel est noté dans le
   journal des actions du cockpit (`attention_ack`, `attention_unack`).
-- `state` : `attention`, `attention_top` (§4.1).
+- `state` : `attention`, `attention_top`, `attention_check` (§4.1).
 
 ### 8.5 Instrumentations ajoutées
 
@@ -667,6 +685,11 @@ nommée), puis `docker compose up -d --force-recreate` (un `restart` ne relit pa
 | `earnings:<symbole>`, `sec8k:<symbole>` | `advice:<id>` | le conseil avant la clôture (`advice.py`) dit déjà SORTIR avant des résultats, en prix ; le cache de l'agenda n'est rempli que si la vue Agenda a été ouverte, et le moteur ne doit déclencher aucun appel |
 | `reco:stalled` | `loop:stuck` / `loop:failing` du journal des recommandations (portée Papier) | même cause, même étape |
 | cotation périmée en Papier | non | les recommandations se lisent en bougies de 5 min : une alerte à 2 min serait du bruit |
+| titre de l'onglet `(2) Cockpit` | `(2) JARVIS · Trading Cockpit` | le titre de la page ne change pas d'une vue à l'autre ; seul le préfixe s'ajoute |
+| bouton d'action, puis le constat reste jusqu'au passage suivant | après une action réussie (approuver, refuser, veto), le constat est rangé tout de suite | la décision est prise ; le constat se ferme au passage suivant du moteur, inutile de cliquer « C'est fait » en plus |
+| appui maintenu pour approuver et le veto | aussi pour refuser | ailleurs dans le cockpit, refuser n'exige pas l'appui maintenu (§4.10) ; depuis À faire, les trois décisions demandent le même geste |
+| « Ouvrir … » ouvre la vue | un constat de Mes trades ouvert depuis Papier passe d'abord par l'appui maintenu vers Mes trades ; un constat du Papier bascule directement | la vue d'un trade réel n'a pas de sens dans l'espace Papier, et l'entrée dans Mes trades garde son verrou |
+| bandeau « calme » à zéro constat | « Première vérification en cours » tant que le moteur n'est pas passé (`state.attention_check` nul) | zéro avant le premier passage ne veut pas dire « rien à faire » |
 
 Manques assumés : le worker du labo a ses propres appels et crédits Twelve Data, invisibles ici ; le prix
 d'exécution réel chez IBKR n'est connu que par `!sortie`.
