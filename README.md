@@ -82,7 +82,8 @@ boucles, erreurs, diagnostic à télécharger). Raccourcis : `1` à `8` ou `G` p
 aide `?`.
 
 - Deux espaces : **Papier** (à l'ouverture) = chaque recommandation actionnable envoyée sur Discord (GO confirmés et
-  KILL), suivie telle qu'envoyée ; **Mes trades** = tes vrais trades déclarés à JARVIS. On entre dans Mes trades par
+  KILL), suivie telle qu'envoyée, avec un portefeuille fictif de 1 000 € à 20 € de risque fixe par trade, frais IBKR
+  déduits ; **Mes trades** = tes vrais trades déclarés à JARVIS. On entre dans Mes trades par
   un appui maintenu de 1,1 s ; le serveur refuse toute écriture dans Mes trades sans ce verrou.
 - La page **n'envoie aucun ordre** (ni IBKR ni Alpaca) et ne touche aucune clé. La navigation ne dépense **aucun
   crédit Twelve Data** (bougies du suivi, Kraken, Alpaca) ; seuls un plan, une prise, une reprise, un avis, une fiche

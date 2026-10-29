@@ -332,11 +332,12 @@ def _commission(n: float, price: float) -> float:
     return K.order_commission(n, price, K.IBKR_PLANS.get(K.IBKR_PLAN, K.IBKR_PLANS["fixe"]))
 
 
-def result(reco: dict) -> dict | None:
+def result(reco: dict, qty: int | None = None) -> dict | None:
     """Résultat d'une recommandation close : R brut (service.realized_r), puis, à la quantité du message, dollars bruts,
     commissions IBKR (une entrée et une sortie par bracket ; le reste vendu à la clôture en un seul ordre), net en
     dollars, en euros (change du message) et en R du risque prévu à cette taille. Sans taille : R brut et R net
-    des frais à la règle (service.realized_r_net), euros inconnus."""
+    des frais à la règle (service.realized_r_net), euros inconnus. `qty` remplace la taille du message
+    (portefeuille fictif)."""
     from app.trading import fees as FEES  # import tardif : fees lit killmode, qui importe service
     from app.trading import killmode as K
 
@@ -347,7 +348,7 @@ def result(reco: dict) -> dict | None:
     if r is None:
         return None
     m = reco["message"]
-    qty, rate = m.get("qty"), m.get("eurusd") or K.EURUSD_DEFAULT
+    qty, rate = qty or m.get("qty"), m.get("eurusd") or K.EURUSD_DEFAULT
     exit_ev = next((e for e in reversed(trade["events"]) if e["kind"] in ("stop", "close")), None)
     if exit_ev:  # stop (après un objectif ou non) ou vente à la clôture d'un KILL
         reason = exit_ev.get("reason") or exit_ev["kind"]
@@ -388,7 +389,7 @@ def linked_trade(reco: dict, trades: list[dict]) -> dict | None:
     return None
 
 
-def unrealized(reco: dict) -> dict | None:
+def unrealized(reco: dict, qty: int | None = None) -> dict | None:
     """Latent brut d'une recommandation déclenchée, au dernier prix lu par le suivi : R et, à la taille du message,
     dollars et euros (sans frais)."""
     trade = reco.get("trade")
@@ -397,11 +398,52 @@ def unrealized(reco: dict) -> dict | None:
     sign = 1 if trade["side"] == "long" else -1
     risk = abs(trade["entry"] - trade["stop"])
     move = sign * (trade["last_price"] - trade["entry"])
-    qty = reco["message"].get("qty")
+    qty = qty or reco["message"].get("qty")
     rate = reco["message"].get("eurusd")
     usd = round(qty * move, 2) if qty else None
     return {"r": round(move / risk, 2) if risk else None, "usd": usd,
             "eur": round(usd / rate, 2) if usd is not None and rate else None}
+
+
+PORTFOLIO_START_EUR = 1000.0  # choix de Simão du 29/10 : 1 000 € au départ, 20 € de risque fixe par trade
+
+
+def fixed_qty(reco: dict) -> int | None:
+    """Actions pour 20 € de risque (JARVIS_RISK_EUR) au stop du message, au change du message : la règle de Simão,
+    quel que soit le grade (au moins une action, comme Killmode)."""
+    from app.trading import killmode as K  # import tardif : killmode importe service
+
+    m = reco["message"]
+    risk = abs(m["entry"] - m["stop"]) if m.get("entry") is not None and m.get("stop") is not None else 0
+    return K.shares(risk, m.get("eurusd")) if risk > 0 else None
+
+
+def portfolio(book: RecoBook, start: float = PORTFOLIO_START_EUR) -> dict:
+    """Portefeuille fictif : chaque recommandation déclenchée (GO confirmés et KILL) prise à 20 € de risque fixe,
+    entrée, stop et sortie du message, frais IBKR déduits. Capital = départ + résultats nets des closes ; latent brut
+    des ouvertes au dernier prix du suivi."""
+    from app.trading import killmode as K  # import tardif : killmode importe service
+
+    capital, points, nets, wins, unknown = start, [], [], 0, 0
+    closed = sorted((r for r in book.recos if r["status"] == "clos"),
+                    key=lambda r: (r.get("result") or {}).get("closed_at") or r["sent_at"])
+    for r in closed:
+        res = result(r, fixed_qty(r))
+        if not res or res.get("eur") is None:
+            unknown += 1
+            continue
+        capital += res["eur"]
+        nets.append(res["r_net"])
+        wins += res["eur"] > 0
+        points.append([res["closed_at"], round(capital - start, 2)])
+    latent = [u for u in (unrealized(r, fixed_qty(r)) for r in book.recos if r["status"] == "ouvert") if u]
+    latent_eur = [u["eur"] for u in latent if u["eur"] is not None]
+    return {"depart_eur": start, "risque_par_trade_eur": K.RISK_EUR, "capital_eur": round(capital, 2),
+            "resultat_eur": round(capital - start, 2), "rendement_pct": round((capital - start) / start * 100, 2),
+            "closes": len(points), "gagnantes": wins, "sans_resultat": unknown,
+            "r_net": round(sum(x for x in nets if x is not None), 3),
+            "ouvertes": len(latent), "latent_eur": round(sum(latent_eur), 2) if latent_eur else None,
+            "points": points}
 
 
 def bilan(book: RecoBook, capital_eur: float | None = None) -> dict:
