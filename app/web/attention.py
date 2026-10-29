@@ -459,6 +459,8 @@ SOURCE_ROLES = {
                 "la note catalyseur des plans et l'agenda des résultats sont incomplets"),
     "SEC EDGAR": ("dépôts 8-K (agenda, fiche société)", "les 8-K de l'agenda ne sont plus vérifiés"),
     "Frankfurter (BCE)": ("change EUR/USD des tailles en euros", "les tailles en euros prennent le dernier change connu"),
+    "Helious": ("actus de marché (Finnhub en secours) et calendrier économique de l'agenda (sans secours)",
+                "les actus passent par Finnhub et le calendrier économique garde sa dernière version connue"),
 }
 KEYED = {"Twelve Data": "TWELVEDATA_API_KEY", "Finnhub": "FINNHUB_API_KEY",
          "Alpaca (données)": "ALPACA_API_KEY et ALPACA_SECRET_KEY",
@@ -488,13 +490,16 @@ def r_sources(ctx: dict, now: datetime) -> list[dict] | None:
     if _uptime(ctx) < GRACE_S:
         return None
     snap = sources_health.snapshot()
-    down, auth = {}, {}
+    down, auth, limited = {}, {}, {}
     for name, s in snap.items():
         if s.get("statut") != "erreur":
             continue
         if name in KEYED and s.get("code") == 401 and s.get("echecs_suite", 0) >= AUTH_MIN_FAILS:
             auth.setdefault(KEYED[name], []).append((name, s))
-        elif not (name == "Twelve Data" and s.get("code") == 429) and _down(s, now):
+        elif s.get("code") == 429:  # limite de débit, pas une panne (Twelve Data : constat quota:twelvedata)
+            if name != "Twelve Data" and _down(s, now):
+                limited[name] = s
+        elif _down(s, now):
             down[name] = s
     out = []
     for key_name, hits in auth.items():
@@ -513,6 +518,14 @@ def r_sources(ctx: dict, now: datetime) -> list[dict] | None:
                         + [cmd("Vérifie que les conteneurs tournent :", "docker compose ps")] + diag_steps(),
                         {"sources": names, "premier échec": min(down[n].get("premier_echec") or "" for n in names)}))
         return out
+    for name, s in sorted(limited.items()):
+        role, impact = SOURCE_ROLES.get(name, ("source de données de JARVIS", "les vues qui l'utilisent peuvent être "
+                                                                                "en retard"))
+        out.append(item(f"limit:{slug(name)}", "info", "commun", f"{name} limite ses appels (trop de demandes)",
+                        f"Rôle : {role}. {name} refuse les appels avec un HTTP 429 depuis "
+                        f"{_paris(_parse(s.get('premier_echec')), now)} : c'est sa limite de débit, pas une panne, et "
+                        f"JARVIS réessaie à chaque passage. En attendant, {impact}.",
+                        [say("Rien à faire : le constat se ferme au premier appel accepté.")], _source_evidence(name, s)))
     for name, s in sorted(down.items()):
         role, impact = SOURCE_ROLES.get(name, ("source de données de JARVIS", "les vues qui l'utilisent sont "
                                                                                 "incomplètes"))

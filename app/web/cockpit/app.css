@@ -459,6 +459,7 @@ a{color:var(--mode)}
 .todo-banner.warm{--tb:var(--warn);background:linear-gradient(90deg,var(--warn-soft),transparent 65%),var(--ink-1);border-color:rgba(245,184,65,.28)}
 .todo-banner.calm{--tb:var(--up);padding-block:10px}
 .todo-banner.wait{--tb:var(--fg-3)}
+.todo-banner.hot,.todo-banner.warm{border-left-color:var(--tb)}
 .tb-body{flex:1;min-width:0;display:grid;gap:6px}
 /* une seule colonne qui peut rétrécir : sinon une ligne sans retour (titre coupé) élargit la grille */
 .tb-body,.tb-list,.todo-box,.todo-g,.todo-list,.todo{grid-template-columns:minmax(0,1fr)}
@@ -483,7 +484,6 @@ a{color:var(--mode)}
 .todo-list{display:grid;gap:10px}
 .todo{display:grid;gap:10px;min-width:0;padding:14px 16px;border-radius:12px;background:var(--ink-2);border:1px solid var(--line);border-left:3px solid var(--k);transition:border-color var(--t),background var(--t),box-shadow var(--t)}
 .todo.k-action{background:linear-gradient(90deg,var(--k-soft),transparent 60%),var(--ink-2)}
-.todo:focus{outline:none}
 .todo:focus-visible,.todo.cursor{border-color:var(--mode-line);border-left-color:var(--k);box-shadow:0 0 0 1px var(--mode-line)}
 .todo.acked{background:var(--ink-1)}
 .todo.done{--k:var(--up);--k-soft:var(--up-soft);background:linear-gradient(90deg,var(--up-soft),transparent 60%),var(--ink-1)}
@@ -500,6 +500,7 @@ a{color:var(--mode)}
 .todo-steps li::before{counter-increment:ts;content:counter(ts);display:grid;place-items:center;width:22px;height:22px;border-radius:6px;background:var(--ink-3);font:600 11.5px var(--f-mono);color:var(--fg-3)}
 .st-b{display:grid;gap:6px;justify-items:start;min-width:0;padding-top:1px}
 .st-t{overflow-wrap:anywhere}
+.st-b > .btn{white-space:normal;height:auto;min-height:30px;max-width:100%;padding-block:5px;text-align:left}
 .cmd{display:flex;align-items:center;gap:8px;width:100%;min-width:0;padding:5px 5px 5px 12px;border-radius:9px;background:var(--ink-0);border:1px solid var(--line-2)}
 .cmd code{flex:1;min-width:0;font:500 13px/1.45 var(--f-mono);color:var(--fg);white-space:pre-wrap;overflow-wrap:anywhere}
 .todo-ev summary{cursor:pointer;width:max-content;font-size:12.5px;color:var(--fg-3)}

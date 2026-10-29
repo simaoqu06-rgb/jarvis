@@ -745,7 +745,8 @@ function updateBadge() {
     if (grew && !reduced()) { b.classList.remove('pulse'); void b.offsetWidth; b.classList.add('pulse'); setTimeout(() => b.classList.remove('pulse'), 650); }
   }
   for (const s of $$('[data-badge-sr]')) s.textContent = total ? ', ' + todoSummary(n) : '';
-  const rail = $('#nav [data-go="afaire"]'); if (rail) rail.title = 'À faire (2) · ' + todoSummary(n);
+  const rail = $('#nav [data-go="afaire"]');
+  if (rail) { rail.title = 'À faire (2) · ' + todoSummary(n); rail.setAttribute('aria-label', 'À faire' + (total ? ', ' + todoSummary(n) : '')); }
   st.badgeN = total;
   document.title = (n.a ? '(' + n.a + ') ' : '') + 'JARVIS · Trading Cockpit';
 }
@@ -761,7 +762,7 @@ function todoBanner() {
     box.className = 'card c-12 todo-banner ' + (n.a ? 'hot' : n.p ? 'warm' : 'calm') + (!n.a && !n.p && !n.i && !s.attention_check ? ' wait' : '');
     fill(body, [n, top.map((t) => [t.id, t.kind, t.space, t.title]), !!s.attention_check], () => {
       // avant le premier passage du moteur, zéro ne veut pas dire « rien à faire »
-      if (!n.a && !n.p && !n.i && !s.attention_check) return el('p', { class: 'tb-line' }, el('b', { text: 'Première vérification en cours' }), ' · JARVIS relit son état une minute après le démarrage');
+      if (!n.a && !n.p && !n.i && !s.attention_check) return el('p', { class: 'tb-line' }, el('b', { text: 'Première vérification en cours' }), ' · JARVIS relit son état dans les secondes qui suivent le démarrage');
       if (!n.a && !n.p) return el('p', { class: 'tb-line' }, el('b', { text: 'Rien à faire de ton côté' }), ' · ' + (n.i ? nOf(n.i, 'info à lire', 'infos à lire') : 'aucun problème détecté'));
       const head = [n.a ? nOf(n.a, 'chose à faire de ton côté', 'choses à faire de ton côté') : null, n.p ? nOf(n.p, 'problème détecté', 'problèmes détectés') : null].filter(Boolean).join(' · ');
       return [el('b', { class: 'tb-title', text: head + (n.trades ? ' (dont ' + n.trades + ' dans Mes trades)' : '') }),
@@ -775,12 +776,12 @@ function todoBanner() {
 /* La vue */
 let todoUi = null;
 BUILD.afaire = () => [todoMainCard(), todoLegendCard()];
+AFTER.afaire = () => drawTodo(true); // une fois la vue dans la page : avant, la boîte n'est pas encore insérée
 function todoMainCard() {
   const meta = el('span'), box = el('div', { class: 'todo-box' });
   const seg = el('div', { class: 'seg-tabs af-seg', role: 'group', 'aria-label': 'Portée affichée (touche F)' });
   const segBtns = TODO_FILTERS.map(([k, t]) => { const nb = el('span', { class: 'seg-n' }); const b = el('button', { type: 'button', onclick: () => setTodoFilter(k) }, t, nb); seg.append(b); return [k, b, nb]; });
   todoUi = { meta, box, segBtns, fp: null };
-  drawTodo(true);
   everySecond(tickTodo);
   return card('af-main', 'De ton côté', meta, seg, box);
 }
@@ -804,6 +805,7 @@ function todoLegendCard() {
     el('p', { class: 'small muted kh mt-12' }, kbd('J'), ' ', kbd('K'), ' constat suivant · ', kbd('Entrée'), ' premier bouton · ', kbd('X'), ' ranger · ', kbd('F'), ' portée'));
 }
 async function loadTodo() {
+  const want = st.todoFocus;
   try {
     const d = await api('/api/cockpit/attention?space=all', { timeout: 15000 });
     const at = Date.parse(d.generated_at);
@@ -812,6 +814,7 @@ async function loadTodo() {
     st.todo = d; st.todoAt = Date.now(); st.todoErr = '';
   } catch (e) { st.todoErr = e.message; }
   drawTodo();
+  if (want && st.todoFocus === want) st.todoFocus = null; // constat visé réglé ou rangé entre-temps : on n'y saute plus plus tard
 }
 /* Un constat qui vient de se régler reste 8 s à sa place, en vert, avant de passer dans « Réglés ». */
 function trackDone(items) {
@@ -831,7 +834,7 @@ function setTodoFilter(k) {
 }
 function todoVisible() { return todoUi ? $$('.todo[data-nav-item]', todoUi.box).filter(shown) : []; }
 function drawTodo(force) {
-  const ui = todoUi; if (!ui || !ui.box.isConnected) return;
+  const ui = todoUi; if (!ui || !ui.box.isConnected || st.view !== 'afaire') return;
   const d = st.todo, c = d && d.counts;
   for (const [k, b, nb] of ui.segBtns) {
     b.setAttribute('aria-pressed', String(k === st.todoFilter));
@@ -843,12 +846,13 @@ function drawTodo(force) {
     ui.fp = null; tickTodo(); return;
   }
   const items = (d.items || []).filter((f) => st.todoFilter === 'all' || f.space === st.todoFilter);
-  const fp = st.todoFilter + '|' + [...st.todoGrace].join(',') + '|' + items.map((f) => [todoId(f), f.last_seen, f.ack_at, f.resolved_at].join('~')).join('|');
+  const fp = [st.todoFilter, [...st.todoGrace].join(','), d.last_check_at, JSON.stringify(d.counts)].join('|') + '|' + items.map((f) => [todoId(f), f.last_seen, f.ack_at, f.resolved_at].join('~')).join('|');
   if (force || fp !== ui.fp) {
     ui.fp = fp;
     // focus, curseur et blocs dépliés survivent à la reconstruction
     const act = document.activeElement, art = act && ui.box.contains(act) ? act.closest('.todo') : null;
     const keep = art ? { id: art.dataset.todoId, role: act === art ? null : act.dataset.role || null, idx: todoVisible().indexOf(art) } : null;
+    const foldRole = !art && act && ui.box.contains(act) ? act.dataset.role || null : null; // résumé d'un bloc repliable
     const cur = $('.todo.cursor', ui.box), curId = cur ? cur.dataset.todoId : null;
     const seen = st.todoSeen;
     put(ui.box, todoGroups(items, d, seen));
@@ -861,6 +865,7 @@ function drawTodo(force) {
       const target = (a && keep.role && $('[data-role="' + keep.role + '"]', a)) || a || list[Math.min(Math.max(0, keep.idx), list.length - 1)];
       if (target) target.focus({ preventScroll: true });
     }
+    if (foldRole) { const n = $('[data-role="' + foldRole + '"]', ui.box); if (n) n.focus({ preventScroll: true }); }
   }
   if (st.todoFocus) {
     const a = todoVisible().find((x) => x.dataset.todoId === st.todoFocus);
@@ -873,7 +878,7 @@ function todoGroups(items, d, seen) {
   const open = items.filter((f) => isOpen(f) || grace(f));
   const hidden = items.filter((f) => !f.resolved_at && f.ack_at), done = items.filter((f) => f.resolved_at && !grace(f));
   const out = [];
-  if (!d.last_check_at && !items.length) out.push(empty('Première vérification en cours', ['JARVIS relit son état une minute après le démarrage ; la liste apparaît au passage suivant de la page (10 s).']));
+  if (!d.last_check_at && !items.length) out.push(empty('Première vérification en cours', ['JARVIS relit son état dans les secondes qui suivent le démarrage ; la liste apparaît à la lecture suivante de la page (10 s).']));
   else if (!open.some((f) => f.kind !== 'info' && !f.resolved_at)) out.push(todoOk(d));
   for (const k of ['action', 'probleme', 'info']) {
     const rows = open.filter((f) => f.kind === k); if (!rows.length) continue;
@@ -893,7 +898,7 @@ function todoOk(d) {
     elsewhere ? el('div', { class: 'small' }, nOf(elsewhere, 'constat ouvert', 'constats ouverts') + ' dans les autres portées : filtre « Tout » (touche F).') : null);
 }
 function todoFold(key, label, rows, seen) {
-  const d = el('details', { class: 'todo-fold' }, el('summary', { text: label + ' (' + rows.length + ')' }), todoList(rows, seen));
+  const d = el('details', { class: 'todo-fold' }, el('summary', { data: { role: 'fold-' + key }, text: label + ' (' + rows.length + ')' }), todoList(rows, seen));
   d.open = !!st.todoFold[key];
   d.addEventListener('toggle', () => { st.todoFold[key] = d.open; });
   return d;

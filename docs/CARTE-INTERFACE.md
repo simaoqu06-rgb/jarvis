@@ -355,9 +355,10 @@ dates en **ISO-8601 UTC**. Valeur inconnue = `null` (jamais 0). En-têtes de sé
  "attention_check": "…"}
 ```
 `attention` compte les constats ouverts et non rangés de la page À faire (§8), tous espaces ; `attention_top` en donne
-les trois premiers dans l'ordre de la page ; `attention_check` est l'heure du dernier passage du moteur (`null` avant le
-premier, une minute environ après le démarrage : le bandeau dit alors « première vérification en cours », jamais « rien à
-faire »).
+les trois premiers dans l'ordre de la page ; `attention_check` est l'heure du dernier passage du moteur, relue
+dans `data/attention.json` au démarrage. Elle n'est `null` que si aucun passage n'a jamais été enregistré (premier
+déploiement, fichier absent ou illisible) : le premier passage a lieu dans les secondes qui suivent le démarrage, et d'ici
+là le bandeau dit « Première vérification en cours », jamais « Rien à faire ».
 
 ### 4.2 `GET /api/cockpit/instruments?space=`
 `{"instruments": [{"symbol", "market": "stock|crypto", "price" (USD), "change_pct" (% sur la clôture de la veille),
@@ -613,6 +614,7 @@ démarrage). Un JARVIS entièrement arrêté ne sert plus la page : c'est la ban
 | `errors:<module>` | problème | commun | ≥ 3 ERROR/CRITICAL du même module en 30 min (`recent_errors`, hors planificateur et page À faire) | fenêtre passée |
 | `disk` | problème ≥ `JARVIS_DISK_ALERT_PCT`, action ≥ 90 % | commun | `shutil.disk_usage` de `data/` | place libérée |
 | `source:<nom>` | problème | commun | ≥ 3 échecs d'affilée, premier échec il y a plus de 5 min, dernière tentative de moins d'1 h | un succès |
+| `limit:<nom>` | info | commun | même seuil, mais l'erreur est un HTTP 429 (limite de débit) : pas une panne, ni comptée dans `internet` ; Twelve Data a son constat `quota:twelvedata` | un appel accepté |
 | `internet` | problème | commun | ≥ 3 sources en panne ensemble (remplace leurs constats) | idem |
 | `auth:<clé>` | action | commun | HTTP 401 (≥ 2 d'affilée) d'une source à clé : Twelve Data (y compris dans une réponse 200), Finnhub, Alpaca | un succès |
 | `quota:twelvedata` | info ≥ 80 %, problème à 100 % ou après 3 refus 429 | commun | `twelvedata.credits_today()` (processus web seulement) | minuit à New York |
@@ -684,9 +686,10 @@ nommée), puis `docker compose up -d --force-recreate` (un `restart` ne relit pa
 | `exit:undeclared` : `close` sans raison déclarée | `stop` et `tp…` | un `close` ne vient que d'une clôture faite par Simão (route ou `!sortie`) : déjà déclarée |
 | `earnings:<symbole>`, `sec8k:<symbole>` | `advice:<id>` | le conseil avant la clôture (`advice.py`) dit déjà SORTIR avant des résultats, en prix ; le cache de l'agenda n'est rempli que si la vue Agenda a été ouverte, et le moteur ne doit déclencher aucun appel |
 | `reco:stalled` | `loop:stuck` / `loop:failing` du journal des recommandations (portée Papier) | même cause, même étape |
+| `source:<nom>` pour tout échec | un HTTP 429 donne `limit:<nom>` (info) | une limite de débit n'est pas une panne : vu le 29/10 sur Helious (quota sans clé partagé entre ses utilisateurs, refusé à chaque passage des actus) pendant que Finnhub servait les actus |
 | cotation périmée en Papier | non | les recommandations se lisent en bougies de 5 min : une alerte à 2 min serait du bruit |
 | titre de l'onglet `(2) Cockpit` | `(2) JARVIS · Trading Cockpit` | le titre de la page ne change pas d'une vue à l'autre ; seul le préfixe s'ajoute |
-| bouton d'action, puis le constat reste jusqu'au passage suivant | après une action réussie (approuver, refuser, veto), le constat est rangé tout de suite | la décision est prise ; le constat se ferme au passage suivant du moteur, inutile de cliquer « C'est fait » en plus |
+| bouton d'action, puis le constat reste jusqu'au passage suivant | après une action réussie (approuver, refuser, veto), le constat est rangé tout de suite | la décision est prise, inutile de cliquer « C'est fait » en plus. Une proposition décidée sort de la liste d'attente : son constat se ferme au passage suivant du moteur. Après un veto, la décision du council reste un fait des 72 dernières heures : son constat reste dans « Masqués » avec « toujours constaté », sans bouton une fois le veto appliqué par le labo, et « Ton veto a été appliqué » arrive dans Pour info. Le rangement immédiat range aussi le bouton « Mettre mon veto » dans ce bloc replié en attendant le labo : chaque veto est une demande à part (`enqueue_veto`), et un second appui annulerait la décision suivante (challenger retiré ou règles refusées) |
 | appui maintenu pour approuver et le veto | aussi pour refuser | ailleurs dans le cockpit, refuser n'exige pas l'appui maintenu (§4.10) ; depuis À faire, les trois décisions demandent le même geste |
 | « Ouvrir … » ouvre la vue | un constat de Mes trades ouvert depuis Papier passe d'abord par l'appui maintenu vers Mes trades ; un constat du Papier bascule directement | la vue d'un trade réel n'a pas de sens dans l'espace Papier, et l'entrée dans Mes trades garde son verrou |
 | bandeau « calme » à zéro constat | « Première vérification en cours » tant que le moteur n'est pas passé (`state.attention_check` nul) | zéro avant le premier passage ne veut pas dire « rien à faire » |
@@ -700,7 +703,8 @@ Base saine → aucun constat ; un constat ne peut proposer qu'une action de la l
 preuve ne garde aucune clé ; commande `ssh` vers le serveur de `DEPLOY.md` (`JARVIS_SSH_CIBLE` conforme la remplace) ; worker arrêté ou bloqué, base absente, garde
 du Labo 1, décisions du council (veto sur la dernière seulement, plus après un veto) ; boucle du suivi bloquée (action
 avec un trade ouvert), boucle qui échoue, délai de grâce qui garde les constats ; erreurs répétées hors planificateur ;
-disque ; source seule en panne, grâce de 5 min, source plus appelée, trois sources → un seul constat réseau, 403 de la
+disque ; source seule en panne, grâce de 5 min, source plus appelée, trois sources → un seul constat réseau, 429 = limite
+(info, hors constat réseau), 403 de la
 SEC ou d'Alpaca ≠ clé, clé Twelve Data refusée dans une réponse 200 (sans la clé dans la page), quota, clés absentes ;
 notifications coupées, file Discord bloquée, bot déconnecté (jeton refusé) ; routines ; déploiement (en attente, docs
 seulement, pull sans reconstruction, inconnu, pas encore comparé) ; `HEAD` lu sans git (refs, packed-refs, référence
