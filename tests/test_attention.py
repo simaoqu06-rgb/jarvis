@@ -324,6 +324,22 @@ def test_trois_sources_en_panne_un_seul_constat_reseau(env):
     assert keys(found) == {"internet"}
 
 
+def test_limite_de_debit_429_est_une_info_et_pas_une_panne(env):
+    # Helious sans clé : quota partagé, refusé à chaque passage des actus (toutes les 15 min) ; Finnhub prend le relais
+    for _ in range(3):
+        sources_health.fail("https://api.helious.io/v1/feed?limit=20", SourceError("HTTP 429"), None)
+    sources_health._state["Helious"].update(premier_echec=iso(NOW - timedelta(minutes=30)),
+                                            derniere_tentative=iso(NOW - timedelta(seconds=20)))
+    for name in ("Finnhub", "Kraken"):
+        source(name, 5, first_ago_s=900, err="erreur réseau (ConnectError)", code=None)
+    found = run()
+    # deux vraies pannes + une limite : pas de constat « réseau coupé », la limite reste une info à part
+    assert keys(found) == {"limit:helious", "source:finnhub", "source:kraken"}
+    f = one(found, "limit:helious")
+    assert f["kind"] == "info" and f["title"] == "Helious limite ses appels (trop de demandes)"
+    assert "pas une panne" in f["detail"] and "Finnhub" in f["detail"] and not any(s.get("cmd") for s in f["steps"])
+
+
 def test_refus_403_de_la_sec_ou_d_alpaca_n_est_pas_une_cle(env):
     source("SEC EDGAR", 5, first_ago_s=900, code=403, err="HTTP 403")
     source("Alpaca (données)", 5, first_ago_s=900, code=403, err="HTTP 403")

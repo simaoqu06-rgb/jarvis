@@ -21,7 +21,7 @@ NAMES = {
     "api.coinlore.net": "CoinLore", "api.coinpaprika.com": "CoinPaprika", "date.nager.at": "Nager.Date",
     "www.sec.gov": "SEC EDGAR", "efts.sec.gov": "SEC EDGAR", "data.sec.gov": "SEC EDGAR",
     "gamma-api.polymarket.com": "Polymarket", "clob.polymarket.com": "Polymarket",
-    "earthquake.usgs.gov": "USGS (séismes)", "api.open-meteo.com": "Open-Meteo",
+    "earthquake.usgs.gov": "USGS (séismes)", "api.open-meteo.com": "Open-Meteo", "api.helious.io": "Helious",
 }
 CODE_RE = re.compile(r"^HTTP (\d{3})\b")
 # Un message d'erreur ne garde jamais une clé : `apikey=…`, `token=…`, `Bearer …` masqués

@@ -103,8 +103,11 @@ aide `?`.
   commande à copier, bouton (approuver ou refuser une proposition, veto, par appui maintenu) ou vue à ouvrir. Trois
   types (à faire, problème, info) et trois portées (commun, Mes trades, Papier), filtre `F`. Un constat se ferme tout
   seul quand sa cause disparaît ; « C'est fait » ou « Masquer » (`X`) le range, avec Annuler. La pastille du rail
-  compte les constats ouverts (rouge s'il y a une action), le titre de l'onglet devient « (n) JARVIS · … » et le
-  Cockpit ouvre sur un bandeau des trois premiers. Aucun appel réseau, rien sur Discord : `GET /api/cockpit/attention`
+  compte les actions et problèmes ouverts non rangés, tous espaces (rouge s'il y a une action, ambre sinon) ; s'il y
+  a des actions, le titre de l'onglet devient « (n) JARVIS · … », n étant leur nombre ; le Cockpit ouvre sur un
+  bandeau des trois premiers constats. Pour dire si une version reste à déployer, le dossier `/root/jarvis` est monté
+  en lecture seule dans le conteneur (jamais `.git/config` ni `.env`) ; `JARVIS_GITHUB_TOKEN`, facultatif, ne sert que
+  si le dépôt redevient privé (DEPLOY.md). Aucun appel réseau, rien sur Discord : `GET /api/cockpit/attention`
   (docs/CARTE-INTERFACE.md §8).
 - Carte écran ↔ données et contrat de `/api/cockpit/*` : [docs/CARTE-INTERFACE.md](docs/CARTE-INTERFACE.md).
 

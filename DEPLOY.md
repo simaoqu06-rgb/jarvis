@@ -333,7 +333,8 @@ pas à pas :
 2. `cd /root/jarvis && git pull && docker compose up -d --build` ;
 3. recharge le cockpit une fois : la vue À faire est la 2e du rail (touche `2` ou `G T`), les vues
    suivantes avancent d'un cran (Marchés `3` … Santé `9`). `data/attention.json` se crée tout seul au premier passage
-   (une minute environ) ; avant, le bandeau et la page disent « Première vérification en cours ».
+   (quelques secondes après le démarrage) ; d'ici là, le bandeau et la page disent « Première vérification en cours ».
+   Si la PR du moteur (#80) est déjà déployée, `data/attention.json` existe déjà : la liste s'affiche tout de suite.
 
 ## Ménage automatique
 
