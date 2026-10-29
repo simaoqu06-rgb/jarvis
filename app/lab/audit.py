@@ -61,7 +61,9 @@ CACHE_KEY = "audit_declaration"
 # Ce que la déclaration a changé dans les mesures (note d'archive_info).
 NOTES = {10: "mesures d'avant la n° 10 : simulateur révision 1, témoin sur la journée, 5 tirages, prix ajustés",
          11: "mesures d'avant la n° 11 : sans ouverture_va ni stop_structure, sans les stratégies de la n° 11 ; les "
-             "stratégies d'avant ne devaient pas changer (≈ 0 attendu à l'audit)"}
+             "stratégies d'avant ne devaient pas changer (≈ 0 attendu à l'audit)",
+         13: "mesures d'avant la n° 13 : sans les bras GO « TP1 sur clôture » (actions) ; les stratégies d'avant ne "
+             "devaient pas changer (≈ 0 attendu à l'audit)"}
 STRAT_KEY = ("origin", "market", "symbol", "day", "strategy", "slot")
 KILL_KEY = ("day", "symbol", "cout")
 PLUS10_KEY = ("day", "symbol", "essai")

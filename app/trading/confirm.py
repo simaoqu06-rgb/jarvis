@@ -23,6 +23,11 @@ sortie libre dans le temps) et le confirmé à la taille de Simão (`confirme_r2
 JARVIS_RISK_EUR, un bracket IBKR par objectif, commission de chaque ordre ; non compté, `confirme_hors_mise`,
 quand une seule action dépasse la mise : le MP a dit « pas de taille »). Chaque ligne garde aussi
 les indicateurs du scanner (`features`) et les sous-notes (`parts`) du GO.
+
+Déclaration n° 13 du labo (29/10/2026, AEYE annulé sur une mèche au TP1 dès la première bougie) : `evaluate(...,
+tp1="cloture")` rejoue une autre annulation sur le TP1, mesurée au labo seulement : pendant le premier quart d'heure,
+le TP1 n'annule rien ; ensuite, seulement une clôture 5 min au niveau du TP1 ou au-dessus. Le direct garde la règle
+actuelle (« meche ») tant que le labo n'a pas conclu (docs/labo-strategies.md).
 """
 from __future__ import annotations
 
@@ -44,6 +49,9 @@ BAR = 5 * 60
 WAIT = timedelta(minutes=15)       # premier quart d'heure : pas de confirmation (range d'ouverture)
 LAST_CHECK = time(11, 30)          # heure de New York : au-delà, un GO non confirmé expire
 TICK = 0.01
+# Annulation sur le TP1 avant la confirmation : « meche », la règle du direct (un plus haut touche le TP1) ;
+# « cloture », la n° 13 du labo (rien pendant le premier quart d'heure, puis une clôture au niveau du TP1 ou au-dessus).
+TP1_RULES = ("meche", "cloture")
 
 PENDING = ("attente", "repli")
 # Choix par défaut (Simão tranchera) : après l'arrêt de la journée (−3 R) ou avec le budget de risque ouvert plein, les
@@ -101,11 +109,14 @@ def session_bars(bars: list[dict], day_open: datetime, now: datetime) -> list[di
     return [b for b in bars if b["t"] >= start and b["t"] + BAR <= end]
 
 
-def evaluate(go: dict, bars: list[dict], day_open: datetime) -> dict | None:
+def evaluate(go: dict, bars: list[dict], day_open: datetime, tp1: str = "meche") -> dict | None:
     """Fait avancer un GO sur les bougies closes ; renvoie l'événement nouveau (confirmé/annulé) ou None.
 
     Relit toute la séance à chaque fois (VWAP cumulé) mais ne traite que les bougies après `last_bar`.
+    `tp1` : annulation sur le TP1 avant la confirmation (TP1_RULES) ; le direct garde « meche ».
     """
+    if tp1 not in TP1_RULES:
+        raise ValueError(f"règle du TP1 inconnue : {tp1}")
     num = den = 0.0
     earliest = (day_open + WAIT).timestamp()
     for b in bars:
@@ -118,15 +129,21 @@ def evaluate(go: dict, bars: list[dict], day_open: datetime) -> dict | None:
         if go["status"] not in PENDING:
             continue
         vwap = num / den if den else b["c"]
+        late = b["t"] + BAR > earliest  # bougie finie après le premier quart d'heure
         if b["c"] < go["stop"]:
             go["status"] = "annulé"
             return {"kind": "annulé", "t": b["t"], "why": f"clôture 5 min à {_num(b['c'])} sous le stop {_num(go['stop'])}"}
-        if b["h"] >= go["targets"][0]:
+        if tp1 == "meche" and b["h"] >= go["targets"][0]:
             go["status"] = "annulé"
             return {"kind": "annulé", "t": b["t"], "why": f"TP1 {_num(go['targets'][0])} touché avant la confirmation"}
+        if tp1 == "cloture" and late and b["c"] >= go["targets"][0]:
+            go["status"] = "annulé"
+            return {"kind": "annulé", "t": b["t"],
+                    "why": f"clôture 5 min à {_num(b['c'])} au TP1 {_num(go['targets'][0])} ou au-dessus avant la "
+                           "confirmation"}
         if b["l"] <= go["entry"]:
             go["status"] = "repli"
-        if go["status"] == "repli" and b["t"] + BAR > earliest and b["c"] > vwap:
+        if go["status"] == "repli" and late and b["c"] > vwap:
             trigger = round(b["h"] + TICK, 2)
             if trigger >= go["targets"][0]:
                 continue  # pas de place jusqu'au TP1 : on attend une meilleure bougie

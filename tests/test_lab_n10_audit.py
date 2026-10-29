@@ -283,20 +283,28 @@ async def test_archive_faite_avant_le_premier_replace_strat(tmp_path, monkeypatc
     db.replace_strat = spy
     monkeypatch.setattr(RAT, "stock_rows", rows)
     assert await RAT.step(db, "stock", 60) == 2
-    assert seen == [5, 5]                                               # 4 actions + 1 crypto, dès le 1er appel
+    # n° 13 : la crypto reste en n° 11, ses lignes vont dans le fichier de sa déclaration ; même déclaration : un seul
+    # fichier, 4 actions + 1 crypto.
+    same = ST.CRYPTO_DECLARATION == ST.DECLARATION
+    assert seen == [4 + same] * 2                                       # dès le 1er appel
     assert db.conn.execute("SELECT COUNT(*) FROM strat_trades WHERE market = 'stock' AND declaration IS NOT ?",
                            (ST.DECLARATION,)).fetchone()[0] == 0          # plus aucune ancienne ligne en base
     path = _archive(db)
     assert path == tmp_path / "archives" / f"labo2-avant-n{ST.DECLARATION}.db"
     archived = _read(path, "SELECT market, symbol, day, r_net, declaration FROM strat_trades ORDER BY market, day, symbol")
-    assert archived == [("crypto", "BTC-USDT", DAYS[0], 0.9, 9),
+    crypto = [("crypto", "BTC-USDT", DAYS[0], 0.9, 9)]
+    assert archived == [*(crypto if same else []),
                         *[("stock", s, d, -0.7, None) for d in DAYS for s in ("AAA", "BBB")]]   # intacte, telle quelle
+    if not same:
+        assert _read(AUD.archive_path(db.path, ST.CRYPTO_DECLARATION),
+                     "SELECT market, symbol, day, r_net, declaration FROM strat_trades") == crypto
     assert _read(path, "SELECT day, symbol, cout FROM kill_complet") == [(DAYS[0], "AAA", None)]  # autre coût seul
     assert _read(path, "SELECT day, symbol FROM plus10_trades") == [(DAYS[0], "AAA")]          # autre mesure seule
     assert [json.loads(v)["mesure"] for _, v in _read(path, "SELECT day, value FROM plus10_seances")] == [9]
     info = _read(path, "SELECT cle, tables, remplace, declaration, lignes, note FROM archive_info ORDER BY cle")
     assert [r[0] for r in info] == [f"kill_complet:{KC.cost_fingerprint()}", f"plus10:m{P10.MESURE}",
-                                    f"strats:crypto:d{ST.CRYPTO_DECLARATION}", f"strats:stock:d{ST.DECLARATION}"]
+                                    *([f"strats:crypto:d{ST.CRYPTO_DECLARATION}"] if same else []),
+                                    f"strats:stock:d{ST.DECLARATION}"]
     stock = info[-1]
     assert json.loads(stock[2]) == ["inconnue (d'avant le suivi)"] and stock[3] == ST.DECLARATION
     assert json.loads(stock[4]) == {"strat_trades": {"choisies": 4, "ajoutees": 4, "deja_la": 0}}
@@ -401,13 +409,14 @@ def test_copie_manuelle_respectee(tmp_path):
                                                                               "deja_la": 1}}
     assert out[f"plus10:m{P10.MESURE}"]["plus10_trades"] == {"choisies": 1, "ajoutees": 0, "deja_la": 1}
     rows = _read(path, "SELECT market, day, symbol, exit_reason FROM strat_trades ORDER BY market, day, symbol")
-    assert rows == [("crypto", DAYS[0], "BTC-USDT", None),
+    same = ST.CRYPTO_DECLARATION == ST.DECLARATION  # n° 13 : la crypto (n° 11) a son propre fichier
+    assert rows == [*([("crypto", DAYS[0], "BTC-USDT", None)] if same else []),
                     ("stock", DAYS[0], "AAA", "copie manuelle"), ("stock", DAYS[0], "BBB", "copie manuelle"),
                     ("stock", DAYS[1], "AAA", "copie manuelle"), ("stock", DAYS[1], "BBB", "copie manuelle"),
                     ("stock", DAYS[1], "CCC", None)]      # le 10/03 réécrit en base reste dans l'archive
     assert "cout_rev" not in {r[1] for r in _read(path, "PRAGMA table_info(strat_trades)")}  # schéma gardé
     assert _read(path, "SELECT COUNT(*) FROM kill_complet") == [(2,)]                   # copie complète gardée
-    assert len(_read(path, "SELECT * FROM archive_info")) == 4
+    assert len(_read(path, "SELECT * FROM archive_info")) == 3 + same
 
 
 def test_seances_n9_sans_ligne_archivees(tmp_path):
@@ -704,13 +713,16 @@ def test_commande_manuelle_de_deploy_puis_archive_automatique(tmp_path):
     db = _base(tmp_path)
     run = subprocess.run([sys.executable, "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=60,
                          env=os.environ | {"JARVIS_LAB_DB": str(tmp_path / "lab.db"), "PYTHONPATH": str(root)})
-    assert run.returncode == 0 and "strat_trades 5 lignes archivées" in run.stdout, run.stderr
+    # 4 actions d'avant, plus la crypto n° 9 quand les deux marchés ont la même déclaration (n° 13 : crypto en n° 11)
+    same = ST.CRYPTO_DECLARATION == ST.DECLARATION
+    n = 4 + same
+    assert run.returncode == 0 and f"strat_trades {n} lignes archivées" in run.stdout, run.stderr
     path = _archive(db)                                                        # le fichier de la déclaration en vigueur
-    assert _read(path, "SELECT COUNT(*) FROM strat_trades") == [(5,)]          # 4 actions d'avant + 1 crypto n° 9
+    assert _read(path, "SELECT COUNT(*) FROM strat_trades") == [(n,)]
     out = AUD.step(db)
     assert out[f"strats:stock:d{ST.DECLARATION}"]["strat_trades"] == {"choisies": 4, "ajoutees": 0, "deja_la": 4}
-    assert out[f"strats:crypto:d{ST.CRYPTO_DECLARATION}"]["strat_trades"]["ajoutees"] == 0
-    assert _read(path, "SELECT COUNT(*) FROM strat_trades") == [(5,)]
+    assert out[f"strats:crypto:d{ST.CRYPTO_DECLARATION}"]["strat_trades"]["ajoutees"] == int(not same)
+    assert _read(path, "SELECT COUNT(*) FROM strat_trades") == [(n,)]
 
 
 def test_docs_de_la_n10_limites_et_avant_la_n11():

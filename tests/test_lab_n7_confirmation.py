@@ -53,7 +53,8 @@ def test_confirme_rejoue_la_regle_du_direct():
     ev = ST.confirm_event(d, 100.0, 98.0, [103.0, 105.0, 107.0])
     assert ev["kind"] == "confirmé" and ev["t"] == OPEN + 15 * 60 and ev["trigger"] == 101.01
     rows = by_name(ST.go_rows(d, "AAA", {"origine": PLAN}, 3, 1.0))
-    assert set(rows) == {"go_brut", "go_confirme", "go_confirme_v2", "go_confirme_v3", "go_confirme_v4"}  # n° 8
+    assert set(rows) == {"go_brut", "go_confirme", "go_confirme_v2", "go_confirme_v3", "go_confirme_v4",  # n° 8
+                         "go_confirme_tp1"}                                                             # n° 13
     brut, conf = rows["go_brut"], rows["go_confirme"]
     assert brut["confirmation"] == conf["confirmation"] == "confirme"
     # Brut : au marché à l'ouverture (101), stop et objectifs du plan, sortie stop fixe.
@@ -122,7 +123,8 @@ def test_plans_go_par_stop():
     assert ST.go_plans({"plan": PLAN, "go": True, "plancher": {"plan": floor, "go": False}}) == {"origine": PLAN}
     assert ST.go_plans({"plan": PLAN, "go": False, "plancher": {"plan": floor, "go": True}}) == {"plancher": floor}
     rows = ST.go_rows(make(CONFIRMED), "AAA", {"plancher": floor})
-    assert sorted(r["strategy"] for r in rows) == ["go_brut_plancher", "go_confirme_plancher"]
+    assert sorted(r["strategy"] for r in rows) == ["go_brut_plancher", "go_confirme_plancher",
+                                                   "go_confirme_tp1_plancher"]                    # n° 13
     assert all(r["stop"] == 97.0 for r in rows)
     # stock_day : les bras viennent avec la ligne v1, rien sans GO.
     v1 = {"plan": PLAN, "decided_at": OPEN - 20 * 60, "entry_until": d_close(), "last_price": 100.0,
@@ -248,7 +250,7 @@ def test_la_crypto_garde_son_rattrapage():
     # Les n° 7 et 8 ne touchaient que les actions : le rattrapage crypto de la n° 6 continuait. Une déclaration qui
     # change les lignes crypto doit remonter CRYPTO_DECLARATION (ce test la rappelle) : la n° 10 corrige le
     # simulateur (stops serrés), les deux marchés repartent, sans essai crypto de plus.
-    assert ST.progress_job("stock") == "strats:stock:d11" and ST.progress_job("crypto") == "strats:crypto:d11"
+    assert ST.progress_job("stock") == "strats:stock:d13" and ST.progress_job("crypto") == "strats:crypto:d11"
     assert len([t for t in ST.trials() if t["market"] == "crypto"]) == 51 and ST.CRYPTO_DECLARATION == 11
 
 

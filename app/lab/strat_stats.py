@@ -562,8 +562,9 @@ def _strategies(conn: sqlite3.Connection) -> dict:
         comm = (ibkr_commission_r(entry, stop) or 0.0) if market == "stock" else 0.0
         ref = values[refc] - comm if values[refc] is not None else None
         spec = ST.STRATEGIES.get(name, {})
-        if "go" in spec:
-            gos[(spec["go"], symbol, day)][spec["arm"]] = {"ref": ref, "status": status, "symbol": symbol}
+        if "go" in spec:  # n° 13 : r20, à 20 € en sortie unique sur TP2 au Dégressif (None sans trade)
+            gos[(spec["go"], symbol, day)][spec["arm"]] = {"ref": ref, "status": status, "symbol": symbol,
+                                                            "r20": values.get("r_20e_1s_deg")}
         if market == "stock" and name in ("orb15", "killmode"):
             sessions[(symbol, day)][name] = {"trig": bool(trig), "ref": ref, "gap": gap, "atr": atr_pct,
                                              "ecart": values["r_net"] - wit
@@ -629,7 +630,8 @@ def _go_compare(gos: dict, trials: int, passed=None) -> dict:
     après commission IBKR), en grappes par jour.
     n° 8 : pour chaque filtre FRSH (stop d'origine), écart « filtré ou rien » − « confirmé ou rien » et − brut, GO
     par GO (sans les GO où le filtre n'a pas pu être jugé) ; et, mesure sans essai, brut et confirmé selon que des
-    résultats ont été publiés entre la veille et l'ouverture (`passed`(symbole, jour), archive du calendrier)."""
+    résultats ont été publiés entre la veille et l'ouverture (`passed`(symbole, jour), archive du calendrier).
+    n° 13 : « TP1 sur clôture » contre la confirmation actuelle, par stop (_tp1_compare)."""
     out = {}
     for variant in [v for v in GO_VARIANTS_FR if any(k[0] == v for k in gos)]:
         groups = {st: {"go": 0, "executes": 0, "brut": Mean(), "confirme": Mean()} for st in GO_STATUS_FR}
@@ -654,8 +656,46 @@ def _go_compare(gos: dict, trials: int, passed=None) -> dict:
         filters = _filter_compare(gos, variant, trials)
         if filters:
             out[variant]["filtres"] = filters
+        tp1 = _tp1_compare(gos, variant, trials)
+        if tp1:
+            out[variant]["tp1_cloture"] = tp1
         if passed is not None:
             out[variant]["par_resultats"] = _results_compare(gos, variant, passed)
+    return out
+
+
+def _tp1_compare(gos: dict, variant: str, trials: int) -> dict | None:
+    """n° 13 : « TP1 sur clôture ou rien » − « confirmé ou rien », GO par GO (0 pour un bras sans trade), après
+    commission IBKR, et à 20 € en sortie unique sur TP2 au Dégressif (r20) : jugé sur les séances après SEEN_N13
+    (« jours_neufs »), l'historique publié à titre descriptif (« jours_vus »). Passages d'un statut à l'autre (règle
+    actuelle → n° 13), avec le R des deux bras, sur toutes les séances : la n° 13 n'annule jamais plus tôt, donc seul
+    un GO annulé par la règle actuelle peut changer de sort ; un autre écart est un défaut (« anormaux »)."""
+    arm = ST.GO_TP1.get(variant, (None,))[0]
+    seen = ST.SEEN_N13["stock"]
+    parts = {k: (Mean(), Mean()) for k in ("jours_neufs", "jours_vus")}
+    moves: dict = {}
+    odd = 0
+    for (v, _, day), arms in gos.items():
+        t, c = arms.get(arm), arms.get("confirme")
+        if v != variant or not t or not c:
+            continue
+        gap = (t["ref"] or 0.0) - (c["ref"] or 0.0)
+        diff, diff20 = parts["jours_neufs" if day > seen else "jours_vus"]
+        diff.add(day, gap)
+        diff20.add(day, (t["r20"] or 0.0) - (c["r20"] or 0.0))
+        g = moves.setdefault((c["status"], t["status"]), {"go": 0, "actuelle": Mean(), "n13": Mean()})
+        g["go"] += 1
+        g["actuelle"].add(day, c["ref"])
+        g["n13"].add(day, t["ref"])
+        odd += c["status"] != "annule" and (t["status"] != c["status"] or abs(gap) > 1e-9)
+    if not moves:
+        return None
+    out = {"vu_jusqu_au": seen, "anormaux": odd}
+    for k, (diff, diff20) in parts.items():
+        out[k] = {"ecart": _helps(diff.result(), trials) if k == "jours_neufs" else diff.result(),
+                  "ecart_20e": diff20.result()}
+    out["passages"] = [{"de": GO_STATUS_FR[a], "vers": GO_STATUS_FR[b], "go": g["go"], "actuelle": g["actuelle"].result(),
+                        "n13": g["n13"].result()} for (a, b), g in sorted(moves.items(), key=lambda kv: -kv[1]["go"])]
     return out
 
 
@@ -1186,6 +1226,33 @@ def _go_text(variant: str, res: dict, items: dict | None = None) -> str:
     return f"Confirmation des GO (n° 7, {GO_VARIANTS_FR.get(variant, variant)}) : " + " · ".join(parts)
 
 
+def _tp1_text(variant: str, res: dict) -> str:
+    """n° 13 : « TP1 sur clôture ou rien » − « confirmé ou rien », jugé après le jour vu, l'historique en descriptif, et
+    les passages d'un statut à l'autre (le R des deux règles dans chaque passage)."""
+    seen = date.fromisoformat(res["vu_jusqu_au"]).strftime("%d/%m/%Y")
+    new, old = res["jours_neufs"], res["jours_vus"]
+    diff = new["ecart"]
+    if diff["n"]:
+        judged = (f"après le {seen} : n° 13 − confirmé {_r(diff['esperance_r'])} R par GO ({_t(diff)}, {diff['n']} GO, "
+                  f"{diff['jours']} séances" + (", ↗ aide (relatif)" if diff.get("aide") else "") + f"), à 20 € en "
+                  f"sortie TP2 {_r(new['ecart_20e']['esperance_r'])} R")
+    else:
+        judged = f"après le {seen} : pas encore de séance"
+    parts = [judged]
+    if old["ecart"]["n"]:
+        parts.append(f"jours vus (descriptif) {_r(old['ecart']['esperance_r'])} R par GO (t {_z(old['ecart']['z'])}, "
+                     f"{old['ecart']['n']} GO), à 20 € {_r(old['ecart_20e']['esperance_r'])} R")
+    moved = [p for p in res["passages"] if p["de"] != p["vers"]]
+    if moved:
+        parts.append("passages " + ", ".join(
+            f"{p['de']} → {p['vers']} {p['go']} (n° 13 {_r(p['n13']['esperance_r'])} R sur {p['n13']['n']} trades)"
+            if p["n13"]["n"] else f"{p['de']} → {p['vers']} {p['go']}" for p in moved))
+    if res["anormaux"]:
+        parts.append(f"⚠️ {res['anormaux']} GO non annulés par la règle actuelle changent de sort : défaut du code, "
+                     "ne rien lire avant correction")
+    return f"TP1 sur clôture (n° 13, {GO_VARIANTS_FR.get(variant, variant)}) : " + " · ".join(parts)
+
+
 def text(rep: dict | None) -> str:
     if not rep:
         return "🧪 **Stratégies du labo v2** : pas encore de mesure (le rejeu n'a pas encore traité de jour avec elles)."
@@ -1256,6 +1323,8 @@ def text(rep: dict | None) -> str:
         lines.append(_kill_text(kill))
     for variant, res in (rep.get("confirmation_go") or {}).items():
         lines.append(_go_text(variant, res, (rep.get("strategies") or {}).get("stock")))
+        if res.get("tp1_cloture"):
+            lines.append(_tp1_text(variant, res["tp1_cloture"]))
     if rep.get("killmode_complet"):
         from app.lab import kill_complet as KC  # import tardif
 

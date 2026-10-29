@@ -132,6 +132,11 @@ minutes rejouées sur toute la cote (ouverture.py), la passe A du challenger Gem
 (SSRN 4729284) en quatre versions, six essais (N12_TRIALS, protocole v2 figé le 27/10 après l'avis de GPT et de
 Gemini) jugés sur leurs propres lignes (table ouverture_trades) ; les lignes du labo v2 ne changent pas (DECLARATION
 reste 11, pas de rattrapage).
+Déclaration n° 13 (29 octobre 2026, AEYE annulé sur une mèche au TP1 à la première bougie, fil « Revoir la validation
+des GO ») : la confirmation des GO de la n° 7 avec une autre annulation sur le TP1 (confirm.evaluate, tp1="cloture" :
+rien pendant le premier quart d'heure, puis seulement une clôture 5 min au niveau du TP1 ou au-dessus), sur les deux
+stops de la n° 7 (GO_TP1, go_rows) ; deux essais jugés seulement sur les séances après SEEN_N13, l'historique à titre
+descriptif ; le direct ne change pas. Rattrapage des actions seulement.
 Objectifs : 1, 2 et 3 R. Fenêtre des signaux : actions de 9 h 45 à 15 h New York (soldé à la
 clôture) ; crypto de 0 h à 20 h UTC (soldé 24 h après le signal).
 v1 est rejouée avec les mêmes sorties et tests, sur ses propres objectifs : c'est la référence.
@@ -161,14 +166,15 @@ from app.trading import confirm as CF
 from app.trading import indicators as I
 from app.trading import signals as S
 
-REGISTERED_ON = "2026-10-27"
+REGISTERED_ON = "2026-10-29"
 # Déclaration qui fixe les lignes du labo v2 (docs/labo-strategies.md). En changer relance le rattrapage de tous les
 # jours déjà traités (progress_job), pour que chaque stratégie soit mesurée sur les mêmes jours. N° 10 : mesures
 # corrigées (simulateur, témoin, prix négociés), aucun essai de plus. N° 11 : stop structurel (lignes en plus) et
-# ouverture face au profil de la veille (colonne en plus).
-DECLARATION = 11
+# ouverture face au profil de la veille (colonne en plus). N° 13 : bras GO « TP1 sur clôture » (lignes en plus,
+# actions seulement).
+DECLARATION = 13
 # Dernière déclaration (affichée). N° 12 : nouvelles lignes à part (ouverture.py), rien à rattraper.
-LATEST_DECLARATION = 12
+LATEST_DECLARATION = 13
 # Dernière déclaration qui change les lignes crypto : la n° 11 (stop structurel de la cassure de zone).
 CRYPTO_DECLARATION = 11
 # n° 10 : révision du simulateur des lignes du labo v2 (simulator.simulate, `sim_rev`) ; le Labo 1 reste en 1.
@@ -212,6 +218,14 @@ STRATEGIES = {
     "go_confirme_v4": {"label": "GO confirmé + plus fort que SPY depuis l'ouverture (stop d'origine)",
                        "markets": ("stock",), "go": "origine", "arm": "confirme_v4", "filtre": "v4",
                        "exits": ("r_sans_be",)},
+    # Déclaration n° 13 (AEYE annulé sur une mèche au TP1, fil « Revoir la validation des GO ») : la confirmation de
+    # la n° 7, sauf l'annulation sur le TP1 (confirm.evaluate, tp1="cloture"), sur ses deux stops (go_rows).
+    "go_confirme_tp1": {"label": "GO confirmé, TP1 sur clôture après le premier quart d'heure (stop d'origine)",
+                        "markets": ("stock",), "go": "origine", "arm": "confirme_tp1", "tp1": "cloture",
+                        "exits": ("r_sans_be",)},
+    "go_confirme_tp1_plancher": {"label": "GO du direct confirmé, TP1 sur clôture après le premier quart d'heure "
+                                          "(stop plancher 1/3 ATR jour)", "markets": ("stock",), "go": "plancher",
+                                 "arm": "confirme_tp1", "tp1": "cloture", "exits": ("r_sans_be",)},
     # Déclaration n° 11, A : mêmes signaux et entrées que la base, stop derrière le dernier creux fort (structure_stop).
     "orb30_structure": {"label": "Cassure du range d'ouverture (30 min), stop derrière le dernier creux fort",
                         "markets": ("stock",), "base": "orb30", "stop": "structure", "exits": ("r_net",)},
@@ -224,6 +238,7 @@ GO_STATUS = {"confirmé": "confirme", "annulé": "annule"}               # n° 7
 GO_FILTERS = {v["filtre"]: k for k, v in STRATEGIES.items() if "filtre" in v}  # n° 8
 GO_FILTER_VWAP_BARS = 3     # n° 8, V2 : VWAP plus haut qu'il y a 3 bougies
 GO_FILTER_ATR = 0.25        # n° 8, V2 : clôture au moins 0,25 ATR (5 min) au-dessus du VWAP
+GO_TP1 = {v["go"]: (v["arm"], v["tp1"]) for v in STRATEGIES.values() if "tp1" in v}  # n° 13 : bras et règle, par stop
 # n° 8, D1 : Killmode complet (pilier catalyseur rejoué sur l'archive des actus, kill_complet.py) : son espérance
 # à la mise de Simão, et son écart au témoin propre apparié par jour. Deux essais de plus, hors STRATEGIES.
 KILL_COMPLETE_TRIALS = ({"market": "stock", "strategy": "killmode_complet", "exit": "r_20e"},
@@ -245,6 +260,9 @@ N12_TRIALS = tuple({"market": "stock", "strategy": name, "exit": "r_frais"}
 N11_NAMES = ("orb30_structure", "cassure_zone_retest_structure", *N11_SUBSETS)
 # n° 11 : tout l'historique visible était lu ; ses essais ne sont jugés que sur les jours suivants.
 SEEN_N11 = {"stock": "2026-10-16", "crypto": "2026-10-17"}
+# n° 13 : règle tirée d'AEYE (28/10) et des chiffres de toute la période visible ; jugée sur les séances suivantes.
+N13_NAMES = tuple(k for k, v in STRATEGIES.items() if "tp1" in v)
+SEEN_N13 = {"stock": "2026-10-28"}
 OI7_MAX_PCT = 9.0           # n° 11, B : open interest gagné sur 7 jours, au-delà la ligne sort du sous-ensemble
 STRUCT_LOOKBACK = 78        # n° 11, A : bougies (5 min) où chercher le creux fort (une séance d'actions)
 STRUCT_MAX_DAILY_ATR = 1.0  # n° 11, A : au-delà d'un ATR journalier de risque, stop d'origine gardé
@@ -345,6 +363,8 @@ def seen_until(name: str, market: str) -> str | None:
         return COUNCIL[name]["seen"]
     if name in N11_NAMES:
         return SEEN_N11[market]
+    if name in N13_NAMES:
+        return SEEN_N13[market]
     return SEEN_UNTIL[market] if name in POST_SEEN else None
 
 
@@ -1226,14 +1246,15 @@ NO_TRADE = {"triggered": 0, "filled_at": None, "entry_mode": None, "minutes_to_f
             "exit_reason": "non_declenche", "r_net": None, "r_gross": None, "tp1_hit": 0, "mfe_r": None, "mae_r": None}
 
 
-def confirm_event(d: Day, entry: float, stop: float, targets: list[float]) -> dict | None:
+def confirm_event(d: Day, entry: float, stop: float, targets: list[float], tp1: str = "meche") -> dict | None:
     """n° 7 : la règle du direct (confirm.evaluate, même code) sur les bougies de 5 min de la séance closes avant
     11 h 30 New York (le direct déclare le GO expiré dès 11 h 30, avant de lire la bougie qui s'y termine).
-    Renvoie l'événement (confirmé, avec son déclencheur, ou annulé) ; None : expiré."""
+    `tp1` : annulation sur le TP1 (n° 13 : « cloture »). Renvoie l'événement (confirmé, avec son déclencheur, ou
+    annulé) ; None : expiré."""
     until = int(datetime.combine(d.day, CF.LAST_CHECK, CO.NEW_YORK).timestamp())
     go = {"status": "attente", "entry": entry, "stop": stop, "targets": targets, "last_bar": None}
     bars = [b for b in d.bars[d.d0:d.d1] if b["t"] + BAR < until]
-    return CF.evaluate(go, bars, datetime.fromtimestamp(d.start_ts, timezone.utc))
+    return CF.evaluate(go, bars, datetime.fromtimestamp(d.start_ts, timezone.utc), tp1)
 
 
 def go_filter(d: Day, name: str, k: int) -> bool | None:
@@ -1298,10 +1319,23 @@ def go_plans(v1: dict | None) -> dict:
     return out
 
 
+def confirm_arm(d: Day, plan: dict, stop: float, targets: list[float], ev: dict | None, until: int,
+                k_until: int) -> tuple[str, tuple]:
+    """n° 7 (et n° 13) : statut d'une confirmation et son bras. Confirmé : ordre stop d'achat au déclencheur, posé à la
+    clôture de la bougie de confirmation, valable jusqu'à 11 h 30 New York ; sinon pas d'ordre, la ligne garde
+    l'entrée du plan et l'heure où le GO est tombé."""
+    status = GO_STATUS.get(ev["kind"], "expire") if ev else "expire"
+    if status == "confirme":
+        return status, (_plan(ev["trigger"], stop, targets), ev["t"] + BAR, until, "stop",
+                        d.c[bisect_left(d.t, ev["t"])], (d.first, max(d.first, k_until)))
+    return status, (_plan(plan["entry"], stop, targets), ev["t"] + BAR if ev else until, until, None, None, None)
+
+
 def go_rows(d: Day, symbol: str, plans: dict, rank=None, gap: float | None = None) -> list[dict]:
     """n° 7 : pour chaque GO (par stop), une ligne par bras, avec le statut de la confirmation.
     Brut : achat au marché à l'ouverture si elle est au-dessus du stop. Confirmé : ordre stop d'achat au
-    déclencheur, posé à la clôture de la bougie de confirmation, valable jusqu'à 11 h 30 New York."""
+    déclencheur, posé à la clôture de la bougie de confirmation, valable jusqu'à 11 h 30 New York.
+    n° 13 : le bras confirmé refait avec l'autre annulation sur le TP1 (GO_TP1), son propre statut."""
     if d.d1 <= d.d0:
         return []
     rows = []
@@ -1313,17 +1347,11 @@ def go_rows(d: Day, symbol: str, plans: dict, rank=None, gap: float | None = Non
         if not targets or stop >= plan["entry"]:
             continue
         ev = confirm_event(d, plan["entry"], stop, targets)
-        status = GO_STATUS.get(ev["kind"], "expire") if ev else "expire"
+        status, confirmed = confirm_arm(d, plan, stop, targets, ev, until, k_until)
         opened, start = d.o[d.d0], d.t[d.d0]
-        arms = {"brut": (_plan(opened, stop, targets), start, start + BAR, "market", opened, (d.first, d.last))}
+        arms = {"brut": (_plan(opened, stop, targets), start, start + BAR, "market", opened, (d.first, d.last)),
+                "confirme": confirmed}
         statuses = {"brut": status, "confirme": status}
-        if status == "confirme":
-            decided = ev["t"] + BAR
-            arms["confirme"] = (_plan(ev["trigger"], stop, targets), decided, until, "stop",
-                                d.c[bisect_left(d.t, ev["t"])], (d.first, max(d.first, k_until)))
-        else:  # pas d'ordre : la ligne garde l'entrée du plan et l'heure où le GO est tombé
-            arms["confirme"] = (_plan(plan["entry"], stop, targets), ev["t"] + BAR if ev else until, until, None,
-                                None, None)
         for filt, name in GO_FILTERS.items():  # n° 8 : le même ordre, seulement si le filtre passe
             if STRATEGIES[name]["go"] != variant:
                 continue
@@ -1333,6 +1361,10 @@ def go_rows(d: Day, symbol: str, plans: dict, rank=None, gap: float | None = Non
                 "filtre" if ok is False else "indetermine"
             arms[arm] = arms["confirme"] if statuses[arm] == "confirme" else \
                 (arms["confirme"][0], arms["confirme"][1], until, None, None, None)
+        if variant in GO_TP1:  # n° 13 : la même confirmation, autre annulation sur le TP1
+            arm, rule = GO_TP1[variant]
+            statuses[arm], arms[arm] = confirm_arm(d, plan, stop, targets,
+                                                   confirm_event(d, plan["entry"], stop, targets, rule), until, k_until)
         for arm, (p, decided, entry_until, order, last, window) in arms.items():
             name = f"go_{arm}{suffix}"
             entry = p["entry"]

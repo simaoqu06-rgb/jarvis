@@ -87,8 +87,8 @@ def tick_minute(m, trades, quotes, q0):
 
 
 def test_declaration_et_essais():
-    assert ST.LATEST_DECLARATION == OUV.NUMERO == 12 and ST.DECLARATION == ST.CRYPTO_DECLARATION == 11
-    assert [t["strategy"] for t in ST.N12_TRIALS] == list(OUV.TRIALS) and len(ST.trials()) == 163
+    assert OUV.NUMERO == 12 and ST.CRYPTO_DECLARATION == 11   # n° 13 (29/10) : bras GO, lignes du labo v2
+    assert [t["strategy"] for t in ST.N12_TRIALS] == list(OUV.TRIALS) and len(ST.trials()) == 165
     assert {t["exit"] for t in ST.N12_TRIALS} == {"r_frais"} and {t["market"] for t in ST.N12_TRIALS} == {"stock"}
     assert set(OUV.TRIALS) < set(OUV.LABELS) and len(OUV.LABELS) == 11 and set(OUV.ORB_TRIALS) < set(OUV.TRIALS)
     assert (OUV.SIP_TOP, OUV.SIP_RVOL_DAYS, OUV.SIP_RVOL_MIN, OUV.SIP_STOP_ATR) == (20, 14, 1.0, 0.10)
@@ -585,7 +585,7 @@ def test_seances_calculables_et_bloc_scelle(monkeypatch):
     assert OUV.progress(db.conn, SETTLED) == {"seances_a_calculer": 1, "seances_nouvelles": 0, "seances_calculees": 0,
                                               "bougies_9h30": {"lues": 25, "utiles": 25}}
     n = STATUS.declaration_state(db.conn)                            # à l'heure réelle, NEXT est calculable aussi
-    assert n["seances_n12"] == 2 and not n["complete"] and n["lignes_v2"] == 11
+    assert n["seances_n12"] == 2 and not n["complete"] and n["lignes_v2"] == ST.DECLARATION == 13
     assert "2 séances n° 12 à calculer (bougies de 9 h 30 : 25 séances lues sur 26)" in STATUS.declaration_line(n)
     db.set(OUV.JOB, DAY.isoformat(), {"mesure": OUV.MESURE + 1})
     assert OUV.ready_days(db, SETTLED) == [DAY]                      # calculée sous une autre mesure : refaite
