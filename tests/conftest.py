@@ -67,3 +67,11 @@ def journal_des_actions_du_cockpit_coupe(monkeypatch):
     from app.web import cockpit_actions
 
     monkeypatch.setattr(cockpit_actions, "ACTIONS_LOG", None)
+
+
+@pytest.fixture(autouse=True)
+def page_a_faire_en_memoire(monkeypatch):
+    """La page À faire du cockpit (data/attention.json) n'est jamais lue ni écrite par les tests."""
+    from app.web import attention
+
+    monkeypatch.setattr(attention, "book", attention.AttentionBook(None))

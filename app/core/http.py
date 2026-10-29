@@ -1,6 +1,6 @@
 """Appels HTTP communs : délai de 8 secondes, User-Agent identifiant, erreurs uniformes."""
 import time
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -42,12 +42,32 @@ async def _get_raw(url: str, params: dict | None, headers: dict | None, accept: 
     return response
 
 
-async def get_json(url: str, params: dict | None = None, headers: dict | None = None) -> Any:
-    response = await _get(url, params, headers, "application/json")
+async def get_json(url: str, params: dict | None = None, headers: dict | None = None,
+                   refusal: Callable[[Any], str | None] | None = None) -> Any:
+    """JSON d'une source. `refusal(payload)` repère un refus du service caché dans une réponse HTTP 200 (Twelve Data :
+    clé refusée, crédits épuisés) : son texte (« HTTP 401 … ») est noté comme un échec dans la santé des sources, puis
+    levé en SourceError."""
+    if refusal is None:
+        response = await _get(url, params, headers, "application/json")
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise SourceError("réponse qui n'est pas du JSON") from exc
+    started = time.monotonic()
     try:
-        return response.json()
-    except ValueError as exc:
-        raise SourceError("réponse qui n'est pas du JSON") from exc
+        response = await _get_raw(url, params, headers, "application/json")
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise SourceError("réponse qui n'est pas du JSON") from exc
+        refused = refusal(payload)
+        if refused:
+            raise SourceError(refused)
+    except SourceError as exc:
+        sources_health.fail(url, exc, started)
+        raise
+    sources_health.ok(url, started)
+    return payload
 
 
 async def get_text(url: str, params: dict | None = None, headers: dict | None = None) -> str:

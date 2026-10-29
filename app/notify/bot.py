@@ -104,6 +104,26 @@ MAX_ATTEMPTS = 12  # ensuite on abandonne l'envoi privé : la proposition reste 
 LAB_TICK = 30.0  # secondes entre deux passages de l'envoi du labo (message du matin, annonces)
 lab_texts: asyncio.Queue = asyncio.Queue()  # annonces du labo (méthode en place, challenger retiré)
 trade_texts: asyncio.Queue = asyncio.Queue()  # alertes des trades suivis (TP, stop, sortie anticipée, clôture)
+# Connexion du bot vue par la page À faire du cockpit (connecté, depuis quand, dernière erreur ; jamais le jeton)
+status: dict = {"connecte": False, "depuis": None, "derniere_erreur": None, "erreur_type": None, "erreur_le": None}
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def note_connected(on: bool) -> None:
+    if status["connecte"] != on or status["depuis"] is None:
+        status.update(connecte=on, depuis=_now_iso())
+
+
+def note_error(exc: BaseException) -> None:
+    """Erreur de connexion (jeton refusé : `LoginFailure`) : le type et un texte court, sans le jeton."""
+    from app.core.sources_health import scrub
+
+    note_connected(False)
+    status.update(derniere_erreur=scrub(f"{type(exc).__name__}: {exc}")[:200], erreur_type=type(exc).__name__,
+                  erreur_le=_now_iso())
 
 
 def offer_lab_text(text: str) -> None:
@@ -691,6 +711,18 @@ async def run(lock: asyncio.Lock | None = None) -> None:
             delay = min(delay * 2, RETRY_MAX)
 
     @client.event
+    async def on_ready():
+        note_connected(True)
+
+    @client.event
+    async def on_resumed():
+        note_connected(True)
+
+    @client.event
+    async def on_disconnect():
+        note_connected(False)
+
+    @client.event
     async def on_interaction(interaction):
         custom_id = (interaction.data or {}).get("custom_id", "")
         if not custom_id.startswith(PROPOSAL_PREFIX):
@@ -756,6 +788,7 @@ async def run(lock: asyncio.Lock | None = None) -> None:
     try:
         await client.start(config.secret(TOKEN_NAME))
     finally:
+        note_connected(False)
         sender.cancel()
         lab_sender.cancel()
         trade_sender.cancel()

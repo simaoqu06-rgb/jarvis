@@ -58,6 +58,20 @@ async def _spend() -> None:
         await asyncio.sleep(wait)
 
 
+REFUSAL_CODES = {401, 403, 429}  # clé refusée, accès refusé, crédits épuisés : la source refuse, quel que soit le symbole
+
+
+def refusal(payload) -> str | None:
+    """Refus du service dans une réponse HTTP 200 (`{"status": "error", "code": 401, …}`), noté comme un échec de la
+    source (rubrique « À faire ») ; None pour une erreur propre au symbole (symbole inconnu : la source a répondu)."""
+    if not isinstance(payload, dict) or payload.get("status") != "error":
+        return None
+    code = payload.get("code")
+    if isinstance(code, int) and (code in REFUSAL_CODES or code >= 500):
+        return f"HTTP {code} {payload.get('message') or 'erreur'}"[:160]
+    return None
+
+
 def _failed(symbol: str, error: Exception) -> dict:
     """Cours manquant pour un symbole : même forme, valeurs vides, et l'erreur en clair."""
     return {"symbol": symbol, "name": None, "exchange": None, "currency": None, "price": None, "open": None,
@@ -67,7 +81,7 @@ def _failed(symbol: str, error: Exception) -> dict:
 
 async def _quote(symbol: str, apikey: str) -> dict:
     await _spend()
-    q = await get_json(URL, params={"symbol": symbol, "apikey": apikey})
+    q = await get_json(URL, params={"symbol": symbol, "apikey": apikey}, refusal=refusal)
     if q.get("status") == "error":
         raise SourceError(f"{symbol} : {q.get('message', 'erreur')}")
     timestamp = q.get("last_quote_at") or q.get("timestamp")
@@ -127,7 +141,8 @@ async def candles(symbol: str, interval_min: int, outputsize: int = 5000, apikey
     else:
         interval = f"{interval_min}min" if interval_min < 60 else f"{interval_min // 60}h"
     payload = await get_json(
-        SERIES_URL, params={"symbol": symbol, "interval": interval, "outputsize": outputsize, "apikey": key}
+        SERIES_URL, params={"symbol": symbol, "interval": interval, "outputsize": outputsize, "apikey": key},
+        refusal=refusal,
     )
     if payload.get("status") == "error":
         raise SourceError(f"{symbol} : {payload.get('message', 'erreur')}")
