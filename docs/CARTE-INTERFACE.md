@@ -335,8 +335,12 @@ dates en **ISO-8601 UTC**. Valeur inconnue = `null` (jamais 0). En-têtes de sé
  "plans_today": {"du_jour": true, "scan_at": "…", "picks": [{"symbol": "…", "verdict": "GO", "composite": 7.1,
                  "raisons": [], "entry": 0, "stop": 0, "targets": [], "confirmation": "confirmé", "declencheur": 0}],
                  "note_composite": "priorité, pas une probabilité"},
- "killmode": {"actif": false, "depuis": "…"}}
+ "killmode": {"actif": false, "depuis": "…"},
+ "attention": {"total": {"action": 1, "probleme": 0, "info": 2}, "commun": {"…": 0}, "trades": {"…": 0}, "paper": {"…": 0}},
+ "attention_top": [{"id": 12, "key": "deploy:pending", "kind": "action", "space": "commun", "title": "…", "last_seen": "…"}]}
 ```
+`attention` compte les constats ouverts et non rangés de la page À faire (§8), tous espaces ; `attention_top` en donne
+les trois premiers dans l'ordre de la page.
 
 ### 4.2 `GET /api/cockpit/instruments?space=`
 `{"instruments": [{"symbol", "market": "stock|crypto", "price" (USD), "change_pct" (% sur la clôture de la veille),
@@ -373,7 +377,10 @@ casser les autres.
 ### 4.8 `GET /api/cockpit/health` et `GET /api/cockpit/diagnostics`
 Santé : voir §3.9. Diagnostic : pièce jointe JSON (`Content-Disposition: attachment`) : boucles, labo, sources,
 compteurs, `cles_presentes` (booléens), `variables_jarvis_definies` (**noms seulement**), erreurs récentes. Aucun
-secret, aucune valeur de variable (testé).
+secret, aucune valeur de variable (testé). Depuis la rubrique À faire (§8), les deux portent aussi `bot` (connecté,
+depuis quand, dernière erreur expurgée), `version_deployee` (commit du disque, empreintes du code, comparaison avec
+`main`) et `page_a_faire` (dernière vérification ; dans le diagnostic, les constats ouverts : clé, type, portée, dates,
+jamais leurs preuves).
 
 ### 4.9 Bloc position (commun)
 ```json
@@ -538,3 +545,145 @@ lente), calendrier sans aucune valeur connue → `erreur`, `couvre_jusqu_au`, au
 `/journal` : GO d'une séance passée marqués `du_jour: false`. Contrôle à la main
 des huit vues dans Chromium à 1440, 1100 et 390 px, dans les deux espaces : zéro erreur JavaScript, zéro violation
 CSP, zéro requête en échec, aucun débordement horizontal.
+
+---
+
+## 8. Rubrique « À faire » (prompt corrigé du 29/10/2026)
+
+Source : `/mnt/project-files/cockpit/a-faire/prompt-a-faire-corrige-2026-10-29.md` (revue du prompt de Meme Radar,
+verdict Améliorer). Ce que Simão doit faire de son côté, les problèmes que JARVIS voit dans son propre fonctionnement,
+et ce qui est bon à savoir. **PR « À faire » 1 ✓** : moteur, stockage, routes et instrumentations
+(`app/web/attention.py`) ; **PR « À faire » 2** : la vue, le badge du rail et la bannière du Cockpit.
+
+### 8.1 Modèle
+
+Un constat = `{id, key, kind, space, title, detail, steps, evidence, first_seen, last_seen, resolved_at, ack_at}`.
+- `kind` : `action` (Simão doit faire quelque chose), `probleme` (défaut ; JARVIS continue si possible), `info`.
+- `space` : `commun`, `trades` (Mes trades), `paper` (Papier). Ordre de la page : action, problème, info ; à rang égal
+  Mes trades, commun, Papier ; le plus récent d'abord ; rangés puis réglés en bas.
+- `steps` : texte, plus au plus **une** commande à copier (`cmd`), **une** action (`action` ∈ `proposal_approve`,
+  `proposal_refuse`, `veto`, les mêmes que §4.10) ou **une** vue (`go`). Validé à la création (`item`) : un constat
+  ne peut pas proposer une autre action ni une vue inconnue. Aucun champ de saisie, jamais de clé à coller.
+- `evidence` : la donnée qui a déclenché le constat, expurgée (`key=…`, `token=…`, `Bearer …` masqués).
+- Cycle : clé nouvelle → nouvelle ligne ; clé encore vue → mise à jour (`last_seen`) ; clé disparue → `resolved_at`.
+  Une récidive ouvre une nouvelle ligne. « C'est fait » / « Masquer » posent `ack_at` et **ne ferment rien** : un
+  constat rangé encore vu plus de 2 min après porte `toujours_constate`. Réglés renvoyés 72 h ; lignes gardées 30 jours,
+  2000 au plus (`data/attention.json`, écrit de façon atomique ; illisible → mis de côté en `attention.illisible`).
+
+### 8.2 Moteur
+
+`scheduler.tick_attention`, toutes les minutes, **sans le verrou global** (`locked=None` : ni verrou ni sauvegarde de
+l'état des alertes), pour ne jamais attendre derrière un job bloqué. Chaque règle est une fonction
+`(ctx, now) -> list | None` qui lit l'état en mémoire ou sur disque : **aucun appel réseau** (jamais Twelve Data),
+**rien envoyé sur Discord**, rien ne change la stratégie, la taille, le grade, un filtre ni le Killmode. `None` = pas
+d'avis (délai de grâce de 3 min après le démarrage, comparaison GitHub pas encore faite) : ses constats ouverts restent
+tels quels. Une règle qui plante devient le constat `rule:<nom>` et garde ses constats. La base du labo (4,7 Go) est
+lue en lecture seule dans un fil à part (`lab_snapshot` : garde du Labo 1 et `lab_events` des 72 dernières heures).
+Calculés à la lecture : `attention:stale` (aucun passage depuis 3 min) et `attention:file` (historique illisible au
+démarrage). Un JARVIS entièrement arrêté ne sert plus la page : c'est la bannière « API muette » qui le dit.
+
+### 8.3 Catalogue
+
+| Clé | Type | Portée | Déclencheur (donnée) | Se ferme quand |
+|---|---|---|---|---|
+| `lab:down` | action | commun | `lab_heartbeat` absent ou > 30 min | le worker rebat |
+| `lab:base` | problème | commun | base du labo illisible, ou absente alors que le worker bat | base relue |
+| `lab:v1_pause` | problème | commun | `progress.garde_v1` ≠ ok (Labo 1 en pause) | garde repassée |
+| `council:decision:<id>` | info | commun | `lab_events` (bascule, retrait, council, veto, reprise du Labo 1) des 72 h ; qui a décidé : `method_versions.settings.promu_par` pour une bascule. Bouton `veto` seulement si la décision la plus récente sur la méthode est une décision du council (une promotion que Simão a approuvée n'en a pas : `apply_veto` viserait autre chose) | 72 h passées |
+| `loop:stuck:<boucle>` | problème (action pour le suivi s'il y a un trade crypto ouvert, ou un trade action en séance) | trades pour le suivi, paper pour le journal des recommandations, commun sinon | aucun passage **fini** (`at` + `duree_s`) depuis max(180 s, 3 × période), sauf passage en cours depuis moins de 15 min (`scheduler.running` : le scanner du matin peut durer) ; passage en cours depuis plus de 15 min ; boucle jamais passée après ce délai | la boucle repasse |
+| `loop:failing:<boucle>` | problème | idem | `last_runs[].echecs_suite` ≥ 3 | un passage réussi |
+| `errors:<module>` | problème | commun | ≥ 3 ERROR/CRITICAL du même module en 30 min (`recent_errors`, hors planificateur et page À faire) | fenêtre passée |
+| `disk` | problème ≥ `JARVIS_DISK_ALERT_PCT`, action ≥ 90 % | commun | `shutil.disk_usage` de `data/` | place libérée |
+| `source:<nom>` | problème | commun | ≥ 3 échecs d'affilée, premier échec il y a plus de 5 min, dernière tentative de moins d'1 h | un succès |
+| `internet` | problème | commun | ≥ 3 sources en panne ensemble (remplace leurs constats) | idem |
+| `auth:<clé>` | action | commun | HTTP 401 (≥ 2 d'affilée) d'une source à clé : Twelve Data (y compris dans une réponse 200), Finnhub, Alpaca | un succès |
+| `quota:twelvedata` | info ≥ 80 %, problème à 100 % ou après 3 refus 429 | commun | `twelvedata.credits_today()` (processus web seulement) | minuit à New York |
+| `key:missing:<nom>` | action (info pour `SEC_USER_AGENT`) | commun | `config.secret` vide | clé ajoutée |
+| `notifications:off`, `discord:bot:off` | info | commun | `scheduler.enabled()` / `bot.enabled()` faux | réglage remis |
+| `discord:outbox` | problème | commun | message le plus ancien de la file en attente depuis > 10 min | file vidée |
+| `discord:webhook` | action | commun | dernier refus définitif de Discord en 401, 403 ou 404 (webhook supprimé), plus récent que le dernier envoi réussi : le message refusé n'est pas gardé, la file ne grossit pas | un envoi réussi |
+| `auth:discord`, `discord:intent`, `discord:bot` | action, action, problème | commun | `bot.status` déconnecté depuis > 5 min (`LoginFailure`, `PrivilegedIntentsRequired`, autre) | reconnexion |
+| `routine:soir` | action | commun | `routines_watch.soir_alert` (sans repère : pas d'avis) | dépôt du council |
+| `routine:recherche` | action | commun | `routines_watch.recherche_alert` | verdicts déposés |
+| `deploy:rebuild` | action | commun | empreinte du code de l'image ≠ celle du dépôt monté (`git pull` sans `--build`) depuis plus de 10 min (pendant une construction, l'ancien conteneur voit déjà le nouveau code) | reconstruction |
+| `deploy:pending` | action | commun | GitHub : `main` en avance sur le commit du disque, avec des fichiers de `app/`, `requirements.txt`, `Dockerfile` ou `docker-compose.yml` | déploiement |
+| `deploy:unknown`, `deploy:ahead` | info | commun | dépôt non monté, GitHub injoignable ou limité ; commit absent de `main` | lecture rétablie |
+| `exit:undeclared:<id>` | action | trades | trade fermé par le suivi (stop, TP) sans `corrige`, depuis moins de 7 jours | `!sortie` déclarée |
+| `kill:open_after_close:<id>` | action | trades | KILL encore ouvert 5 min après la clôture de sa séance | vente déclarée |
+| `advice:<id>` | action | trades | conseil du jour SORTIR ou ALLÉGER gardé dans le trade (`conseils`) | jour suivant ou trade fermé |
+| `exit:signals:<id>` | action | trades | `exit_signals` du trade ouvert | signes disparus |
+| `quote:stale:trades` | problème | trades | cotation périmée au double du seuil du cockpit (crypto 2 min, action 8 min **en séance**, sauf les 5 premières minutes : la cotation date de la veille jusqu'à la première bougie) | cotation revenue |
+| `tp:late:<id>:<tp>` | info | trades | objectif au-delà de `eta_latest`, pas atteint | atteint ou trade fermé |
+| `risk:day_stop`, `risk:open` | info | trades | `risk()` : R net du jour ≤ −3 R ; risque ouvert > budget | lendemain ; risque redescendu |
+| `grade:stale` | info (pas encore calculé) ou problème (périmé) | commun | `risk().grade_age_h` > `grade_max_age_h` ; muet si `lab:down` | grade réécrit |
+| `proposal:<id>`, `proposals:more` | action | commun | `PR.proposals.pending()` (8 au plus, le reste résumé) ; boutons `proposal_approve` / `proposal_refuse` | décision |
+| `rule:<nom>`, `attention:stale`, `attention:file` | problème | commun | §8.2 | règle réparée, moteur reparti |
+
+Commandes : `ssh root@2.31.19.106` (le serveur de `DEPLOY.md` ; `JARVIS_SSH_CIBLE` le remplace si elle est posée),
+`cd /root/jarvis`, puis la commande du constat. Changer une clé : `nano .env` (seulement la ligne
+nommée), puis `docker compose up -d --force-recreate` (un `restart` ne relit pas `.env`).
+
+### 8.4 Contrat d'API
+
+- `GET /api/cockpit/attention?space=all|commun|trades|paper` (défaut `all`, autre valeur → 400) :
+  `{"generated_at", "space", "items": [constat + {"live", "toujours_constate"}], "counts": {"total"|espace: {"action",
+  "probleme", "info"}}, "last_check_at", "tronque", "note"}`. Au plus 200 lignes, calculés à la lecture en tête
+  (`id: null`, pas rangeables).
+- `POST /api/cockpit/attention/{id}/ack` et `/unack` : jeton CSRF (cookie + `X-CSRF-Token`, sinon 403), même garde
+  « autre site » que les actions ; constat inconnu, réglé ou déjà dans cet état → 404. Chaque appel est noté dans le
+  journal des actions du cockpit (`attention_ack`, `attention_unack`).
+- `state` : `attention`, `attention_top` (§4.1).
+
+### 8.5 Instrumentations ajoutées
+
+- `core/sources_health.py` : `dernier_resultat` (le statut ne compare plus deux heures à la seconde), `echecs_suite`,
+  `premier_echec`, `derniere_tentative`, `code` (HTTP) ; texte d'erreur expurgé (`scrub`).
+- `core/http.get_json(refusal=…)` et `twelvedata.refusal` : un refus de Twelve Data dans une réponse HTTP 200 (clé
+  refusée 401, crédits 429, panne 5xx) est noté comme un échec de la source ; une erreur propre au symbole (400, 404,
+  et 403 « symbole hors de ton offre ») non.
+- `scheduler._loop` : `echecs_suite` et `duree_s` (aussi en échec) dans `last_runs`, passage en cours dans
+  `scheduler.running` ; `_run(locked=None)`.
+- `notify/bot.status` : connecté, depuis quand, dernière erreur (type et texte expurgé).
+- `core/outbox.py` : `derniere_erreur` de chaque message (adresse du webhook masquée), `oldest()`, dernier refus
+  définitif (`last_refusal`) et dernier envoi réussi (`last_ok_at`), en mémoire.
+- `core/version.py` : empreinte (SHA-256 de `app/` et `requirements.txt`, sans `__pycache__`) de l'image au
+  démarrage contre celle du dépôt monté en lecture seule sous `/repo` (`docker-compose.yml`) ; `HEAD` lu sans git et
+  sans jamais lire `.git/config` ; comparaison `GET /repos/{dépôt}/compare/{commit}...main` (API publique, jeton
+  `JARVIS_GITHUB_TOKEN` en lecture seule seulement si le dépôt redevient privé) toutes les 30 min ou dès que le commit
+  du disque change.
+
+### 8.6 Écarts avec le prompt corrigé
+
+| Prompt corrigé | Fait | Pourquoi |
+|---|---|---|
+| `lab:error` (erreur de `lab_status.status()`) | `lab:base` et `lab:v1_pause` | `status()` est trop lourd pour tourner chaque minute ; la lecture légère dit la même chose, et la pause du Labo 1 méritait son constat |
+| `errors:<module>` : WARNING et plus | ERROR et CRITICAL | les WARNING des bascules de source (Twelve Data → Alpaca) reviennent chaque minute : du bruit |
+| `auth` sur 401 **ou 403** | 401 seulement | un 403 d'Alpaca ou de Twelve Data dit « pas dans ton offre » ou « symbole non couvert », pas « clé morte » |
+| `discord:bot` | quatre constats | jeton refusé, intention « Message Content » coupée, déconnexion simple et bot non configuré n'ont pas les mêmes étapes |
+| `routine:soir:<date>`, `routine:recherche:<date>` | `routine:soir`, `routine:recherche` | une seule ligne par routine, fermée au dépôt suivant |
+| `deploy:rebuild` : `HEAD` du disque ≠ version démarrée | empreinte du code de l'image ≠ empreinte du disque | un conteneur relancé (`restart`, `--force-recreate`) après un `git pull` relit le nouveau `HEAD` alors qu'il tourne sur l'ancienne image : faux « à jour » |
+| `deploy:pending` pour tout commit de `main` | seulement si un fichier de `app/`, `requirements.txt`, `Dockerfile` ou `docker-compose.yml` change | une PR de docs ou de tests n'a rien à déployer |
+| `exit:undeclared` : `close` sans raison déclarée | `stop` et `tp…` | un `close` ne vient que d'une clôture faite par Simão (route ou `!sortie`) : déjà déclarée |
+| `earnings:<symbole>`, `sec8k:<symbole>` | `advice:<id>` | le conseil avant la clôture (`advice.py`) dit déjà SORTIR avant des résultats, en prix ; le cache de l'agenda n'est rempli que si la vue Agenda a été ouverte, et le moteur ne doit déclencher aucun appel |
+| `reco:stalled` | `loop:stuck` / `loop:failing` du journal des recommandations (portée Papier) | même cause, même étape |
+| cotation périmée en Papier | non | les recommandations se lisent en bougies de 5 min : une alerte à 2 min serait du bruit |
+
+Manques assumés : le worker du labo a ses propres appels et crédits Twelve Data, invisibles ici ; le prix
+d'exécution réel chez IBKR n'est connu que par `!sortie`.
+
+### 8.7 Garde-fous vérifiés par les tests (`tests/test_attention.py`)
+
+Base saine → aucun constat ; un constat ne peut proposer qu'une action de la liste blanche ou une vue connue, et sa
+preuve ne garde aucune clé ; commande `ssh` vers le serveur de `DEPLOY.md` (`JARVIS_SSH_CIBLE` conforme la remplace) ; worker arrêté ou bloqué, base absente, garde
+du Labo 1, décisions du council (veto sur la dernière seulement, plus après un veto) ; boucle du suivi bloquée (action
+avec un trade ouvert), boucle qui échoue, délai de grâce qui garde les constats ; erreurs répétées hors planificateur ;
+disque ; source seule en panne, grâce de 5 min, source plus appelée, trois sources → un seul constat réseau, 403 de la
+SEC ou d'Alpaca ≠ clé, clé Twelve Data refusée dans une réponse 200 (sans la clé dans la page), quota, clés absentes ;
+notifications coupées, file Discord bloquée, bot déconnecté (jeton refusé) ; routines ; déploiement (en attente, docs
+seulement, pull sans reconstruction, inconnu, pas encore comparé) ; `HEAD` lu sans git (refs, packed-refs, référence
+piégée), empreinte du code, comparaison GitHub par une fausse API (PR fusionnées et écrasées, sans jeton, 404) ; sortie
+à déclarer fermée par `!sortie`, KILL après la clôture, aucune cotation d'action hors séance, cotation périmée en séance,
+conseil et signes de sortie, arrêt du jour et risque ouvert, grade périmé, propositions ; règle qui plante, cycle de
+vie (rangé, toujours constaté, récidive, purge à 30 jours), ordre et compteurs, moteur arrêté, fichier illisible,
+relecture au redémarrage ; **le moteur n'envoie rien** (file Discord et MP vides) et **ne prend pas le verrou** ;
+routes (CSRF, autre site, 404, 400, journal) ; `state`, santé et diagnostic sans jeton.

@@ -317,6 +317,16 @@ vert dès le premier passage du suivi, une minute environ, et la vue Santé mont
 `docker image prune -f` efface les anciennes versions de l'image que chaque mise à jour laisse derrière elle
 (images « sans nom », plus utilisées par aucun conteneur). Les données de `data/` ne sont pas touchées.
 
+**Savoir s'il y a quelque chose à déployer** : la rubrique « À faire » du cockpit le dit. Le dossier `/root/jarvis`
+est monté en lecture seule dans le conteneur `jarvis` (sous `/repo`, `docker-compose.yml`) : JARVIS compare le code qui
+tourne à celui du dossier (`git pull` fait sans `--build` → « Code récupéré mais pas reconstruit »), puis le commit du
+dossier à `main` sur GitHub, toutes les 30 min (« N PR fusionnées pas encore déployées », seulement si elles touchent
+au code). Il ne lit jamais `.git/config` ni `.env` dans ce montage. Le montage prend effet au premier
+`docker compose up -d --build` qui suit (le conteneur est recréé). Deux réglages facultatifs dans `.env` :
+- `JARVIS_SSH_CIBLE=root@<adresse du serveur>` : seulement si le serveur change ; sans elle, les commandes `ssh` de
+  la page visent `root@2.31.19.106` ;
+- `JARVIS_GITHUB_TOKEN` (jeton en **lecture seule**) : seulement si le dépôt redevient privé ; public, il ne sert pas.
+
 ## Ménage automatique
 
 JARVIS vérifie le disque toutes les 30 min et prévient sur Discord au-dessus de 75 %

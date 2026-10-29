@@ -16,6 +16,9 @@ services:
     env_file: .env
     volumes:
       - ./data:/app/data
+      # Page « À faire » du cockpit : le dépôt en lecture seule, pour comparer le code qui tourne à celui du disque
+      # (git pull sans reconstruction) et le commit du disque à main sur GitHub (PR pas encore déployées)
+      - ./:/repo:ro
     # Accessible seulement depuis le serveur lui-même (pas d'accès public aux routes)
     ports:
       - "127.0.0.1:8000:8000"

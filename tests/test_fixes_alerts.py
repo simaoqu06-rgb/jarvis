@@ -254,7 +254,7 @@ async def test_propositions_en_attente_relues_au_demarrage(monkeypatch):
 async def test_twelvedata_un_ticker_en_erreur_n_arrete_pas_les_autres(monkeypatch):
     monkeypatch.setattr(twelvedata, "_calls", twelvedata.deque())
 
-    async def get_json(url, params=None, headers=None):
+    async def get_json(url, params=None, headers=None, refusal=None):
         if params["symbol"] == "ZZZZ":
             return {"status": "error", "message": "symbole inconnu"}
         return {"symbol": params["symbol"], "close": "10", "percent_change": "1.5"}
@@ -276,7 +276,7 @@ async def test_twelvedata_respecte_8_par_minute(monkeypatch):
         waits.append(seconds)
         clock["t"] += seconds
 
-    async def get_json(url, params=None, headers=None):
+    async def get_json(url, params=None, headers=None, refusal=None):
         return {"symbol": params["symbol"], "close": "1"}
 
     monkeypatch.setattr(twelvedata.time, "monotonic", lambda: clock["t"])

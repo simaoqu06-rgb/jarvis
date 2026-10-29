@@ -96,6 +96,11 @@ aide `?`.
 - L'ancien cockpit reste sous `/cockpit/ancien` et la page du labo sous `/cockpit/labo` jusqu'à ta validation.
 - Un résumé des trades suivis est réécrit chaque minute dans un message Discord (à épingler une fois). Tout tourne sur ton
   serveur : aucun token Claude n'est consommé.
+- **À faire** (moteur et API ; la vue arrive avec la PR suivante) : chaque minute, JARVIS vérifie son propre
+  fonctionnement (worker du labo, boucles, sources, clés, Discord, routines Claude, version déployée) et tes trades
+  (sortie à déclarer, KILL après la clôture, conseil du jour, signes de sortie) et liste ce que tu dois faire, avec la
+  preuve et la commande exacte à copier. Un constat se ferme tout seul quand sa cause disparaît. Aucun appel réseau,
+  rien sur Discord : `GET /api/cockpit/attention` (docs/CARTE-INTERFACE.md §8).
 - Carte écran ↔ données et contrat de `/api/cockpit/*` : [docs/CARTE-INTERFACE.md](docs/CARTE-INTERFACE.md).
 
 **Si la page ne s'ouvre pas sur l'iPhone** : coupe le **Relais privé iCloud** (Réglages > ton nom > iCloud >

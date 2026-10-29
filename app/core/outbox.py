@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,11 +23,22 @@ MAX_AGE = timedelta(days=3)
 MAX_ATTEMPTS = 120  # environ deux heures à un passage par minute
 
 
+URL_RE = re.compile(r"https?://\S+")
+
+
+def _short(exc: Exception) -> str:
+    return URL_RE.sub("[adresse masquée]", f"{type(exc).__name__}: {exc}")[:160]
+
+
 class Outbox:
     def __init__(self, path: str | None, split: Callable[[str], list[str]] | None = None):
         self.path = Path(path) if path else None
         self.split = split or (lambda text: [text])
         self.items: list[dict] = []
+        # Page À faire du cockpit : un refus définitif retire le message, la file ne grossit pas ; on garde donc le
+        # dernier refus (webhook supprimé : HTTP 404) et le dernier envoi réussi, en mémoire
+        self.last_refusal: dict | None = None
+        self.last_ok_at: str | None = None
         self._lock = asyncio.Lock()  # deux passages simultanés ne posteraient pas deux fois le même morceau
         if self.path and self.path.exists():
             try:
@@ -94,10 +106,13 @@ class Outbox:
                     self.save()  # le morceau posté ne sera jamais renvoyé, même après un redémarrage
             except Exception as exc:
                 item["attempts"] += 1
+                item["derniere_erreur"] = _short(exc)  # page À faire du cockpit (jamais l'adresse du webhook)
                 log.warning("Envoi « %s » en échec (morceau %d/%d, tentative %d) : %s", item["kind"],
                             item["sent"] + 1, len(item["parts"]), item["attempts"], exc)
                 if getattr(exc, "permanent", False) or item["attempts"] >= MAX_ATTEMPTS:
                     log.error("Message « %s » abandonné : %s", item["kind"], exc)
+                    self.last_refusal = {"at": now.isoformat(timespec="seconds"), "status": getattr(exc, "status", None),
+                                         "erreur": item["derniere_erreur"]}
                     self._drop(item)
                     self.save()
                     continue  # refus définitif : on passe au suivant
@@ -105,8 +120,13 @@ class Outbox:
                 break  # panne passagère : on garde l'ordre et on réessaie au prochain passage
             self._drop(item)
             self.save()
+            self.last_ok_at = now.isoformat(timespec="seconds")
             done += 1
         return done
+
+    def oldest(self) -> dict | None:
+        """Le message qui attend depuis le plus longtemps (page À faire du cockpit)."""
+        return min(self.items, key=lambda i: i.get("created_at") or "", default=None)
 
     def _drop(self, item: dict) -> None:
         if item in self.items:  # peut déjà être sorti de la file (file pleine pendant l'envoi)

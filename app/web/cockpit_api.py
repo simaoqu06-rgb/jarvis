@@ -25,11 +25,12 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import JSONResponse
 
 from app import config, scheduler
-from app.core import sources_health
+from app.core import sources_health, version
 from app.core.http import SourceError
 from app.lab import db as lab_db
 from app.lab import grade as lab_grade
 from app.lab import heartbeat
+from app.notify import bot
 from app.sources import alpaca, twelvedata
 from app.trading import calendar as CAL
 from app.trading import confirm as CONFIRM
@@ -549,11 +550,14 @@ async def state(space: str = "paper"):
     space = _space(space)
     now = datetime.now(timezone.utc)
     positions = open_positions(space, now)
+    from app.web import attention  # import tardif : la page À faire importe ce module
+
+    todo = attention.summary(now)
     return {"generated_at": now.isoformat(timespec="seconds"), "space": space, "jarvis": loops(now),
             "lab": lab_heartbeat(now), "portfolio": portfolio(space, now, positions), "positions_open": positions,
             "risk": risk(now), "proposals_pending": _pending_proposals(), "market_sessions": market_sessions(now),
             "sources": sources_short(), "agenda_today": agenda_today(now), "plans_today": plans_today(now),
-            "killmode": _killmode_state()}
+            "killmode": _killmode_state(), "attention": todo["counts"], "attention_top": todo["top"]}
 
 
 def _killmode_state() -> dict:
@@ -1143,11 +1147,29 @@ async def health():
             "sources": sources_short(), "planificateur": loops(now), "labo": lab_heartbeat(now),
             "discord": {"notifications": scheduler.enabled(), "file_en_attente": len(items),
                         "plus_ancien": min((i.get("created_at") or "" for i in items), default=None) or None},
+            "bot": dict(bot.status) | {"active": bot.enabled()}, "version_deployee": version.snapshot(),
+            "page_a_faire": {"derniere_verification": _attention_check()},
             "disque": _disk(), "erreurs_recentes": list(recent_errors.items)[::-1]}
+
+
+def _attention_check() -> str | None:
+    from app.web import attention  # import tardif
+
+    return attention.book.last_check_at
 
 
 ENV_KEYS = ("TWELVEDATA_API_KEY", "FINNHUB_API_KEY", "ALPACA_API_KEY", "ALPACA_SECRET_KEY", "DISCORD_WEBHOOK_URL",
             "DISCORD_BOT_TOKEN", "JARVIS_LAB_API_KEY")
+
+
+def _attention_diag(now: datetime) -> dict:
+    """Constats ouverts de la page À faire (clés, types, depuis quand) : jamais leurs preuves, qui restent sur la page."""
+    from app.web import attention  # import tardif
+
+    rows = attention.book.open_rows()
+    return {"derniere_verification": attention.book.last_check_at, "erreur_fichier": attention.book.load_error,
+            "ouverts": [{k: r.get(k) for k in ("key", "kind", "space", "first_seen", "last_seen", "ack_at")}
+                        for r in rows][:100]}
 
 
 @router.get("/diagnostics")
@@ -1162,6 +1184,8 @@ async def diagnostics():
                                 "actives": len(scheduler.reco_book.active())},
             "forward_test": {"entrees": len(scheduler.paper_book.entries)},
             "propositions_en_attente": len(PR.proposals.pending()),
+            "bot": dict(bot.status) | {"active": bot.enabled()}, "version_deployee": version.snapshot(),
+            "page_a_faire": _attention_diag(now),
             "cles_presentes": {k: bool(config.secret(k)) for k in ENV_KEYS},
             "variables_jarvis_definies": sorted(k for k in os.environ if k.startswith("JARVIS_")),
             "erreurs_recentes": list(recent_errors.items)[::-1][:20]}

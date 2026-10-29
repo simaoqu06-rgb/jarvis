@@ -47,6 +47,7 @@ paper_book = paper.PaperBook()
 confirm_state = CONFIRM.load()
 reco_book = RECO.RecoBook()  # « si j'avais suivi JARVIS » : GO confirmés et KILL envoyés, suivis tels qu'envoyés
 last_runs: dict[str, dict] = {}  # dernier passage de chaque boucle (cockpit : /api/cockpit/state et /health)
+running: dict[str, str] = {}  # passage en cours de chaque boucle (page À faire : un passage long n'est pas un blocage)
 outbox = Outbox(config.OUTBOX_PATH, discord.split_message)
 _background: set[asyncio.Task] = set()
 _lock = asyncio.Lock()  # un seul job modifie l'état à la fois
@@ -554,7 +555,26 @@ async def tick_lab(now: datetime | None = None) -> dict | None:
     return digest
 
 
-# (nom, job, période, verrou global pendant tout le job)
+ATTENTION_LOOP = "page À faire"
+
+
+async def tick_attention(now: datetime | None = None) -> None:
+    """Rubrique « À faire » du cockpit : relit l'état (aucun appel réseau) et tient à jour data/attention.json.
+    N'envoie rien sur Discord."""
+    from app.web import attention  # import tardif : la page importe le planificateur
+
+    await attention.run(now)
+
+
+async def tick_version() -> None:
+    """Version qui tourne contre `main` sur GitHub (dépôt public) : PR fusionnées pas encore déployées (page À
+    faire). Une requête toutes les 30 min, ou dès que le commit du disque change (git pull)."""
+    from app.core import version
+
+    await version.tick()
+
+
+# (nom, job, période, verrou global pendant tout le job ; None : ni verrou ni sauvegarde de l'état des alertes)
 # Toujours lancés, webhook ou pas : seul l'envoi de leurs messages dépend de enabled().
 CORE_JOBS = [
     ("suivi des trades et cockpit Discord", tick_trades, MINUTE, True),
@@ -566,6 +586,9 @@ CORE_JOBS = [
     ("challenger Gemini", tick_gemini, MINUTE, False),  # prend le verrou lui-même pour envoyer
     ("visibilité des actus Finnhub", tick_visibilite, MINUTE, False),  # mesure seule, rien n'est envoyé
     ("journal des recommandations", tick_reco, MINUTE, False),  # Papier du cockpit ; prend le verrou pour écrire
+    # Rubrique « À faire » du cockpit : lecture seule, sans le verrou (ne doit jamais attendre derrière un job bloqué)
+    (ATTENTION_LOOP, tick_attention, MINUTE, None),
+    ("version déployée", tick_version, MINUTE, None),  # GitHub (30 min) : PR fusionnées pas encore déployées
 ]
 # Seulement avec les notifications actives.
 JOBS = [
@@ -579,8 +602,10 @@ JOBS = [
 ]
 
 
-async def _run(job, locked: bool) -> None:
-    if locked:
+async def _run(job, locked: bool | None) -> None:
+    if locked is None:  # ni verrou ni état des alertes : ne peut jamais attendre derrière un job bloqué
+        await job()
+    elif locked:
         async with _lock:
             await job()
             state.save()
@@ -590,17 +615,22 @@ async def _run(job, locked: bool) -> None:
             state.save()
 
 
-async def _loop(name: str, job, every: int, locked: bool = True) -> None:
+async def _loop(name: str, job, every: int, locked: bool | None = True) -> None:
     while True:
         started = datetime.now(timezone.utc)
+        running[name] = started.isoformat(timespec="seconds")
         try:
             await _run(job, locked)
             last_runs[name] = {"at": started.isoformat(timespec="seconds"), "ok": True, "every_s": every,
-                               "duree_s": round((datetime.now(timezone.utc) - started).total_seconds(), 1)}
+                               "duree_s": round((datetime.now(timezone.utc) - started).total_seconds(), 1),
+                               "echecs_suite": 0}
         except Exception as exc:  # une alerte en échec ne doit jamais arrêter les autres
             log.exception("Notification « %s » en échec", name)
+            failed = (last_runs.get(name) or {}).get("echecs_suite", 0) + 1  # page À faire : échecs d'affilée
             last_runs[name] = {"at": started.isoformat(timespec="seconds"), "ok": False, "every_s": every,
-                               "erreur": type(exc).__name__}
+                               "duree_s": round((datetime.now(timezone.utc) - started).total_seconds(), 1),
+                               "erreur": type(exc).__name__, "echecs_suite": failed}
+        running.pop(name, None)
         await asyncio.sleep(every)
 
 
@@ -611,8 +641,9 @@ async def _bot() -> None:
             await bot.run(_lock)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             log.exception("Bot Discord déconnecté, nouvelle tentative dans 1 min")
+            bot.note_error(exc)  # page À faire : jeton refusé, connexion perdue
         await asyncio.sleep(MINUTE)
 
 

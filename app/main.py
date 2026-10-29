@@ -1037,10 +1037,11 @@ COCKPIT_HTML = Path(__file__).parent / "web" / "cockpit.html"  # l'ancien cockpi
 COCKPIT_DIR = Path(__file__).parent / "web" / "cockpit"         # le nouveau : index.html, app.css, app.js
 
 # Nouveau cockpit : contrat /api/cockpit/* (lecture et actions de la liste blanche), hors OpenAPI.
-from app.web import cockpit_actions, cockpit_api  # noqa: E402  (après les routes : les actions les appellent)
+from app.web import attention, cockpit_actions, cockpit_api  # noqa: E402  (après les routes : les actions les appellent)
 
 app.include_router(cockpit_api.router)
 app.include_router(cockpit_actions.router)
+app.include_router(attention.router)  # rubrique « À faire » (constats et « C'est fait » / « Masquer »)
 
 
 # Icônes et manifeste : le cockpit s'installe comme une appli sur l'écran d'accueil du téléphone.
