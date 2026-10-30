@@ -101,3 +101,55 @@ async def test_point_du_matin_signale_les_valeurs_anciennes(monkeypatch):
     text = await alerts.morning_brief(NOW)
     assert "fermée (week-end)" in text and "70 000.00 €" in text and "1 € = 1.1200 USD" in text
     assert "Valeurs non à jour" in text and "Données : Test" in text
+
+
+@pytest.mark.parametrize("last_event, stale, expected", [
+    ("2026-10-02T12:30:00+00:00", True, "**Agenda économique du jour** : inconnu (le dernier calendrier reçu du 01/10 "
+                                         "15:00 ne couvre pas aujourd'hui)."),
+    ("2026-10-09T12:30:00+00:00", True, "**Agenda économique du jour** : rien d'important pour les États-Unis et "
+                                         "l'Europe."),
+    ("2026-10-02T12:30:00+00:00", False, "**Agenda économique du jour** : rien d'important pour les États-Unis et "
+                                          "l'Europe."),
+])
+async def test_point_du_matin_agenda_inconnu_si_le_calendrier_garde_ne_couvre_pas_le_jour(monkeypatch, last_event,
+                                                                                          stale, expected):
+    # Helious refuse (quota du mois) : le calendrier gardé du 01/10 s'arrête le 02/10, le point du 05/10 ne sait rien
+    monkeypatch.setattr(config, "WATCHLIST_CRYPTO", [])
+    monkeypatch.setattr(config, "HOME_CITY", "")
+
+    async def status(now=None):
+        return {"is_open": True, "reason": "séance"}
+
+    async def calendar():
+        r = Result("economic_calendar", [{"datetime_utc": last_event, "title": "US: CPI", "country": "US",
+                                          "impact": "Low"}], "Helious", "Source : Helious", "2026-10-01T13:00:00+00:00")
+        r.stale = stale
+        return r
+
+    async def fx(base, symbols):
+        return result("fx_rates", {"base": "EUR", "date": "2026-10-05", "rates": {"USD": 1.12}})
+
+    monkeypatch.setattr(needs, "us_market_status", status)
+    monkeypatch.setattr(needs, "economic_calendar", calendar)
+    monkeypatch.setattr(needs, "fx_rates", fx)
+    assert expected in (await alerts.morning_brief(NOW)).splitlines()
+
+
+async def test_point_du_matin_sans_calendrier(monkeypatch):
+    monkeypatch.setattr(config, "WATCHLIST_CRYPTO", [])
+    monkeypatch.setattr(config, "HOME_CITY", "")
+
+    async def status(now=None):
+        return {"is_open": True, "reason": "séance"}
+
+    async def calendar():
+        return Result("economic_calendar", None, None, None, None, stale=True)
+
+    async def fx(base, symbols):
+        return result("fx_rates", {"base": "EUR", "date": "2026-10-05", "rates": {"USD": 1.12}})
+
+    monkeypatch.setattr(needs, "us_market_status", status)
+    monkeypatch.setattr(needs, "economic_calendar", calendar)
+    monkeypatch.setattr(needs, "fx_rates", fx)
+    text = await alerts.morning_brief(NOW)
+    assert "**Agenda économique du jour** : inconnu (aucun calendrier reçu)." in text.splitlines()

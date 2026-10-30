@@ -49,8 +49,8 @@ Chaque route renvoie le même format, quelle que soit la source :
 | Bourse NY ouverte ? | `/api/markets/us/status` | calcul local + jours de fermeture | | non | |
 | Fermetures NYSE | `/api/markets/us/holidays` | the-calendar.net | Nager.Date (fériés fédéraux, approximatif) | non | 24 h |
 | Jours fériés | `/api/holidays?country=FR` | Nager.Date | caldays | non | 24 h |
-| Calendrier économique | `/api/calendar/economic` | Helious | aucun pour l'instant | non | 1 h |
-| Actus marché | `/api/news/market` | Helious (retard 60 min) | Finnhub | Finnhub | 5 min |
+| Calendrier économique | `/api/calendar/economic` | Helious | aucun pour l'instant | facultative (`HELIOUS_API_KEY`) | 8 h avec la clé, 24 h sans (quota au mois) |
+| Actus marché | `/api/news/market` | Finnhub | aucun pour l'instant | oui | 5 min |
 | Actus par action | `/api/news/company/AAPL` | Finnhub | aucun pour l'instant | oui | 30 min |
 | Actus tech | `/api/news/tech?q=nvidia` | Hacker News (Algolia) | Hacker News (officiel) | non | 5 min |
 | Actus spatiales | `/api/news/space?q=Rocket Lab` | Spaceflight News | Launch Library 2 | non | 5 min |
@@ -614,6 +614,7 @@ existent toujours. Les tests des sources à clé sont ignorés tant que la clé 
 |---|---|---|
 | `TWELVEDATA_API_KEY` | cours des actions (principale) | https://twelvedata.com/register |
 | `FINNHUB_API_KEY` | cours en secours, actus générales et par action | https://finnhub.io/register |
+| `HELIOUS_API_KEY` (facultative) | calendrier économique : 100 appels par mois à JARVIS seul au lieu de 50 partagés par l'adresse du serveur, relu toutes les 8 h au lieu d'une fois par jour | https://helious.io/developers/#get-a-key (compte gratuit) |
 | `DISCORD_WEBHOOK_URL` | notifications sur ton salon Discord | Paramètres du salon > Intégrations > Webhooks |
 | `ALPACA_API_KEY`, `ALPACA_SECRET_KEY` | scanner et forward-test (compte fictif uniquement) | https://app.alpaca.markets |
 | `DISCORD_BOT_TOKEN`, `JARVIS_DISCORD_OWNER_ID` | commandes Discord | voir [DEPLOY.md](DEPLOY.md) |
@@ -627,7 +628,7 @@ Dès que `DISCORD_WEBHOOK_URL` est définie, le serveur envoie sur le salon :
 | Point du matin (Bourse de NY, agenda économique du jour, crypto, actions suivies, change, météo et air) | chaque jour à 9 h heure de New York, 30 min avant l'ouverture | `JARVIS_WATCHLIST_*`, `JARVIS_CITY` |
 | Variation forte d'une valeur suivie | vérifié toutes les 5 min, une alerte par palier et par sens sur 24 h glissantes (cryptos : variation sur 24 h ; actions : sur la séance, pendant la séance) | `JARVIS_MOVE_ALERT_PCT` |
 | Séisme fort dans le monde | vérifié toutes les 5 min, sans doublon si la source passe de l'USGS à l'EMSC | `JARVIS_QUAKE_MIN_MAGNITUDE` |
-| Nouvelles actus de marché et des actions suivies | vérifié toutes les 15 min, 10 au plus par envoi | `JARVIS_WATCHLIST_STOCKS` (actus par action : clé Finnhub) |
+| Nouvelles actus de marché et des actions suivies | vérifié toutes les 15 min, 10 au plus par envoi | `JARVIS_WATCHLIST_STOCKS` ; clé Finnhub (actus de marché et par action) |
 
 Chaque message porte la mention des sources et signale une valeur qui n'est plus à jour.
 Au premier lancement, les séismes et actus déjà publiés sont mémorisés sans être envoyés.

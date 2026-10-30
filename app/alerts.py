@@ -97,6 +97,13 @@ async def morning_brief(now: datetime | None = None) -> str:
             details = ", ".join(f"{label} {e[k]}" for k, label in EVENT_LABELS.items() if e.get(k))
             lines.append(f"- {_time_fr(e['datetime_utc'])} · {e['country']} · {e['title']}"
                          f"{' (impact fort)' if e['impact'] == 'High' else ''}{f' — {details}' if details else ''}")
+    elif calendar.data is None or (calendar.stale and max(
+            [(e.get("datetime_utc") or "")[:10] for e in calendar.data] or [""]) < today):
+        # calendrier gardé qui s'arrête avant aujourd'hui (Helious refuse) : inconnu, pas « rien d'important »
+        why = ("aucun calendrier reçu" if calendar.data is None else
+               f"le dernier calendrier reçu{f' du {_time_fr(calendar.updated_at)}' if calendar.updated_at else ''} "
+               "ne couvre pas aujourd'hui")
+        lines.append(f"**Agenda économique du jour** : inconnu ({why}).")
     else:
         lines.append("**Agenda économique du jour** : rien d'important pour les États-Unis et l'Europe.")
 

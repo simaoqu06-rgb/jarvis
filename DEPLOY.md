@@ -336,6 +336,16 @@ pas à pas :
    (quelques secondes après le démarrage) ; d'ici là, le bandeau et la page disent « Première vérification en cours ».
    Si la PR du moteur (#80) est déjà déployée, `data/attention.json` existe déjà : la liste s'affiche tout de suite.
 
+**Clé Helious (calendrier économique, facultative)**, à poser après la mise à jour ci-dessus : sans clé, Helious donne 50 appels par mois partagés par
+l'adresse du serveur, et JARVIS relit le calendrier une fois par jour. Avec une clé gratuite, 100 appels par mois à
+JARVIS seul, et le calendrier relu toutes les 8 h. Les actus de marché passent par Finnhub, en direct. Pour la clé :
+1. crée un compte gratuit sur https://helious.io, puis une clé d'API (page Developers, « Get a key » : elle commence
+   par `hel_`) ;
+2. `ssh root@2.31.19.106`, puis `cd /root/jarvis && nano .env` ;
+3. ajoute la ligne `HELIOUS_API_KEY=hel_…`, enregistre (Ctrl O, Entrée) et quitte (Ctrl X) ;
+4. `docker compose up -d --force-recreate` (un simple `restart` ne relit pas `.env`).
+Le constat « Calendrier économique périmé » de la rubrique À faire se ferme à la première lecture acceptée.
+
 ## Ménage automatique
 
 JARVIS vérifie le disque toutes les 30 min et prévient sur Discord au-dessus de 75 %

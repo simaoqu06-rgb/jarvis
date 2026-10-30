@@ -465,7 +465,9 @@ la vue. La page rend le Markdown de Discord (gras, `code`, blocs, citations) san
 [{"code", "label"}], "lien"}], "valeurs", "lues", "sans_cik", "erreurs", "trop_lentes", "hors_plafond", "depuis",
 "source", "note"} | {"manque"}}` ; `economique` porte aussi `couvre_jusqu_au` (dernier jour, heure de Paris, que la
 source publie).
-Sources gratuites en cache côté serveur : calendrier économique 1 h (`needs.resolve`), résultats 1 h par jour de New
+Sources gratuites en cache côté serveur : calendrier économique 8 h avec `HELIOUS_API_KEY`, 24 h sans (crédits
+Helious comptés au mois ; dernière lecture gardée sur disque, `fallback.store`, puis `needs.resolve` : les chiffres
+publiés, « réel », peuvent donc arriver jusqu'à 8 h ou 24 h après l'annonce), résultats 1 h par jour de New
 York, liste des CIK 24 h, dépôts 15 min par société, erreur retentée après 1 min ; une lecture en cours est partagée
 entre les requêtes et va au bout même si la vue n'attend plus. Les trois parties sont lues en parallèle ; les dépôts
 SEC par 4 au plus, 12 s en tout (le reste est « trop lent » et sera en cache au passage suivant). Une partie en panne
@@ -614,7 +616,8 @@ démarrage). Un JARVIS entièrement arrêté ne sert plus la page : c'est la ban
 | `errors:<module>` | problème | commun | ≥ 3 ERROR/CRITICAL du même module en 30 min (`recent_errors`, hors planificateur et page À faire) | fenêtre passée |
 | `disk` | problème ≥ `JARVIS_DISK_ALERT_PCT`, action ≥ 90 % | commun | `shutil.disk_usage` de `data/` | place libérée |
 | `source:<nom>` | problème | commun | ≥ 3 échecs d'affilée, premier échec il y a plus de 5 min, dernière tentative de moins d'1 h | un succès |
-| `limit:<nom>` | info | commun | même seuil, mais l'erreur est un HTTP 429 (limite de débit) : pas une panne, ni comptée dans `internet` ; Twelve Data a son constat `quota:twelvedata` | un appel accepté |
+| `limit:<nom>` | info | commun | même seuil, mais l'erreur est un HTTP 429 (limite par minute ou quota du mois) : pas une panne, ni comptée dans `internet` ; Twelve Data a son constat `quota:twelvedata`, Helious `calendar:helious` | un appel accepté |
+| `calendar:helious` | action (quota sans clé, 401/403 avec ou sans clé), problème (quota de la clé, panne) | commun | dernière lecture de Helious en échec **et** calendrier économique gardé (`fallback.store`, sur disque) plus vieux que sa durée de vie + 2 h (8 h avec `HELIOUS_API_KEY`, 24 h sans) ; après un redémarrage, pas d'avis tant qu'aucune lecture n'a été tentée (la santé des sources vit en mémoire) ; une réponse 200 sans `data.events` compte comme un échec ; Helious n'a pas de constat `source:` ni `limit:` | une lecture acceptée |
 | `internet` | problème | commun | ≥ 3 sources en panne ensemble (remplace leurs constats) | idem |
 | `auth:<clé>` | action | commun | HTTP 401 (≥ 2 d'affilée) d'une source à clé : Twelve Data (y compris dans une réponse 200), Finnhub, Alpaca | un succès |
 | `quota:twelvedata` | info ≥ 80 %, problème à 100 % ou après 3 refus 429 | commun | `twelvedata.credits_today()` (processus web seulement) | minuit à New York |
@@ -686,7 +689,7 @@ nommée), puis `docker compose up -d --force-recreate` (un `restart` ne relit pa
 | `exit:undeclared` : `close` sans raison déclarée | `stop` et `tp…` | un `close` ne vient que d'une clôture faite par Simão (route ou `!sortie`) : déjà déclarée |
 | `earnings:<symbole>`, `sec8k:<symbole>` | `advice:<id>` | le conseil avant la clôture (`advice.py`) dit déjà SORTIR avant des résultats, en prix ; le cache de l'agenda n'est rempli que si la vue Agenda a été ouverte, et le moteur ne doit déclencher aucun appel |
 | `reco:stalled` | `loop:stuck` / `loop:failing` du journal des recommandations (portée Papier) | même cause, même étape |
-| `source:<nom>` pour tout échec | un HTTP 429 donne `limit:<nom>` (info) | une limite de débit n'est pas une panne : vu le 29/10 sur Helious (quota sans clé partagé entre ses utilisateurs, refusé à chaque passage des actus) pendant que Finnhub servait les actus |
+| `source:<nom>` pour tout échec | un HTTP 429 donne `limit:<nom>` (info) ; Helious a `calendar:helious` | une limite d'appels n'est pas une panne. Vu le 29/10 sur Helious : sans clé, 50 appels par mois partagés par l'adresse du serveur, vidés en une demi-journée par les actus (4 par heure) pendant que Finnhub les servait. Les actus sont passées sur Finnhub seul et le calendrier relu toutes les 8 h avec la clé, 24 h sans ; ce qui compte alors n'est plus le refus mais l'âge du calendrier, seule donnée sans secours |
 | cotation périmée en Papier | non | les recommandations se lisent en bougies de 5 min : une alerte à 2 min serait du bruit |
 | titre de l'onglet `(2) Cockpit` | `(2) JARVIS · Trading Cockpit` | le titre de la page ne change pas d'une vue à l'autre ; seul le préfixe s'ajoute |
 | bouton d'action, puis le constat reste jusqu'au passage suivant | après une action réussie (approuver, refuser, veto), le constat est rangé tout de suite | la décision est prise, inutile de cliquer « C'est fait » en plus. Une proposition décidée sort de la liste d'attente : son constat se ferme au passage suivant du moteur. Après un veto, la décision du council reste un fait des 72 dernières heures : son constat reste dans « Masqués » avec « toujours constaté », sans bouton une fois le veto appliqué par le labo, et « Ton veto a été appliqué » arrive dans Pour info. Le rangement immédiat range aussi le bouton « Mettre mon veto » dans ce bloc replié en attendant le labo : chaque veto est une demande à part (`enqueue_veto`), et un second appui annulerait la décision suivante (challenger retiré ou règles refusées) |
@@ -704,7 +707,9 @@ preuve ne garde aucune clé ; commande `ssh` vers le serveur de `DEPLOY.md` (`JA
 du Labo 1, décisions du council (veto sur la dernière seulement, plus après un veto) ; boucle du suivi bloquée (action
 avec un trade ouvert), boucle qui échoue, délai de grâce qui garde les constats ; erreurs répétées hors planificateur ;
 disque ; source seule en panne, grâce de 5 min, source plus appelée, trois sources → un seul constat réseau, 429 = limite
-(info, hors constat réseau), 403 de la
+(info, hors constat réseau), calendrier économique périmé (quota sans clé, clé épuisée ou refusée, 401 sans clé, panne ;
+rien tant que le calendrier gardé est frais ; constat gardé, masqué compris, après un redémarrage ; texte selon ce que le
+calendrier gardé couvre encore), 403 de la
 SEC ou d'Alpaca ≠ clé, clé Twelve Data refusée dans une réponse 200 (sans la clé dans la page), quota, clés absentes ;
 notifications coupées, file Discord bloquée, bot déconnecté (jeton refusé) ; routines ; déploiement (en attente, docs
 seulement, pull sans reconstruction, inconnu, pas encore comparé) ; `HEAD` lu sans git (refs, packed-refs, référence
